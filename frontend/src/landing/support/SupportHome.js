@@ -65,7 +65,7 @@ const accordionData = [
     },
 ];
 
-function CreateTicket() {
+function SupportHome() {
     return (
         <div className="container my-5">
             <div className="row">
@@ -73,7 +73,7 @@ function CreateTicket() {
                 <div className="col-md-8">
                     <div className="accordion" id="supportAccordion">
                         {accordionData.map(({ id, icon, title, links }) => (
-                            <div className="accordion-item mb-2" key={id}>
+                            <div className="accordion-item mb-4" key={id}>
                                 <h2 className="accordion-header" id={`${id}-header`}>
                                     <button
                                         className="accordion-button collapsed"
@@ -84,6 +84,7 @@ function CreateTicket() {
                                         aria-controls={`collapse-${id}`}
                                     >
                                         <i class={icon}></i>
+                                        &nbsp;&nbsp;&nbsp;&nbsp;
                                         {title}
                                     </button>
                                 </h2>
@@ -131,18 +132,18 @@ function CreateTicket() {
                     {/* Quick Links */}
                     <div className="card">
                         <div className="card-header fw-bold bg-white">Quick links</div>
-                        <ul className="list-group list-group-flush">
+                        <ul className="list-group list-group-flush" >
                             <li className="list-group-item">
-                                <a href="#">1. Track account opening</a>
+                                <a href="#" style={{ textDecoration: "none" }}>1. Track account opening</a>
                             </li>
                             <li className="list-group-item">
-                                <a href="#">2. Track segment activation</a>
+                                <a href="#" style={{ textDecoration: "none" }}>2. Track segment activation</a>
                             </li>
                             <li className="list-group-item">
-                                <a href="#">3. Intraday margins</a>
+                                <a href="#" style={{ textDecoration: "none" }}>3. Intraday margins</a>
                             </li>
                             <li className="list-group-item">
-                                <a href="#">4. Kite user manual</a>
+                                <a href="#" style={{ textDecoration: "none" }}>4. Kite user manual</a>
                             </li>
                         </ul>
                     </div>
@@ -152,4 +153,4 @@ function CreateTicket() {
     );
 }
 
-export default CreateTicket;
+export default SupportHome;

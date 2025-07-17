@@ -11,3 +11,109 @@ code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
 }
+
+.nav-link {
+
+  margin-left: 30px;
+
+}
+
+/* Custom styles to match the image precisely */
+
+/* Override Bootstrap's default link color for list items */
+.list-unstyled a {
+  color: #6c757d !important;
+  /* text-muted color */
+  text-decoration: none;
+  font-size: 0.9rem;
+  /* Slightly smaller than default for list items */
+}
+
+.list-unstyled a:hover {
+  color: #495057 !important;
+  /* Darker on hover */
+  text-decoration: none;
+  /* No underline on hover as per image */
+}
+
+/* Custom class for the social icons and other general muted text */
+.text-muted-custom {
+  color: #6c757d !important;
+  /* Bootstrap's text-muted color */
+  text-decoration: none;
+}
+
+.text-muted-custom:hover {
+  color: #495057 !important;
+  /* Slightly darker on hover */
+  text-decoration: none;
+}
+
+
+/* Custom class for the legal text at the bottom to ensure consistent color and smaller size */
+.text-muted-legal {
+  color: #6c757d !important;
+  /* Or a slightly darker grey if needed to match image */
+  font-size: 0.8rem;
+  /* A common size for legal disclaimers */
+  line-height: 1.5;
+  /* For better readability of long text */
+}
+
+.small-text {
+  font-size: 0.8rem;
+  /* For very small text */
+}
+
+/* Specific blue for the links within the legal text */
+.text-blue-link {
+  color: #337ab7 !important;
+  /* A common blue for links, adjust if needed */
+  text-decoration: none;
+}
+
+.text-blue-link:hover {
+  text-decoration: underline;
+}
+
+/* Ensure headings are bold as in the image */
+h5 {
+  font-weight: bold;
+}
+
+/* Flexbox for social icons to align them */
+.social-icons a {
+  display: inline-block;
+  width: 20px;
+  /* Adjust size as needed */
+  height: 20px;
+  /* Adjust size as needed */
+  text-align: center;
+  line-height: 20px;
+  font-size: 1rem;
+  /* Adjust icon size */
+  color: #6c757d;
+  /* Match muted text color */
+}
+
+.social-icons a:hover {
+  color: #495057;
+  /* Darker on hover */
+}
+
+.btn-primary:hover {
+  background-color: black;
+  border-color: black;
+}
+
+p {
+  padding: auto;
+  font-size: 1rem;
+  line-height: 1.8;
+  margin-bottom: 1.5rem;
+}
+
+p a {
+  color: #007bff;
+  text-decoration: none;
+}
