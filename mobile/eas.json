@@ -14,13 +14,13 @@
       "distribution": "internal",
       "channel": "preview",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://YOUR-RAILWAY-APP.railway.app"
+        "EXPO_PUBLIC_API_URL": "https://zerodha-backend-production-9f84.up.railway.app"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://YOUR-RAILWAY-APP.railway.app"
+        "EXPO_PUBLIC_API_URL": "https://zerodha-backend-production-9f84.up.railway.app"
       }
     }
   },
