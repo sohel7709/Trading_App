@@ -1,220 +1,229 @@
+/* ========================================
+   BUY/SELL WINDOW — ZERODHA KITE STYLE
+   ======================================== */
+
 .container {
-    --radius: 4px;
-    width: 40%;
-    height: 63%;
-    background: rgb(245, 245, 245);
-    position: absolute;
-    bottom: 0;
-    left: 35%;
-    cursor: move;
-    box-sizing: border-box;
-    z-index: 100;
-    border-radius: var(--radius);
-    border: 1px solid rgb(238, 238, 238);
+  width: 420px;
+  max-width: 90vw;
+  background: #fff;
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  border-radius: 12px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  animation: slideUp 0.2s ease-out;
+  overflow: hidden;
 }
 
-.dragging {
+@keyframes slideUp {
+  from {
     opacity: 0;
-}
-
-.container .header {
-    width: 100%;
-    background: #4184f3;
-    box-sizing: border-box;
-    padding: 16px;
-    border-top-left-radius: var(--radius);
-    border-top-right-radius: var(--radius);
-}
-
-.header h3 {
-    color: #fff;
-    font-size: 1rem;
-    font-weight: 500;
-    margin-bottom: 6px;
-}
-
-.header h3 span {
-    font-size: 0.6rem;
-}
-
-.market-options {
-    font-weight: 300;
-    color: #fff;
-    font-size: 0.8rem;
-}
-
-.market-options label,
-.order-validity label input,
-.sub-order-type label,
-.sub-order-type label input,
-.stop-loss-type label,
-.stop-loss-type label input {
-    margin-right: 6px;
-    cursor: pointer;
-}
-
-.market-options input[type="radio"] {
-    border: 1px solid #ddd;
-    cursor: pointer;
-    padding: 2px;
-    margin-right: 6px;
-}
-
-.tab {
-    width: 100%;
-    box-sizing: border-box;
-    background-color: #f9f9f9;
-    border-bottom: 2px solid rgba(180, 180, 180, 0.6);
-}
-
-.tab button {
-    border: none;
-    padding: 14px 16px;
-    background: transparent;
-    color: #4184f3;
-    font-weight: 400;
-    font-size: 0.8rem;
-    cursor: pointer;
+    transform: translateX(-50%) translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }
 
 .regular-order {
-    padding: 16px 26px;
-    background-color: #fff;
-    padding-bottom: 30px;
+  padding: 20px 24px;
+  background: #fff;
 }
 
-.regular-order label {
-    font-size: 0.8rem;
-    cursor: pointer;
+.search-stock {
+  position: relative;
+  margin-bottom: 12px;
 }
 
-.order-validity {
-    width: 70%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+.search-stock fieldset {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 0;
 }
 
-.order-validity label span {
-    color: rgb(190, 190, 190);
+.search-stock fieldset legend {
+  margin-left: 12px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: #888;
+  padding: 0 4px;
+}
+
+.search-stock fieldset input {
+  width: 100%;
+  border: none;
+  padding: 10px 12px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #333;
+  border-radius: 6px;
+  outline: none;
+  background: #fafafa;
+  transition: all 0.15s;
+}
+
+.search-stock fieldset input:focus {
+  background: #fff;
+  border-color: #4184f3;
+}
+
+.search-results {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 10;
+  list-style: none;
+  margin: 4px 0 0 0;
+  padding: 0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.search-results li {
+  padding: 10px 14px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #f5f5f5;
+  transition: background 0.1s;
+}
+
+.search-results li:last-child {
+  border-bottom: none;
+}
+
+.search-results li:hover {
+  background: #f0f4ff;
+}
+
+.search-results li .symbol {
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: #333;
+}
+
+.search-results li .name {
+  font-size: 0.72rem;
+  color: #888;
 }
 
 .inputs {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: 16px;
-    margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .inputs fieldset {
-    max-width: 120px;
-    box-sizing: border-box;
-    border: 0.7px solid #ddd;
-    margin-right: 8px;
+  flex: 1;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 0;
+  min-width: 0;
 }
 
 .inputs fieldset legend {
-    margin-left: 10px;
-    font-size: 0.8rem;
-    padding: 0 4px;
+  margin-left: 12px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: #888;
+  padding: 0 4px;
 }
 
-.inputs fieldset:last-of-type legend {
-    color: #ddd;
+.inputs fieldset input,
+.inputs fieldset select {
+  width: 100%;
+  border: none;
+  padding: 10px 12px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #333;
+  border-radius: 6px;
+  outline: none;
+  background: #fafafa;
+  transition: all 0.15s;
 }
 
-.inputs fieldset input {
-    border: none;
-    margin-right: 8px;
-    max-width: 130px;
-    min-height: 35px;
-    padding: 0 12px;
-    box-sizing: border-box;
-    font-size: 1.1rem;
+.inputs fieldset input:focus {
+  background: #fff;
+  border-color: #4184f3;
 }
 
-.options {
-    width: 100%;
-    box-sizing: border-box;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-
-.options span {
-    color: #4184f3;
-    font-size: 0.8rem;
-    cursor: pointer;
+.inputs fieldset select {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
 }
 
 .buttons {
-    width: 100%;
-    box-sizing: border-box;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    position: relative;
-    top: 10%;
-    padding: 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  background: #fafafa;
+  border-top: 1px solid #f0f0f0;
 }
 
 .buttons span {
-    font-size: 0.8rem;
+  font-size: 0.78rem;
+  color: #888;
+  font-weight: 500;
+}
+
+.buttons div {
+  display: flex;
+  gap: 8px;
 }
 
 .btn {
-    text-decoration: none;
-    padding: 10px 20px;
-    border-radius: 2px;
-    color: #fff;
-    margin-right: 2px;
-    margin-left: 2px;
-}
-
-.btn-grey {
-    background: #d4d4d4;
-    color: #666666;
+  text-decoration: none;
+  padding: 9px 24px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  display: inline-block;
+  transition: all 0.15s;
+  text-align: center;
 }
 
 .btn-blue {
-    background: #4184f3;
-}
-
-/* sudo selectors */
-.tab button::after {
-    content: "";
-    width: 100%;
-    height: 3px;
-    display: none;
-    margin-top: 10px;
-    background-color: #4184f3;
-}
-
-.inputs fieldset:focus {
-    outline: none;
-    border: 0.7px solid rgb(49, 49, 49);
-    border-radius: 2px;
-}
-
-.inputs fieldset input:focus {
-    outline: none;
-}
-
-.inputs fieldset input:focus {
-    outline: none;
-}
-
-.inputs fieldset input:disabled {
-    cursor: not-allowed;
-    background-color: transparent;
+  background: #4184f3;
+  color: #fff;
 }
 
 .btn-blue:hover {
-    background: #74a7fa;
+  background: #2b6fdb;
+}
+
+.btn-red {
+  background: #eb5b3c;
+  color: #fff;
+}
+
+.btn-red:hover {
+  background: #d94a2d;
+}
+
+.btn-grey {
+  background: #e8e8e8;
+  color: #666;
 }
 
 .btn-grey:hover {
-    background: #9b9b9b;
-    color: #fff;
+  background: #d0d0d0;
+  color: #444;
 }

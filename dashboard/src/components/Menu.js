@@ -47,8 +47,58 @@ const Menu = () => {
             </Link>
           </li>
           <li>
-            <Link to="/apps" onClick={() => handleMenuClick(5)} style={{ textDecoration: "none" }} >
-              <p className={selectedMenu === 5 ? activeMenuClass : menuClass}>Apps</p>
+            <Link to="/movers" onClick={() => handleMenuClick(5)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 5 ? activeMenuClass : menuClass}>Market</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/trades" onClick={() => handleMenuClick(6)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 6 ? activeMenuClass : menuClass}>Trades</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/pl" onClick={() => handleMenuClick(7)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 7 ? activeMenuClass : menuClass}>P&L</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/tax-pnl" onClick={() => handleMenuClick(75)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 75 ? activeMenuClass : menuClass}>Tax P&L</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/index-charts" onClick={() => handleMenuClick(76)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 76 ? activeMenuClass : menuClass}>Indices</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/alerts" onClick={() => handleMenuClick(8)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 8 ? activeMenuClass : menuClass}>Alerts</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/admin" onClick={() => handleMenuClick(9)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 9 ? activeMenuClass : menuClass}>Admin</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/tradingview" onClick={() => handleMenuClick(10)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 10 ? activeMenuClass : menuClass}>TV Chart</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/history" onClick={() => handleMenuClick(11)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 11 ? activeMenuClass : menuClass}>History</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/chat" onClick={() => handleMenuClick(12)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 12 ? activeMenuClass : menuClass}>Chat</p>
+            </Link>
+          </li>
+          <li>
+            <Link to="/apps" onClick={() => handleMenuClick(13)} style={{ textDecoration: "none" }} >
+              <p className={selectedMenu === 13 ? activeMenuClass : menuClass}>Apps</p>
             </Link>
           </li>
         </ul>

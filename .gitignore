@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Env / secrets
+.env
+.env.local
+**/.env
+!**/.env.example
+
+# Builds
+build/
+dist/
+.expo/
+**/.expo/
+
+# Agent / local tooling
+.claude/
+.gstack/
+
+# OS / logs
+.DS_Store
+*.log
+npm-debug.log*

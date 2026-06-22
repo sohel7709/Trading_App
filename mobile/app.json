@@ -1,0 +1,77 @@
+{
+  "expo": {
+    "name": "Zerodha Kite",
+    "slug": "zerodha-kite",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/Icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#387ED1"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.zerodha.kite",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow Zerodha Kite to use the camera to scan KYC documents and capture your profile photo.",
+        "NSPhotoLibraryUsageDescription": "Allow Zerodha Kite to access your photos to upload KYC documents and your profile photo.",
+        "NSPhotoLibraryAddUsageDescription": "Allow Zerodha Kite to save downloaded statements and reports to your photo library."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#387ED1"
+      },
+      "package": "com.zerodha.kite",
+      "versionCode": 1,
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "CAMERA",
+        "READ_MEDIA_IMAGES",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "POST_NOTIFICATIONS",
+        "RECEIVE_SMS"
+      ],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_MEDIA_VIDEO"
+      ]
+    },
+    "sdkVersion": "54.0.0",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Zerodha Kite to use the camera to scan KYC documents and capture your profile photo."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Zerodha Kite to access your photos to upload KYC documents and your profile photo."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow Zerodha Kite to access your media to upload and save statements.",
+          "savePhotosPermission": "Allow Zerodha Kite to save downloaded statements and reports.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ],
+      "expo-notifications"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": ""
+      }
+    }
+  }
+}
