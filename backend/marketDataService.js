@@ -13,6 +13,7 @@ const NSE_STOCK_SYMBOLS = [
     'SBILIFE', 'BPCL', 'BAJAJFINSV', 'TATAPOWER', 'KPITTECH',
     'COALINDIA', 'EICHERMOT', 'BRITANNIA', 'HEROMOTOCO', 'HINDALCO',
     'APOLLOHOSP', 'INDUSINDBK', 'SHREECEM', 'M&M', 'BAJAJ-AUTO',
+    'UPL', 'AWL', 'BANDHANBNK', 'NYKAA', 'IEX', 'LTIM',
 ];
 
 // Yahoo Finance format (fallback only)
@@ -62,38 +63,38 @@ async function fetchQuote(symbol) {
 
 // Simulated base prices for NSE stocks (approximate real values)
 const SIMULATED_PRICES = {
-    'RELIANCE': { ltp: 2534.50, prevClose: 2520.00 },
-    'TCS': { ltp: 3890.15, prevClose: 3875.00 },
+    'RELIANCE': { ltp: 1317.00, prevClose: 1312.00 },   // live Jun-2026
+    'TCS': { ltp: 3194.00, prevClose: 3185.00 },
     'HDFCBANK': { ltp: 1522.35, prevClose: 1530.00 },
     'INFY': { ltp: 1555.45, prevClose: 1570.00 },
     'ICICIBANK': { ltp: 1280.60, prevClose: 1275.00 },
-    'HINDUNILVR': { ltp: 2417.40, prevClose: 2420.00 },
-    'KOTAKBANK': { ltp: 1780.25, prevClose: 1775.00 },
-    'SBIN': { ltp: 430.20, prevClose: 425.00 },
+    'HINDUNILVR': { ltp: 2177.00, prevClose: 2170.00 },  // live Jun-2026
+    'KOTAKBANK': { ltp: 1700.00, prevClose: 1695.00 },
+    'SBIN': { ltp: 430.20, prevClose: 425.00, high52w: 912.00, low52w: 400.00, volume: 5200000 },
     'BHARTIARTL': { ltp: 541.15, prevClose: 538.00 },
     'ITC': { ltp: 207.90, prevClose: 205.00 },
     'LT': { ltp: 3654.30, prevClose: 3640.00 },
-    'WIPRO': { ltp: 577.75, prevClose: 575.00 },
+    'WIPRO': { ltp: 175.00, prevClose: 174.00, high52w: 273.10, low52w: 171.49, volume: 21544904 },
     'AXISBANK': { ltp: 1150.80, prevClose: 1145.00 },
     'SUNPHARMA': { ltp: 1870.55, prevClose: 1865.00 },
     'M&M': { ltp: 779.80, prevClose: 785.00 },
     'TITAN': { ltp: 3450.20, prevClose: 3445.00 },
-    'ADANIENT': { ltp: 2840.60, prevClose: 2850.00 },
-    'ADANIPORTS': { ltp: 1350.40, prevClose: 1340.00 },
-    'NTPC': { ltp: 245.30, prevClose: 243.00 },
-    'MARUTI': { ltp: 9750.50, prevClose: 9720.00 },
-    'POWERGRID': { ltp: 315.20, prevClose: 312.00 },
-    'TATAMOTORS': { ltp: 985.70, prevClose: 990.00 },
-    'HCLTECH': { ltp: 1450.35, prevClose: 1445.00 },
-    'TATASTEEL': { ltp: 142.60, prevClose: 140.00 },
+    'ADANIENT': { ltp: 3040.00, prevClose: 3025.00 },    // live Jun-2026
+    'ADANIPORTS': { ltp: 1795.00, prevClose: 1788.00 },  // live Jun-2026
+    'NTPC': { ltp: 381.00, prevClose: 379.00 },           // live Jun-2026
+    'MARUTI': { ltp: 12000.00, prevClose: 11950.00 },     // live Jun-2026
+    'POWERGRID': { ltp: 310.00, prevClose: 308.00 },
+    'TATAMOTORS': { ltp: 358.00, prevClose: 360.00, high52w: 447.79, low52w: 294.30, volume: 3100000 },
+    'HCLTECH': { ltp: 1101.00, prevClose: 1095.00, high52w: 1780.10, low52w: 1089.50, volume: 820000 },
+    'TATASTEEL': { ltp: 189.00, prevClose: 187.00 },      // live Jun-2026
     'ULTRACEMCO': { ltp: 11250.80, prevClose: 11230.00 },
     'ASIANPAINT': { ltp: 3240.15, prevClose: 3235.00 },
     'BAJFINANCE': { ltp: 7120.50, prevClose: 7100.00 },
-    'NESTLEIND': { ltp: 2840.30, prevClose: 2835.00 },
-    'ONGC': { ltp: 116.80, prevClose: 117.00 },
+    'NESTLEIND': { ltp: 1402.60, prevClose: 1400.00, high52w: 1498.10, low52w: 1084.70, volume: 155000 },
+    'ONGC': { ltp: 233.15, prevClose: 234.00, high52w: 307.50, low52w: 228.61, volume: 5100000 },
     'JSWSTEEL': { ltp: 985.40, prevClose: 982.00 },
-    'TECHM': { ltp: 1350.25, prevClose: 1345.00 },
-    'DIVISLAB': { ltp: 5780.60, prevClose: 5770.00 },
+    'TECHM': { ltp: 1440.00, prevClose: 1430.00 },       // live Jun-2026
+    'DIVISLAB': { ltp: 3500.00, prevClose: 3495.00 },
     'CIPLA': { ltp: 1580.35, prevClose: 1575.00 },
     'DRREDDY': { ltp: 6350.80, prevClose: 6340.00 },
     'GRASIM': { ltp: 2480.45, prevClose: 2475.00 },
@@ -102,16 +103,38 @@ const SIMULATED_PRICES = {
     'BPCL': { ltp: 345.60, prevClose: 343.00 },
     'BAJAJFINSV': { ltp: 1680.50, prevClose: 1675.00 },
     'TATAPOWER': { ltp: 124.15, prevClose: 122.00 },
-    'KPITTECH': { ltp: 266.45, prevClose: 255.00 },
-    'COALINDIA': { ltp: 245.80, prevClose: 243.00 },
+    'KPITTECH': { ltp: 738.00, prevClose: 732.00, high52w: 2058.00, low52w: 300.10, volume: 510000 },
+    'COALINDIA': { ltp: 436.00, prevClose: 433.00, high52w: 491.25, low52w: 368.65, volume: 3000000 },
     'EICHERMOT': { ltp: 3850.35, prevClose: 3840.00 },
     'BRITANNIA': { ltp: 5420.60, prevClose: 5410.00 },
     'HEROMOTOCO': { ltp: 4150.25, prevClose: 4140.00 },
     'HINDALCO': { ltp: 635.40, prevClose: 632.00 },
     'APOLLOHOSP': { ltp: 6750.80, prevClose: 6740.00 },
-    'INDUSINDBK': { ltp: 1120.35, prevClose: 1115.00 },
+    'INDUSINDBK': { ltp: 917.00, prevClose: 912.00, high52w: 968.85, low52w: 710.60, volume: 1250000 },
     'BAJAJ-AUTO': { ltp: 5240.50, prevClose: 5230.00 },
     'SHREECEM': { ltp: 2580.40, prevClose: 2575.00 },
+    'UPL': { ltp: 590.50, prevClose: 588.00 },
+    'AWL': { ltp: 350.00, prevClose: 348.00 },
+    'BANDHANBNK': { ltp: 201.76, prevClose: 200.00 },
+    'NYKAA': { ltp: 301.35, prevClose: 299.00 },
+    'IEX': { ltp: 140.00, prevClose: 139.00 },
+    'LTIM': { ltp: 5000.00, prevClose: 4990.00 },
+
+    // ── Holdings stocks added for full 52W data on StockDetailScreen ──────────
+    'TATAELXSI':  { ltp: 4028.30, prevClose: 4020.00, high52w: 6439.50, low52w: 3926.10, volume: 105000 },
+    'IRFC':       { ltp:   91.77, prevClose:   92.00, high52w:  143.15, low52w:   87.00, volume: 2100000 },
+    'RVNL':       { ltp:  240.85, prevClose:  241.00, high52w:  405.50, low52w:  221.55, volume: 1600000 },
+    'ADANIPOWER': { ltp:  229.27, prevClose:  230.00, high52w:  254.20, low52w:  109.75, volume: 2000000 },
+    'COCHINSHIP': { ltp: 1458.40, prevClose: 1460.00, high52w: 2186.00, low52w: 1187.00, volume: 310000 },
+    'MAZDOCK':    { ltp: 2472.50, prevClose: 2475.00, high52w: 3369.00, low52w: 2057.40, volume: 205000 },
+    'ADANIGREEN': { ltp: 1526.10, prevClose: 1525.00, high52w: 1557.00, low52w:  765.00, volume: 510000 },
+    'GODREJPROP': { ltp: 1850.10, prevClose: 1852.00, high52w: 2420.00, low52w: 1434.00, volume: 410000 },
+    'IREDA':      { ltp:  127.01, prevClose:  128.00, high52w:  310.00, low52w:  109.00, volume: 3100000 },
+    'SUZLON':     { ltp:   57.01, prevClose:   57.50, high52w:   86.00, low52w:   38.19, volume: 10200000 },
+    'DIXON':      { ltp: 12030.00, prevClose: 12050.00, high52w: 18471.00, low52w: 9600.00, volume: 52000 },
+    'DELHIVERY':  { ltp:  464.90, prevClose:  466.00, high52w:  491.70, low52w:  374.45, volume: 810000 },
+    'MPHASIS':    { ltp: 2264.90, prevClose: 2265.00, high52w: 3037.20, low52w: 2013.00, volume: 205000 },
+    'HINDUNILVR': { ltp: 2177.00, prevClose: 2178.00, high52w: 2705.09, low52w: 2022.50, volume: 615000 },
 };
 
 function generateSimulatedPrice(basePrice) {
@@ -130,12 +153,14 @@ function simulateStockPrices() {
             symbol,
             ltp,
             open,
-            high: Math.max(ltp, open) + Math.random() * 10,
-            low: Math.min(ltp, open) - Math.random() * 10,
+            high: Math.max(ltp, open) + Math.random() * (ltp * 0.005),
+            low: Math.min(ltp, open) - Math.random() * (ltp * 0.005),
             previousClose: data.prevClose,
-            volume: Math.floor(Math.random() * 1000000) + 100000,
+            volume: data.volume || (Math.floor(Math.random() * 1000000) + 100000),
             change: Math.round(change * 100) / 100,
             changePercent: Math.round(changePercent * 100) / 100,
+            high52w: data.high52w || Math.round(data.ltp * 1.35 * 100) / 100,
+            low52w:  data.low52w  || Math.round(data.ltp * 0.72 * 100) / 100,
             currency: 'INR',
             isSimulated: true,
         };
@@ -394,6 +419,11 @@ function generateOptionChainForIndex(indexName, expiry) {
         lastUpdated: new Date().toISOString(),
     };
 }
+
+// Seed simulated prices immediately at module load so all SIMULATED_PRICES
+// stocks are always available even before the first Groww fetch completes.
+// Live data from Groww/Yahoo will overwrite these for the stocks it covers.
+simulateStockPrices();
 
 module.exports = {
     fetchAllStockPrices,

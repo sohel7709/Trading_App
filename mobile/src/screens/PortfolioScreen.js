@@ -85,6 +85,19 @@ export default function PortfolioScreen({ navigation }) {
         const p = data.prices[h.stockSymbol];
         return p ? { ...h, ltp: p.ltp ?? h.ltp } : h;
       }));
+      // Live mark-to-market for open day positions: re-price the net open
+      // quantity and recompute total P&L = realized + unrealized.
+      setDayPos(prev => prev.map(pos => {
+        const p = data.prices[pos.stockSymbol];
+        if (!p || p.ltp == null || pos.isSquaredOff) return pos;
+        const ltp   = p.ltp;
+        const netQty = pos.netQty ?? 0;
+        let unrealized = 0;
+        if (netQty > 0)      unrealized = (ltp - pos.avgPrice) * netQty;
+        else if (netQty < 0) unrealized = (pos.sellAvg - ltp) * (-netQty);
+        const realized = pos.realizedPnl ?? 0;
+        return { ...pos, ltp, unrealizedPnl: unrealized, pnl: realized + unrealized };
+      }));
     };
     socket.on('orderExecuted', onOrderExecuted);
     socket.on('marketData', onMarketData);
@@ -100,6 +113,11 @@ export default function PortfolioScreen({ navigation }) {
   const hPnl      = current - invested;
   const hPnlGain  = hPnl >= 0;
   const hPnlPct   = invested > 0 ? (hPnl / invested) * 100 : 0;
+
+  // Positions Total P&L — derived so live (socket) re-pricing keeps it fresh.
+  const totalDayPnl = dayPositions.length
+    ? dayPositions.reduce((s, p) => s + (p.pnl ?? 0), 0)
+    : dayPnl;
 
   // Split number into whole + decimal for kite-pnl.png style
   const splitNum = (n) => {
@@ -209,6 +227,21 @@ export default function PortfolioScreen({ navigation }) {
             {fmt2(item.ltp)}
           </Text>
         </View>
+
+        {/* Realized vs unrealized breakdown for open positions */}
+        {!isClosed && (item.unrealizedPnl != null) && (
+          <View style={styles.pnlBreakdown}>
+            <Text style={styles.breakdownTxt}>
+              Realised <Text style={styles.breakdownVal}>{fmt2(item.realizedPnl ?? 0)}</Text>
+            </Text>
+            <Text style={styles.breakdownTxt}>
+              Unrealised{' '}
+              <Text style={[styles.breakdownVal, { color: (item.unrealizedPnl ?? 0) >= 0 ? colors.gain : colors.loss }]}>
+                {(item.unrealizedPnl ?? 0) >= 0 ? '+' : ''}{fmt2(item.unrealizedPnl ?? 0)}
+              </Text>
+            </Text>
+          </View>
+        )}
 
         {/* Squared-off chip */}
         {item.isSquaredOff && (
@@ -346,9 +379,9 @@ export default function PortfolioScreen({ navigation }) {
               /* ── Positions: single "Total P&L" card ── */
               <View style={styles.posPnlCard}>
                 <Text style={styles.posPnlLabel}>Total P&L</Text>
-                <Text style={[styles.posPnlVal, { color: dayPnl >= 0 ? colors.gain : colors.loss }]}>
-                  {dayPnl >= 0 ? '+' : ''}
-                  {dayPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                <Text style={[styles.posPnlVal, { color: totalDayPnl >= 0 ? colors.gain : colors.loss }]}>
+                  {totalDayPnl >= 0 ? '+' : ''}
+                  {totalDayPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </Text>
               </View>
             )}
@@ -517,6 +550,13 @@ const styles = StyleSheet.create({
     borderRadius: 4, borderWidth: 1, borderColor: '#D1D5DB',
   },
   btnExitTxt: { fontSize: 13, color: '#1E1E1E', fontWeight: '600' },
+
+  // Realized / unrealized breakdown (open day positions)
+  pnlBreakdown: {
+    flexDirection: 'row', justifyContent: 'flex-end', gap: 16, marginTop: 6,
+  },
+  breakdownTxt: { fontSize: 11, color: '#9CA3AF' },
+  breakdownVal: { color: '#1E1E1E', fontWeight: '500' },
 
   // Squared-off chip (shown on day positions that are closed)
   squaredOffChip: {
