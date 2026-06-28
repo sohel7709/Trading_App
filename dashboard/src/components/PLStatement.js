@@ -37,6 +37,154 @@ const fmtNum = (v) =>
 
 const plColor = (v) => (parseFloat(v) >= 0 ? "#00b386" : "#eb5b3c");
 
+/* ─── Monthly breakdown table ─────────────────────────────────── */
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function MonthlyBreakdownTable({ months, totals, initialBalance }) {
+  if (!months || months.length === 0) return (
+    <div style={{ padding: "24px 16px", textAlign: "center", color: "#aaa", fontSize: 13 }}>
+      No monthly data available for the selected period.
+    </div>
+  );
+
+  const overallReturn = initialBalance > 0
+    ? parseFloat(((totals.totalNetPL / initialBalance) * 100).toFixed(2))
+    : 0;
+
+  return (
+    <div style={{ padding: "0 16px 16px" }}>
+      {/* Summary strip */}
+      <div style={{
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+        gap: 8, marginBottom: 12,
+      }}>
+        {[
+          ["Net P&L", totals.totalNetPL],
+          ["Charges", -totals.totalCharges],
+          ["Gross P&L", totals.totalRealizedPL],
+        ].map(([label, val]) => (
+          <div key={label} style={{ background: "#f9f9f9", borderRadius: 8, padding: "10px 12px" }}>
+            <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>{label}</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: parseFloat(val) >= 0 ? "#00b386" : "#eb5b3c" }}>
+              {parseFloat(val) >= 0 ? "+" : ""}₹{fmtAmt(Math.abs(val))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Trades + return strip */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        <div style={{ flex: 1, background: "#f9f9f9", borderRadius: 8, padding: "10px 12px" }}>
+          <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>Total Trades</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1a1a1a" }}>{totals.totalTrades.toLocaleString("en-IN")}</div>
+        </div>
+        <div style={{ flex: 1, background: "#f9f9f9", borderRadius: 8, padding: "10px 12px" }}>
+          <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>Overall Return</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: overallReturn >= 0 ? "#00b386" : "#eb5b3c" }}>
+            {overallReturn >= 0 ? "+" : ""}{overallReturn}%
+          </div>
+        </div>
+        <div style={{ flex: 1, background: "#f9f9f9", borderRadius: 8, padding: "10px 12px" }}>
+          <div style={{ fontSize: 11, color: "#999", marginBottom: 3 }}>Turnover</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1a1a1a" }}>₹{fmtAmt(totals.totalTurnover)}</div>
+        </div>
+      </div>
+
+      {/* Month rows */}
+      {months.map((m, idx) => {
+        const [y, mo] = m.month.split("-");
+        const monthLabel = `${MONTH_NAMES[parseInt(mo, 10) - 1]} '${y.slice(2)}`;
+        const isProfit = m.netPL >= 0;
+        const winPct = m.tradeCount > 0 ? Math.round((m.winTrades / m.tradeCount) * 100) : 0;
+
+        return (
+          <div key={m.month} style={{
+            background: "#fff",
+            border: "1px solid #ebebeb",
+            borderRadius: 10,
+            marginBottom: 8,
+            overflow: "hidden",
+          }}>
+            {/* Month header */}
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "10px 14px",
+              borderLeft: `3px solid ${isProfit ? "#00b386" : "#eb5b3c"}`,
+              background: isProfit ? "rgba(0,179,134,0.04)" : "rgba(235,91,60,0.04)",
+            }}>
+              <div>
+                <span style={{ fontSize: 14, fontWeight: 700, color: "#1a1a1a" }}>{monthLabel}</span>
+                <span style={{ fontSize: 12, color: "#aaa", marginLeft: 8 }}>
+                  {m.tradeCount} trade{m.tradeCount !== 1 ? "s" : ""}
+                  {m.tradeCount > 0 && ` · ${winPct}% win rate`}
+                </span>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: isProfit ? "#00b386" : "#eb5b3c" }}>
+                  {isProfit ? "+" : ""}₹{fmtAmt(Math.abs(m.netPL))}
+                </div>
+                <div style={{ fontSize: 11, color: "#aaa" }}>Net P&L</div>
+              </div>
+            </div>
+
+            {/* Detail grid */}
+            <div style={{
+              display: "grid", gridTemplateColumns: "1fr 1fr",
+              gap: "1px", background: "#f0f0f0",
+            }}>
+              {[
+                ["Opening Balance", m.openingBalance, false],
+                ["Closing Balance", m.closingBalance, false],
+                ["Gross P&L", m.realizedPL, true],
+                ["Charges & Taxes", m.charges, false],
+                ["Turnover", m.turnover, false],
+                ["W / L trades", `${m.winTrades} / ${m.lossTrades}`, false],
+              ].map(([label, val, colored]) => (
+                <div key={label} style={{ background: "#fff", padding: "9px 14px" }}>
+                  <div style={{ fontSize: 11, color: "#aaa", marginBottom: 2 }}>{label}</div>
+                  <div style={{
+                    fontSize: 13, fontWeight: 600,
+                    color: colored
+                      ? (parseFloat(val) >= 0 ? "#00b386" : "#eb5b3c")
+                      : "#333",
+                  }}>
+                    {typeof val === "number"
+                      ? `${colored && val >= 0 ? "+" : ""}₹${fmtAmt(Math.abs(val))}`
+                      : val}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Totals row */}
+      <div style={{
+        background: "#1a1a1a", borderRadius: 10, padding: "14px 16px",
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 4,
+      }}>
+        {[
+          ["Total Net P&L", totals.totalNetPL],
+          ["Total Charges", totals.totalCharges],
+          ["Total Gross P&L", totals.totalRealizedPL],
+        ].map(([label, val]) => (
+          <div key={label}>
+            <div style={{ fontSize: 10, color: "#888", marginBottom: 3 }}>{label}</div>
+            <div style={{
+              fontSize: 13, fontWeight: 700,
+              color: label === "Total Charges" ? "#fff" : (parseFloat(val) >= 0 ? "#00b386" : "#eb5b3c"),
+            }}>
+              {label !== "Total Charges" && parseFloat(val) >= 0 ? "+" : ""}
+              ₹{fmtAmt(Math.abs(val))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ─── Monthly chart ───────────────────────────────────────────── */
 function computeMonthlyData(trades, fromDate, toDate) {
   const map = {};
@@ -260,6 +408,10 @@ const PLStatement = () => {
   const [page,       setPage]       = useState(1);
   const PAGE_SIZE = 20;
 
+  const [view,            setView]            = useState("trades"); // "trades" | "monthly"
+  const [monthlyBreakdown,setMonthlyBreakdown]= useState(null);
+  const [monthlyLoading,  setMonthlyLoading]  = useState(false);
+
   const fetchPnl = useCallback(async (seg, from, to) => {
     setLoading(true); setError(null);
     try {
@@ -281,8 +433,24 @@ const PLStatement = () => {
     }
   }, []);
 
+  const fetchMonthlyBreakdown = useCallback(async (seg, from, to) => {
+    setMonthlyLoading(true);
+    try {
+      const params = new URLSearchParams({ segment: seg, from, to });
+      const res = await axios.get(`${API_URL}/pnl/monthly-breakdown?${params}`);
+      setMonthlyBreakdown(res.data);
+    } catch {
+      setMonthlyBreakdown(null);
+    } finally {
+      setMonthlyLoading(false);
+    }
+  }, []);
+
   // Auto-load current FY on mount
-  useEffect(() => { fetchPnl("combined", defaultFrom, defaultTo); }, []); // eslint-disable-line
+  useEffect(() => {
+    fetchPnl("combined", defaultFrom, defaultTo);
+    fetchMonthlyBreakdown("combined", defaultFrom, defaultTo);
+  }, []); // eslint-disable-line
 
   const handleApplyFilter = (seg, from, to, sym) => {
     setSegment(seg);
@@ -291,6 +459,7 @@ const PLStatement = () => {
     setSymFilter(sym);
     setShowFilter(false);
     fetchPnl(seg, from, to);
+    fetchMonthlyBreakdown(seg, from, to);
   };
 
   const handleReset = () => {
@@ -301,6 +470,7 @@ const PLStatement = () => {
     setDayDate("");
     setShowFilter(false);
     fetchPnl("combined", defaultFrom, defaultTo);
+    fetchMonthlyBreakdown("combined", defaultFrom, defaultTo);
   };
 
   // Charges breakdown — real per-component charges from the trade sheet
@@ -573,54 +743,93 @@ const PLStatement = () => {
           {/* Monthly chart */}
           {monthlyData.some(d => d.pnl !== 0) && <MonthlyChart data={monthlyData} />}
 
-          {/* Meta row */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 16px 8px", flexWrap: "wrap", gap: 4 }}>
-            <div>
-              <div style={{ fontSize: 12, color: "#999" }}>
-                <span style={{ marginRight: 4 }}>⏱</span>
-                Last updated: {pnlData?.lastUpdated?.slice?.(0, 10) || today()}
-              </div>
-              <div style={{ fontSize: 12, color: "#999", marginTop: 2 }}>
-                <span style={{ marginRight: 4 }}>📎</span>
-                Page {page}/{totalPages || 1}
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 16 }}>
-              <button onClick={exportCSV}
-                style={{ background: "none", border: "none", color: KITE_BLUE, fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
-                <span>⬇</span> Download
+          {/* View toggle — Trade List / Monthly Breakdown */}
+          <div style={{ display: "flex", margin: "8px 16px 0", background: "#f5f5f5", borderRadius: 24, padding: 3 }}>
+            {[["trades", "Trade History"], ["monthly", "Monthly Breakdown"]].map(([key, label]) => (
+              <button key={key} onClick={() => setView(key)}
+                style={{
+                  flex: 1, padding: "8px 0", border: "none", borderRadius: 20, cursor: "pointer", fontSize: 13, fontWeight: 600,
+                  background: view === key ? "#fff" : "transparent",
+                  color: view === key ? KITE_BLUE : "#888",
+                  boxShadow: view === key ? "0 1px 4px rgba(0,0,0,0.10)" : "none",
+                  transition: "all 0.15s",
+                }}>
+                {label}
               </button>
-              <button onClick={() => setShowFilter(true)}
-                style={{ background: "none", border: "none", color: KITE_BLUE, fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
-                <span>↕</span> Sort
-              </button>
-            </div>
+            ))}
           </div>
 
-          <div style={{ height: 1, background: "#ebebeb", margin: "0 16px" }} />
-
-          {/* Trade list */}
-          {trades.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "48px 24px", color: "#aaa", fontSize: 13 }}>
-              No trades found for the selected period.
+          {/* ── Monthly Breakdown view ─────────────────────────── */}
+          {view === "monthly" && (
+            <div style={{ marginTop: 12 }}>
+              {monthlyLoading ? (
+                <div style={{ textAlign: "center", padding: "40px", color: "#aaa", fontSize: 13 }}>
+                  <div style={{ width: 28, height: 28, border: "3px solid #e5e7eb", borderTop: `3px solid ${KITE_BLUE}`, borderRadius: "50%", animation: "spin 0.8s linear infinite", margin: "0 auto 10px" }} />
+                  Loading monthly data…
+                </div>
+              ) : (
+                <MonthlyBreakdownTable
+                  months={monthlyBreakdown?.months || []}
+                  totals={monthlyBreakdown?.totals || { totalNetPL: 0, totalCharges: 0, totalRealizedPL: 0, totalTrades: 0, totalTurnover: 0 }}
+                  initialBalance={monthlyBreakdown?.initialBalance || 34000000}
+                />
+              )}
             </div>
-          ) : (
-            <>
-              {pagedTrades.map((t, i) => <TradeItem key={`${t.stockSymbol}-${i}`} trade={t} />)}
+          )}
 
-              {/* Pagination */}
-              {totalPages > 1 && (
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px", borderTop: "1px solid #f0f0f0" }}>
-                  <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1}
-                    style={{ padding: "8px 18px", border: `1px solid ${page <= 1 ? "#ddd" : KITE_BLUE}`, borderRadius: 6, cursor: "pointer", fontSize: 13, background: "#fff", color: page <= 1 ? "#ccc" : KITE_BLUE, fontWeight: 600 }}>
-                    ← Prev
+          {/* ── Trade History view ─────────────────────────────── */}
+          {view === "trades" && (
+            <>
+              {/* Meta row */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px 8px", flexWrap: "wrap", gap: 4 }}>
+                <div>
+                  <div style={{ fontSize: 12, color: "#999" }}>
+                    <span style={{ marginRight: 4 }}>⏱</span>
+                    Last updated: {pnlData?.lastUpdated?.slice?.(0, 10) || today()}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#999", marginTop: 2 }}>
+                    <span style={{ marginRight: 4 }}>📎</span>
+                    Page {page}/{totalPages || 1}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 16 }}>
+                  <button onClick={exportCSV}
+                    style={{ background: "none", border: "none", color: KITE_BLUE, fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
+                    <span>⬇</span> Download
                   </button>
-                  <span style={{ fontSize: 13, color: "#555" }}>{page} / {totalPages}</span>
-                  <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages}
-                    style={{ padding: "8px 18px", border: `1px solid ${page >= totalPages ? "#ddd" : KITE_BLUE}`, borderRadius: 6, cursor: "pointer", fontSize: 13, background: "#fff", color: page >= totalPages ? "#ccc" : KITE_BLUE, fontWeight: 600 }}>
-                    Next →
+                  <button onClick={() => setShowFilter(true)}
+                    style={{ background: "none", border: "none", color: KITE_BLUE, fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
+                    <span>↕</span> Sort
                   </button>
                 </div>
+              </div>
+
+              <div style={{ height: 1, background: "#ebebeb", margin: "0 16px" }} />
+
+              {/* Trade list */}
+              {trades.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "48px 24px", color: "#aaa", fontSize: 13 }}>
+                  No trades found for the selected period.
+                </div>
+              ) : (
+                <>
+                  {pagedTrades.map((t, i) => <TradeItem key={`${t.stockSymbol}-${i}`} trade={t} />)}
+
+                  {/* Pagination */}
+                  {totalPages > 1 && (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px", borderTop: "1px solid #f0f0f0" }}>
+                      <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1}
+                        style={{ padding: "8px 18px", border: `1px solid ${page <= 1 ? "#ddd" : KITE_BLUE}`, borderRadius: 6, cursor: "pointer", fontSize: 13, background: "#fff", color: page <= 1 ? "#ccc" : KITE_BLUE, fontWeight: 600 }}>
+                        ← Prev
+                      </button>
+                      <span style={{ fontSize: 13, color: "#555" }}>{page} / {totalPages}</span>
+                      <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages}
+                        style={{ padding: "8px 18px", border: `1px solid ${page >= totalPages ? "#ddd" : KITE_BLUE}`, borderRadius: 6, cursor: "pointer", fontSize: 13, background: "#fff", color: page >= totalPages ? "#ccc" : KITE_BLUE, fontWeight: 600 }}>
+                        Next →
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}

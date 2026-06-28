@@ -112,6 +112,8 @@ export const api = {
     get(`/pnl/records?segment=${segment}&from=${from}&to=${to}&limit=1000`),
   getPnlCharges: (from, to, segment = 'combined') =>
     get(`/pnl/charges?segment=${segment}&from=${from}&to=${to}`),
+  getMonthlyBreakdown: (segment, from, to) =>
+    get(`/pnl/monthly-breakdown?segment=${segment}&from=${from}&to=${to}`),
 
   // IPOs — live from NSE
   getIpos: () => get('/market/ipos'),

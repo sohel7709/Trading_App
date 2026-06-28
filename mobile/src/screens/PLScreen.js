@@ -2,11 +2,13 @@ import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   Modal, ActivityIndicator, FlatList, Platform,
-  StatusBar, Alert, Share,
+  StatusBar, Alert, Share, Image,
 } from 'react-native';
+
+const KITE_LOGO = require('../../assets/Icon.png');
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as Print from 'expo-print';
 import XLSX from 'xlsx';
@@ -534,6 +536,168 @@ const robS = StyleSheet.create({
 });
 
 /* ══════════════════════════════════════════
+   MONTHLY BREAKDOWN COMPONENT
+══════════════════════════════════════════ */
+const MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function MonthlyBreakdownView({ months, totals, initialBalance }) {
+  if (!months || months.length === 0) {
+    return (
+      <View style={mbS.empty}>
+        <Text style={mbS.emptyText}>No monthly data for the selected period.</Text>
+      </View>
+    );
+  }
+
+  const overallReturn = initialBalance > 0
+    ? ((totals.totalNetPL / initialBalance) * 100).toFixed(2)
+    : '0.00';
+
+  return (
+    <ScrollView contentContainerStyle={mbS.container} showsVerticalScrollIndicator={false}>
+      {/* Top summary strip */}
+      <View style={mbS.strip}>
+        {[
+          ['Net P&L', totals.totalNetPL, true],
+          ['Charges', totals.totalCharges, false],
+          ['Gross P&L', totals.totalRealizedPL, true],
+        ].map(([label, val, colored]) => (
+          <View key={label} style={mbS.stripCell}>
+            <Text style={mbS.stripLabel}>{label}</Text>
+            <Text style={[mbS.stripVal, colored && { color: parseFloat(val) >= 0 ? '#00b386' : '#eb5b3c' }]}>
+              {colored && parseFloat(val) >= 0 ? '+' : ''}₹{formatAmt(Math.abs(val))}
+            </Text>
+          </View>
+        ))}
+      </View>
+
+      <View style={mbS.strip}>
+        {[
+          ['Total Trades', totals.totalTrades, null],
+          ['Overall Return', `${parseFloat(overallReturn) >= 0 ? '+' : ''}${overallReturn}%`, parseFloat(overallReturn) >= 0 ? '#00b386' : '#eb5b3c'],
+          ['Turnover', `₹${formatAmt(totals.totalTurnover)}`, null],
+        ].map(([label, val, color]) => (
+          <View key={label} style={mbS.stripCell}>
+            <Text style={mbS.stripLabel}>{label}</Text>
+            <Text style={[mbS.stripVal, color ? { color } : {}]}>{val}</Text>
+          </View>
+        ))}
+      </View>
+
+      {/* Month cards */}
+      {months.map((m) => {
+        const [y, mo] = m.month.split('-');
+        const monthLabel = `${MONTH_SHORT[parseInt(mo, 10) - 1]} '${y.slice(2)}`;
+        const isProfit = m.netPL >= 0;
+        const winPct = m.tradeCount > 0 ? Math.round((m.winTrades / m.tradeCount) * 100) : 0;
+
+        return (
+          <View key={m.month} style={mbS.card}>
+            {/* Card header */}
+            <View style={[mbS.cardHeader, { borderLeftColor: isProfit ? '#00b386' : '#eb5b3c' }]}>
+              <View>
+                <Text style={mbS.cardMonth}>{monthLabel}</Text>
+                <Text style={mbS.cardMeta}>
+                  {m.tradeCount} trades · {winPct}% win rate
+                </Text>
+              </View>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text style={[mbS.cardNetPL, { color: isProfit ? '#00b386' : '#eb5b3c' }]}>
+                  {isProfit ? '+' : ''}₹{formatAmt(Math.abs(m.netPL))}
+                </Text>
+                <Text style={mbS.cardNetLabel}>Net P&L</Text>
+              </View>
+            </View>
+
+            {/* Detail grid */}
+            <View style={mbS.grid}>
+              {[
+                ['Opening Balance', `₹${formatAmt(m.openingBalance)}`, '#333'],
+                ['Closing Balance', `₹${formatAmt(m.closingBalance)}`, '#333'],
+                ['Gross P&L', `${m.realizedPL >= 0 ? '+' : ''}₹${formatAmt(Math.abs(m.realizedPL))}`, m.realizedPL >= 0 ? '#00b386' : '#eb5b3c'],
+                ['Charges', `₹${formatAmt(m.charges)}`, '#333'],
+                ['Turnover', `₹${formatAmt(m.turnover)}`, '#333'],
+                ['W / L Trades', `${m.winTrades} / ${m.lossTrades}`, '#333'],
+              ].map(([label, val, color]) => (
+                <View key={label} style={mbS.gridCell}>
+                  <Text style={mbS.gridLabel}>{label}</Text>
+                  <Text style={[mbS.gridVal, { color }]}>{val}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        );
+      })}
+
+      {/* Totals footer */}
+      <View style={mbS.footer}>
+        {[
+          ['Total Net P&L', totals.totalNetPL, true],
+          ['Total Charges', totals.totalCharges, false],
+          ['Total Gross P&L', totals.totalRealizedPL, true],
+        ].map(([label, val, colored]) => (
+          <View key={label} style={mbS.footerCell}>
+            <Text style={mbS.footerLabel}>{label}</Text>
+            <Text style={[mbS.footerVal, colored ? { color: parseFloat(val) >= 0 ? '#00b386' : '#eb5b3c' } : { color: '#fff' }]}>
+              {colored && parseFloat(val) >= 0 ? '+' : ''}₹{formatAmt(Math.abs(val))}
+            </Text>
+          </View>
+        ))}
+      </View>
+    </ScrollView>
+  );
+}
+
+const mbS = StyleSheet.create({
+  container: { padding: 16, paddingBottom: 100 },
+  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
+  emptyText: { color: '#aaa', fontSize: 14, textAlign: 'center' },
+
+  strip: {
+    flexDirection: 'row', backgroundColor: '#f9f9f9',
+    borderRadius: 10, marginBottom: 8, overflow: 'hidden',
+  },
+  stripCell: { flex: 1, padding: 12, alignItems: 'center' },
+  stripLabel: { fontSize: 10, color: '#999', marginBottom: 3 },
+  stripVal: { fontSize: 13, fontWeight: '700', color: '#1a1a1a' },
+
+  card: {
+    backgroundColor: '#fff', borderRadius: 12, marginBottom: 10,
+    overflow: 'hidden', borderWidth: 1, borderColor: '#f0f0f0',
+    elevation: 1,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04, shadowRadius: 4,
+  },
+  cardHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    padding: 14, borderLeftWidth: 3,
+  },
+  cardMonth: { fontSize: 15, fontWeight: '700', color: '#1a1a1a' },
+  cardMeta: { fontSize: 11, color: '#aaa', marginTop: 2 },
+  cardNetPL: { fontSize: 16, fontWeight: '700' },
+  cardNetLabel: { fontSize: 10, color: '#aaa', marginTop: 1 },
+
+  grid: {
+    flexDirection: 'row', flexWrap: 'wrap',
+    borderTopWidth: 1, borderTopColor: '#f5f5f5',
+  },
+  gridCell: {
+    width: '50%', padding: 12,
+    borderRightWidth: 1, borderBottomWidth: 1, borderColor: '#f5f5f5',
+  },
+  gridLabel: { fontSize: 10, color: '#aaa', marginBottom: 3 },
+  gridVal: { fontSize: 13, fontWeight: '600' },
+
+  footer: {
+    flexDirection: 'row', backgroundColor: '#1a1a1a',
+    borderRadius: 12, padding: 4, marginTop: 4,
+  },
+  footerCell: { flex: 1, padding: 12, alignItems: 'center' },
+  footerLabel: { fontSize: 10, color: '#888', marginBottom: 4 },
+  footerVal: { fontSize: 13, fontWeight: '700' },
+});
+
+/* ══════════════════════════════════════════
    MAIN SCREEN
 ══════════════════════════════════════════ */
 export default function PLScreen({ navigation }) {
@@ -553,6 +717,10 @@ export default function PLScreen({ navigation }) {
   const [page,    setPage]    = useState(1);
   const PAGE_SIZE = 20;
 
+  const [view,             setView]             = useState('trades'); // 'trades' | 'monthly'
+  const [monthlyData,      setMonthlyData]      = useState(null);
+  const [monthlyLoading,   setMonthlyLoading]   = useState(false);
+
   /* fetch */
   const fetchPnl = useCallback(async (seg, from, to) => {
     setLoading(true); setError(null);
@@ -568,19 +736,35 @@ export default function PLScreen({ navigation }) {
     }
   }, []);
 
+  const fetchMonthlyBreakdown = useCallback(async (seg, from, to) => {
+    setMonthlyLoading(true);
+    try {
+      const data = await api.getMonthlyBreakdown(seg, from, to);
+      setMonthlyData(data);
+    } catch {
+      setMonthlyData(null);
+    } finally {
+      setMonthlyLoading(false);
+    }
+  }, []);
+
   // Auto-load on mount with last 90 days
   useEffect(() => {
     const from = new Date(); from.setDate(from.getDate() - 90);
     const fromStr = from.toISOString().slice(0, 10);
     setFromDate(fromStr);
     fetchPnl('combined', fromStr, today());
+    fetchMonthlyBreakdown('combined', fromStr, today());
   }, []);
 
   const handleApplyDate = (from, to) => {
     setFromDate(from); setToDate(to); setShowDatePicker(false);
   };
 
-  const handleGenerate = () => fetchPnl(segment, fromDate, toDate);
+  const handleGenerate = () => {
+    fetchPnl(segment, fromDate, toDate);
+    fetchMonthlyBreakdown(segment, fromDate, toDate);
+  };
   const handleResetFilter = () => setSegment('combined');
 
   /* ── Download format picker ── */
@@ -769,9 +953,7 @@ export default function PLScreen({ navigation }) {
             <Ionicons name="arrow-back" size={22} color="#333" />
           </TouchableOpacity>
         )}
-        <View style={sc.logoCircle}>
-          <Text style={{ color:'#fff', fontWeight:'900', fontSize:13 }}>Z</Text>
-        </View>
+        <Image source={KITE_LOGO} style={sc.logoImg} resizeMode="contain" />
         <Text style={sc.topBarTitle}>P&L</Text>
         {hasLoaded && !loading && (
           <TouchableOpacity style={sc.downloadBtn} onPress={openDownload}>
@@ -823,6 +1005,39 @@ export default function PLScreen({ navigation }) {
           </TouchableOpacity>
         </ScrollView>
       ) : (
+        <>
+          {/* View toggle */}
+          {hasLoaded && (
+            <View style={sc.viewToggleWrap}>
+              {[['trades', 'Trade History'], ['monthly', 'Monthly Breakdown']].map(([key, label]) => (
+                <TouchableOpacity key={key} onPress={() => setView(key)}
+                  style={[sc.viewToggleBtn, view === key && sc.viewToggleBtnActive]}>
+                  <Text style={[sc.viewToggleText, view === key && sc.viewToggleTextActive]}>
+                    {label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          {/* Monthly breakdown view */}
+          {view === 'monthly' && hasLoaded && (
+            monthlyLoading ? (
+              <View style={sc.centerBox}>
+                <ActivityIndicator size="large" color="#1b5fe4" />
+                <Text style={{ color: '#888', marginTop: 12, fontSize: 14 }}>Loading monthly data…</Text>
+              </View>
+            ) : (
+              <MonthlyBreakdownView
+                months={monthlyData?.months || []}
+                totals={monthlyData?.totals || { totalNetPL: 0, totalCharges: 0, totalRealizedPL: 0, totalTrades: 0, totalTurnover: 0 }}
+                initialBalance={monthlyData?.initialBalance || 34000000}
+              />
+            )
+          )}
+
+          {/* Trade history view */}
+          {view === 'trades' && (
         <FlatList
           data={pagedTrades}
           keyExtractor={(_, i) => String(i)}
@@ -930,6 +1145,8 @@ export default function PLScreen({ navigation }) {
             </View>
           ) : null}
         />
+          )}
+        </>
       )}
 
       {/* ── FLOATING BOTTOM BAR (after load) ── */}
@@ -1043,9 +1260,8 @@ const sc = StyleSheet.create({
     borderBottomWidth:1, borderBottomColor:'#e5e7eb',
   },
   backBtn: { marginRight:8 },
-  logoCircle: {
-    width:34, height:34, borderRadius:17, backgroundColor:'#1b5fe4',
-    alignItems:'center', justifyContent:'center',
+  logoImg: {
+    width: 34, height: 34,
   },
   topBarTitle: {
     flex:1, textAlign:'center', fontSize:17, fontWeight:'500', color:'#222',
@@ -1151,6 +1367,25 @@ const sc = StyleSheet.create({
     borderRadius:8, paddingVertical:8, paddingHorizontal:16,
   },
   pageBtnText: { color:'#1b5fe4', fontSize:13, fontWeight:'600' },
+
+  viewToggleWrap: {
+    flexDirection: 'row',
+    margin: 12,
+    marginBottom: 4,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 24,
+    padding: 3,
+  },
+  viewToggleBtn: {
+    flex: 1, paddingVertical: 8, borderRadius: 20, alignItems: 'center',
+  },
+  viewToggleBtnActive: {
+    backgroundColor: '#fff',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08, shadowRadius: 4, elevation: 2,
+  },
+  viewToggleText: { fontSize: 13, fontWeight: '500', color: '#888' },
+  viewToggleTextActive: { color: '#1b5fe4', fontWeight: '700' },
 
   floatBar: {
     flexDirection:'row', alignItems:'center', justifyContent:'space-between',
