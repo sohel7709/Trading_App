@@ -4,16 +4,16 @@ import {
   Modal, ActivityIndicator, FlatList, Platform,
   StatusBar, Alert, Share, Image,
 } from 'react-native';
-
-const KITE_LOGO = require('../../assets/Icon.png');
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as Print from 'expo-print';
 import XLSX from 'xlsx';
 import { colors } from '../theme/colors';
 import { api } from '../api/client';
+
+const KITE_LOGO = require('../../assets/Icon.png');
 
 /* ══════════════════════════════════════════
    CONSTANTS & HELPERS
@@ -825,9 +825,9 @@ export default function PLScreen({ navigation }) {
 
     const base64 = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
     const name = `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.xlsx`;
-    const uri = FileSystem.cacheDirectory + name;
-    await FileSystem.writeAsStringAsync(uri, base64, { encoding: FileSystem.EncodingType.Base64 });
-    await shareFile(uri, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'com.microsoft.excel.xlsx');
+    const file = new FileSystem.File(FileSystem.Paths.join(FileSystem.Paths.cache, name));
+    await file.write(base64, { encoding: 'base64' });
+    await shareFile(file.uri, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'com.microsoft.excel.xlsx');
   };
 
   /* ── CSV ── */
@@ -852,9 +852,9 @@ export default function PLScreen({ navigation }) {
       `Total Trades,${trades.length}`,
     ].join('\n');
     const name = `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.csv`;
-    const uri = FileSystem.cacheDirectory + name;
-    await FileSystem.writeAsStringAsync(uri, csv, { encoding: FileSystem.EncodingType.UTF8 });
-    await shareFile(uri, 'text/csv', 'public.comma-separated-values-text');
+    const file = new FileSystem.File(FileSystem.Paths.join(FileSystem.Paths.cache, name));
+    await file.write(csv, { encoding: 'utf8' });
+    await shareFile(file.uri, 'text/csv', 'public.comma-separated-values-text');
   };
 
   /* ── PDF ── */
@@ -916,9 +916,10 @@ export default function PLScreen({ navigation }) {
     </body></html>`;
 
     const { uri } = await Print.printToFileAsync({ html, base64: false });
-    const dest = FileSystem.cacheDirectory + `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.pdf`;
-    await FileSystem.moveAsync({ from: uri, to: dest });
-    await shareFile(dest, 'application/pdf', 'com.adobe.pdf');
+    const destName = `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.pdf`;
+    const destFile = new FileSystem.File(FileSystem.Paths.join(FileSystem.Paths.cache, destName));
+    await new FileSystem.File(uri).move(destFile);
+    await shareFile(destFile.uri, 'application/pdf', 'com.adobe.pdf');
   };
 
   const handleExport = async (fmt) => {
