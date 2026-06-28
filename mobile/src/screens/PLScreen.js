@@ -793,10 +793,50 @@ export default function PLScreen({ navigation }) {
     'Net P&L (₹)': Number((t.netPL ?? 0).toFixed(2)),
   }));
 
-  const shareFile = async (uri, mime, uti) => {
-    const ok = await Sharing.isAvailableAsync();
-    if (ok) await Sharing.shareAsync(uri, { mimeType: mime, dialogTitle: 'Save Report', UTI: uti });
-    else Alert.alert('Sharing unavailable', 'Cannot open share sheet on this device.');
+  /* ── Android SAF save / iOS share ── */
+  const saveFile = async (name, content, mime, uti, isBase64 = false) => {
+    const encoding = isBase64 ? FileSystem.EncodingType.Base64 : FileSystem.EncodingType.UTF8;
+
+    if (Platform.OS === 'android') {
+      // Android: use Storage Access Framework — user picks any folder (Downloads, Drive, etc.)
+      const perm = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission denied', 'Storage permission is required to save files.');
+        return;
+      }
+      const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
+        perm.directoryUri, name, mime
+      );
+      await FileSystem.writeAsStringAsync(fileUri, content, { encoding });
+      Alert.alert('Saved ✓', `${name} has been saved to your selected folder.`);
+    } else {
+      // iOS: write to cache then share
+      const tmpUri = FileSystem.cacheDirectory + name;
+      await FileSystem.writeAsStringAsync(tmpUri, content, { encoding });
+      const ok = await Sharing.isAvailableAsync();
+      if (ok) await Sharing.shareAsync(tmpUri, { mimeType: mime, dialogTitle: 'Save Report', UTI: uti });
+      else Alert.alert('Sharing unavailable', 'Cannot open share sheet on this device.');
+    }
+  };
+
+  const savePdf = async (name, srcUri) => {
+    if (Platform.OS === 'android') {
+      const perm = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission denied', 'Storage permission is required to save files.');
+        return;
+      }
+      const content = await FileSystem.readAsStringAsync(srcUri, { encoding: FileSystem.EncodingType.Base64 });
+      const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
+        perm.directoryUri, name, 'application/pdf'
+      );
+      await FileSystem.writeAsStringAsync(fileUri, content, { encoding: FileSystem.EncodingType.Base64 });
+      Alert.alert('Saved ✓', `${name} has been saved to your selected folder.`);
+    } else {
+      const ok = await Sharing.isAvailableAsync();
+      if (ok) await Sharing.shareAsync(srcUri, { mimeType: 'application/pdf', dialogTitle: 'Save PDF', UTI: 'com.adobe.pdf' });
+      else Alert.alert('Sharing unavailable', 'Cannot open share sheet on this device.');
+    }
   };
 
   /* ── Excel ── */
@@ -825,9 +865,7 @@ export default function PLScreen({ navigation }) {
 
     const base64 = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
     const name = `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.xlsx`;
-    const uri = FileSystem.cacheDirectory + name;
-    await FileSystem.writeAsStringAsync(uri, base64, { encoding: FileSystem.EncodingType.Base64 });
-    await shareFile(uri, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'com.microsoft.excel.xlsx');
+    await saveFile(name, base64, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'com.microsoft.excel.xlsx', true);
   };
 
   /* ── CSV ── */
@@ -852,9 +890,7 @@ export default function PLScreen({ navigation }) {
       `Total Trades,${trades.length}`,
     ].join('\n');
     const name = `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.csv`;
-    const uri = FileSystem.cacheDirectory + name;
-    await FileSystem.writeAsStringAsync(uri, csv, { encoding: FileSystem.EncodingType.UTF8 });
-    await shareFile(uri, 'text/csv', 'public.comma-separated-values-text');
+    await saveFile(name, csv, 'text/csv', 'public.comma-separated-values-text', false);
   };
 
   /* ── PDF ── */
@@ -916,9 +952,8 @@ export default function PLScreen({ navigation }) {
     </body></html>`;
 
     const { uri } = await Print.printToFileAsync({ html, base64: false });
-    const dest = FileSystem.cacheDirectory + `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.pdf`;
-    await FileSystem.moveAsync({ from: uri, to: dest });
-    await shareFile(dest, 'application/pdf', 'com.adobe.pdf');
+    const name = `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.pdf`;
+    await savePdf(name, uri);
   };
 
   const handleExport = async (fmt) => {
