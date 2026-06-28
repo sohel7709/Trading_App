@@ -575,6 +575,72 @@ app.get('/pnl/charges', async (req, res) => {
     }
 });
 
+// ============ P&L MONTHLY BREAKDOWN ============
+app.get('/pnl/monthly-breakdown', async (req, res) => {
+    try {
+        const { from, to, segment, initialBalance = '34000000' } = req.query;
+
+        const match = {};
+        if (from) match.tradeDate = { $gte: new Date(from) };
+        if (to)   match.tradeDate = { ...match.tradeDate, $lte: new Date(to + 'T23:59:59.999Z') };
+        const segKey = (segment || '').toLowerCase();
+        if (segKey && segKey !== 'combined') match.segment = segKey;
+
+        const agg = await PLRecordModel.aggregate([
+            { $match: match },
+            { $group: {
+                _id: { year: { $year: '$tradeDate' }, month: { $month: '$tradeDate' } },
+                realizedPL:  { $sum: '$realizedPL' },
+                charges:     { $sum: '$charges' },
+                netPL:       { $sum: '$netPL' },
+                turnover:    { $sum: { $add: ['$buyValue', '$sellValue'] } },
+                tradeCount:  { $sum: 1 },
+                winTrades:   { $sum: { $cond: [{ $gt: ['$realizedPL', 0] }, 1, 0] } },
+                lossTrades:  { $sum: { $cond: [{ $lt: ['$realizedPL', 0] }, 1, 0] } },
+            }},
+            { $sort: { '_id.year': 1, '_id.month': 1 } },
+        ]);
+
+        let runningBalance = Number(initialBalance);
+        const months = agg.map(m => {
+            const openingBalance = parseFloat(runningBalance.toFixed(2));
+            const realizedPL     = parseFloat((m.realizedPL || 0).toFixed(2));
+            const charges        = parseFloat((m.charges    || 0).toFixed(2));
+            const netPL          = parseFloat((m.netPL      || 0).toFixed(2));
+            const closingBalance = parseFloat((openingBalance + netPL).toFixed(2));
+            runningBalance = closingBalance;
+
+            return {
+                month:           `${m._id.year}-${String(m._id.month).padStart(2, '0')}`,
+                openingBalance,
+                realizedPL,
+                charges,
+                netPL,
+                closingBalance,
+                turnover:    parseFloat((m.turnover    || 0).toFixed(2)),
+                tradeCount:  m.tradeCount,
+                winTrades:   m.winTrades,
+                lossTrades:  m.lossTrades,
+            };
+        });
+
+        const totalNetPL     = parseFloat(months.reduce((s, m) => s + m.netPL, 0).toFixed(2));
+        const totalCharges   = parseFloat(months.reduce((s, m) => s + m.charges, 0).toFixed(2));
+        const totalRealizedPL= parseFloat(months.reduce((s, m) => s + m.realizedPL, 0).toFixed(2));
+        const totalTrades    = months.reduce((s, m) => s + m.tradeCount, 0);
+        const totalTurnover  = parseFloat(months.reduce((s, m) => s + m.turnover, 0).toFixed(2));
+
+        res.json({
+            months,
+            initialBalance: Number(initialBalance),
+            finalBalance:   parseFloat(runningBalance.toFixed(2)),
+            totals: { totalNetPL, totalCharges, totalRealizedPL, totalTrades, totalTurnover },
+        });
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching monthly breakdown', error: err.message });
+    }
+});
+
 // ============ TAX P&L ============
 // POST /tax-pnl/seed-equity — adds sample CNC equity trades for STCG/LTCG demo
 // SECURITY: restricted to development only — destructive (deletes all CNC trades)

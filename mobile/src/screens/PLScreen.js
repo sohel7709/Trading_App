@@ -8,6 +8,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import * as Print from 'expo-print';
 import XLSX from 'xlsx';
 import { colors } from '../theme/colors';
 import { api } from '../api/client';
@@ -582,84 +583,174 @@ export default function PLScreen({ navigation }) {
   const handleGenerate = () => fetchPnl(segment, fromDate, toDate);
   const handleResetFilter = () => setSegment('combined');
 
-  /* Excel export */
-  const handleDownloadCSV = async () => {
+  /* ── Download format picker ── */
+  const [showDownloadPicker, setShowDownloadPicker] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const openDownload = () => {
+    if (!(pnlData?.trades?.length)) return Alert.alert('No data', 'Generate a report first');
+    setShowDownloadPicker(true);
+  };
+
+  /* shared helpers */
+  const tradeRows = (trades) => trades.map((t, i) => ({
+    '#': i + 1,
+    'Symbol': t.stockSymbol,
+    'Date': t.tradeDate ? new Date(t.tradeDate).toLocaleDateString('en-IN') : '',
+    'Buy Qty': t.buyQty ?? t.quantity,
+    'Sell Qty': t.sellQty ?? t.quantity,
+    'Buy Avg (₹)': Number((t.buyAvg ?? 0).toFixed(2)),
+    'Sell Avg (₹)': Number((t.sellAvg ?? 0).toFixed(2)),
+    'Buy Value (₹)': Number((t.buyValue ?? 0).toFixed(2)),
+    'Sell Value (₹)': Number((t.sellValue ?? 0).toFixed(2)),
+    'Realised P&L (₹)': Number((t.realizedPL ?? 0).toFixed(2)),
+    'P&L %': `${(t.realizedPct ?? 0) >= 0 ? '+' : ''}${t.realizedPct ?? 0}%`,
+    'Charges (₹)': Number((t.charges ?? 0).toFixed(2)),
+    'Net P&L (₹)': Number((t.netPL ?? 0).toFixed(2)),
+  }));
+
+  const shareFile = async (uri, mime, uti) => {
+    const ok = await Sharing.isAvailableAsync();
+    if (ok) await Sharing.shareAsync(uri, { mimeType: mime, dialogTitle: 'Save Report', UTI: uti });
+    else Alert.alert('Sharing unavailable', 'Cannot open share sheet on this device.');
+  };
+
+  /* ── Excel ── */
+  const downloadExcel = async () => {
     const trades = pnlData?.trades || [];
-    if (!trades.length) return Alert.alert('No data', 'Generate a report first');
+    const s = pnlData?.summary;
+    const wb = XLSX.utils.book_new();
 
+    const wsT = XLSX.utils.json_to_sheet(tradeRows(trades));
+    wsT['!cols'] = [{wch:4},{wch:22},{wch:12},{wch:8},{wch:8},{wch:12},{wch:12},{wch:14},{wch:14},{wch:16},{wch:8},{wch:12},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, wsT, 'Trades');
+
+    const wsS = XLSX.utils.aoa_to_sheet([
+      ['P&L Summary', `${fromDate} to ${toDate}`], [],
+      ['Metric', 'Value (₹)'],
+      ['Realised P&L',    Number((s?.realizedPL      ?? 0).toFixed(2))],
+      ['Unrealised P&L',  Number((s?.unrealizedPL    ?? 0).toFixed(2))],
+      ['Charges & Taxes', Number((s?.chargesAndTaxes ?? 0).toFixed(2))],
+      ['Net Realised P&L',Number((s?.netRealizedPL   ?? 0).toFixed(2))],
+      [], ['Winning Trades', s?.winningTrades ?? 0],
+      ['Losing Trades', s?.losingTrades ?? 0],
+      ['Total Trades', trades.length],
+    ]);
+    wsS['!cols'] = [{wch:20},{wch:16}];
+    XLSX.utils.book_append_sheet(wb, wsS, 'Summary');
+
+    const base64 = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+    const name = `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.xlsx`;
+    const uri = FileSystem.cacheDirectory + name;
+    await FileSystem.writeAsStringAsync(uri, base64, { encoding: FileSystem.EncodingType.Base64 });
+    await shareFile(uri, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'com.microsoft.excel.xlsx');
+  };
+
+  /* ── CSV ── */
+  const downloadCSV = async () => {
+    const trades = pnlData?.trades || [];
+    const s = pnlData?.summary;
+    const cols = ['#','Symbol','Date','Buy Qty','Sell Qty','Buy Avg (₹)','Sell Avg (₹)','Buy Value (₹)','Sell Value (₹)','Realised P&L (₹)','P&L %','Charges (₹)','Net P&L (₹)'];
+    const rows = tradeRows(trades).map(r => cols.map(c => `"${r[c] ?? ''}"`).join(','));
+    const csv = [
+      `P&L Report: ${fromDate} to ${toDate},Segment: ${segLabel}`,
+      '',
+      cols.join(','),
+      ...rows,
+      '',
+      'Summary',
+      `Realised P&L,${(s?.realizedPL ?? 0).toFixed(2)}`,
+      `Unrealised P&L,${(s?.unrealizedPL ?? 0).toFixed(2)}`,
+      `Charges & Taxes,${(s?.chargesAndTaxes ?? 0).toFixed(2)}`,
+      `Net Realised P&L,${(s?.netRealizedPL ?? 0).toFixed(2)}`,
+      `Winning Trades,${s?.winningTrades ?? 0}`,
+      `Losing Trades,${s?.losingTrades ?? 0}`,
+      `Total Trades,${trades.length}`,
+    ].join('\n');
+    const name = `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.csv`;
+    const uri = FileSystem.cacheDirectory + name;
+    await FileSystem.writeAsStringAsync(uri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+    await shareFile(uri, 'text/csv', 'public.comma-separated-values-text');
+  };
+
+  /* ── PDF ── */
+  const downloadPDF = async () => {
+    const trades = pnlData?.trades || [];
+    const s = pnlData?.summary;
+    const netColor = (s?.netRealizedPL ?? 0) >= 0 ? '#00b386' : '#eb5b3c';
+    const trRows = trades.map((t, i) => {
+      const plColor = (t.realizedPL ?? 0) >= 0 ? '#00b386' : '#eb5b3c';
+      return `<tr style="background:${i%2===0?'#fff':'#f9fafb'}">
+        <td>${i+1}</td><td><b>${t.stockSymbol}</b></td>
+        <td>${t.tradeDate ? new Date(t.tradeDate).toLocaleDateString('en-IN') : ''}</td>
+        <td>${t.buyQty ?? t.quantity}</td><td>${t.sellQty ?? t.quantity}</td>
+        <td>₹${(t.buyAvg??0).toFixed(2)}</td><td>₹${(t.sellAvg??0).toFixed(2)}</td>
+        <td>₹${(t.buyValue??0).toFixed(2)}</td><td>₹${(t.sellValue??0).toFixed(2)}</td>
+        <td style="color:${plColor};font-weight:600">${(t.realizedPL??0)>=0?'+':''}₹${(t.realizedPL??0).toFixed(2)}</td>
+        <td style="color:${plColor}">${(t.realizedPct??0)>=0?'+':''}${t.realizedPct??0}%</td>
+        <td>₹${(t.charges??0).toFixed(2)}</td>
+      </tr>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+    <style>
+      body{font-family:Arial,sans-serif;padding:24px;color:#1a1a1a;font-size:11px}
+      h1{color:#387ed1;font-size:18px;margin:0 0 4px}
+      .meta{color:#666;font-size:11px;margin-bottom:20px}
+      .summary{display:flex;gap:16px;margin-bottom:24px;flex-wrap:wrap}
+      .card{background:#f5f7ff;border-radius:8px;padding:12px 18px;min-width:130px}
+      .card-label{font-size:10px;color:#888;margin-bottom:4px}
+      .card-val{font-size:15px;font-weight:700}
+      table{width:100%;border-collapse:collapse;font-size:10px}
+      th{background:#387ed1;color:#fff;padding:7px 6px;text-align:left;white-space:nowrap}
+      td{padding:6px;border-bottom:1px solid #eee;white-space:nowrap}
+      .footer{margin-top:20px;font-size:9px;color:#aaa;text-align:center}
+    </style></head><body>
+    <h1>P&amp;L Report</h1>
+    <div class="meta">${fromDate} &nbsp;→&nbsp; ${toDate} &nbsp;|&nbsp; Segment: ${segLabel}</div>
+    <div class="summary">
+      <div class="card"><div class="card-label">Realised P&amp;L</div>
+        <div class="card-val" style="color:${(s?.realizedPL??0)>=0?'#00b386':'#eb5b3c'}">
+          ${(s?.realizedPL??0)>=0?'+':''}₹${Math.abs(s?.realizedPL??0).toLocaleString('en-IN',{minimumFractionDigits:2})}</div></div>
+      <div class="card"><div class="card-label">Unrealised P&amp;L</div>
+        <div class="card-val" style="color:${(s?.unrealizedPL??0)>=0?'#00b386':'#eb5b3c'}">
+          ${(s?.unrealizedPL??0)>=0?'+':''}₹${Math.abs(s?.unrealizedPL??0).toLocaleString('en-IN',{minimumFractionDigits:2})}</div></div>
+      <div class="card"><div class="card-label">Charges &amp; Taxes</div>
+        <div class="card-val" style="color:#eb5b3c">-₹${(s?.chargesAndTaxes??0).toFixed(2)}</div></div>
+      <div class="card"><div class="card-label">Net Realised P&amp;L</div>
+        <div class="card-val" style="color:${netColor}">${(s?.netRealizedPL??0)>=0?'+':''}₹${(s?.netRealizedPL??0).toFixed(2)}</div></div>
+      <div class="card"><div class="card-label">Trades</div>
+        <div class="card-val">${trades.length} <span style="font-size:10px;color:#888">(${s?.winningTrades??0}W / ${s?.losingTrades??0}L)</span></div></div>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>Symbol</th><th>Date</th><th>Buy Qty</th><th>Sell Qty</th>
+        <th>Buy Avg</th><th>Sell Avg</th><th>Buy Value</th><th>Sell Value</th>
+        <th>Realised P&amp;L</th><th>P&amp;L%</th><th>Charges</th></tr></thead>
+      <tbody>${trRows}</tbody>
+    </table>
+    <div class="footer">Generated by Zerodha Kite &nbsp;|&nbsp; ${new Date().toLocaleString('en-IN')}</div>
+    </body></html>`;
+
+    const { uri } = await Print.printToFileAsync({ html, base64: false });
+    const dest = FileSystem.cacheDirectory + `PnL_${segLabel.replace(/\s+/g,'_')}_${fromDate}_${toDate}.pdf`;
+    await FileSystem.moveAsync({ from: uri, to: dest });
+    await shareFile(dest, 'application/pdf', 'com.adobe.pdf');
+  };
+
+  const handleExport = async (fmt) => {
+    setShowDownloadPicker(false);
+    setExporting(true);
     try {
-      const s = pnlData?.summary;
-      const wb = XLSX.utils.book_new();
-
-      // ── Sheet 1: Trades ──────────────────────────────────────────────
-      const tradeRows = [
-        ['P&L Report', `${fromDate}  to  ${toDate}`, '', '', '', '', 'Segment:', segLabel],
-        [],
-        ['#', 'Symbol', 'Date', 'Buy Qty', 'Sell Qty',
-          'Buy Avg (₹)', 'Sell Avg (₹)', 'Buy Value (₹)', 'Sell Value (₹)',
-          'Realised P&L (₹)', 'P&L %', 'Charges (₹)', 'Net P&L (₹)'],
-        ...trades.map((t, i) => [
-          i + 1,
-          t.stockSymbol,
-          t.tradeDate ? new Date(t.tradeDate).toLocaleDateString('en-IN') : '',
-          t.buyQty ?? t.quantity,
-          t.sellQty ?? t.quantity,
-          Number(t.buyAvg?.toFixed(2) ?? 0),
-          Number(t.sellAvg?.toFixed(2) ?? 0),
-          Number(t.buyValue?.toFixed(2) ?? 0),
-          Number(t.sellValue?.toFixed(2) ?? 0),
-          Number(t.realizedPL?.toFixed(2) ?? 0),
-          `${t.realizedPct >= 0 ? '+' : ''}${t.realizedPct ?? 0}%`,
-          Number(t.charges?.toFixed(2) ?? 0),
-          Number(t.netPL?.toFixed(2) ?? 0),
-        ]),
-      ];
-      const wsT = XLSX.utils.aoa_to_sheet(tradeRows);
-      wsT['!cols'] = [
-        {wch:4},{wch:22},{wch:12},{wch:8},{wch:8},
-        {wch:12},{wch:12},{wch:14},{wch:14},
-        {wch:16},{wch:8},{wch:12},{wch:14},
-      ];
-      XLSX.utils.book_append_sheet(wb, wsT, 'Trades');
-
-      // ── Sheet 2: Summary ─────────────────────────────────────────────
-      const summaryRows = [
-        ['P&L Summary', `${fromDate}  to  ${toDate}`],
-        [],
-        ['Metric', 'Value (₹)'],
-        ['Realised P&L',    Number((s?.realizedPL      ?? 0).toFixed(2))],
-        ['Unrealised P&L',  Number((s?.unrealizedPL    ?? 0).toFixed(2))],
-        ['Charges & Taxes', Number((s?.chargesAndTaxes ?? 0).toFixed(2))],
-        ['Net Realised P&L',Number((s?.netRealizedPL   ?? 0).toFixed(2))],
-        [],
-        ['Winning Trades',  s?.winningTrades ?? 0],
-        ['Losing Trades',   s?.losingTrades  ?? 0],
-        ['Total Trades',    trades.length],
-      ];
-      const wsS = XLSX.utils.aoa_to_sheet(summaryRows);
-      wsS['!cols'] = [{wch:20},{wch:16}];
-      XLSX.utils.book_append_sheet(wb, wsS, 'Summary');
-
-      // ── Write to base64, save to cache, share ────────────────────────
-      const base64 = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
-      const fileName = `PnL_${segLabel.replace(/\s+/g, '_')}_${fromDate}_${toDate}.xlsx`;
-      const uri = FileSystem.cacheDirectory + fileName;
-      await FileSystem.writeAsStringAsync(uri, base64, { encoding: FileSystem.EncodingType.Base64 });
-
-      const canShare = await Sharing.isAvailableAsync();
-      if (canShare) {
-        await Sharing.shareAsync(uri, {
-          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          dialogTitle: 'Save P&L Report',
-          UTI: 'com.microsoft.excel.xlsx',
-        });
-      } else {
-        Alert.alert('Sharing unavailable', 'Cannot open share sheet on this device.');
-      }
+      if (fmt === 'excel') await downloadExcel();
+      else if (fmt === 'csv') await downloadCSV();
+      else await downloadPDF();
     } catch (e) {
       Alert.alert('Export failed', e.message);
-    }
+    } finally { setExporting(false); }
   };
+
+  /* keep old name so the Tax P&L button still works */
+  const handleDownloadCSV = openDownload;
 
   const segLabel = SEGMENTS.find(s => s.key === segment)?.label || 'Combined';
   const trades   = pnlData?.trades || [];
@@ -683,9 +774,9 @@ export default function PLScreen({ navigation }) {
         </View>
         <Text style={sc.topBarTitle}>P&L</Text>
         {hasLoaded && !loading && (
-          <TouchableOpacity style={sc.downloadBtn} onPress={handleDownloadCSV}>
+          <TouchableOpacity style={sc.downloadBtn} onPress={openDownload}>
             <Ionicons name="download-outline" size={18} color="#1b5fe4" />
-            <Text style={sc.downloadText}>Excel</Text>
+            <Text style={sc.downloadText}>Export</Text>
           </TouchableOpacity>
         )}
         <TouchableOpacity style={sc.menuBtn} onPress={() => setShowFilter(true)}>
@@ -879,6 +970,64 @@ export default function PLScreen({ navigation }) {
         fromDate={fromDate} toDate={toDate} segment={segment}
         onClose={() => setShowCharges(false)}
       />
+
+      {/* ── Export format picker ── */}
+      <Modal visible={showDownloadPicker} transparent animationType="slide" onRequestClose={() => setShowDownloadPicker(false)}>
+        <TouchableOpacity style={sc.pickerOverlay} activeOpacity={1} onPress={() => setShowDownloadPicker(false)}>
+          <View style={sc.pickerSheet}>
+            <View style={sc.pickerHandle} />
+            <Text style={sc.pickerTitle}>Download Report</Text>
+            <Text style={sc.pickerSub}>{fromDate}  →  {toDate}  ·  {segLabel}</Text>
+
+            <TouchableOpacity style={sc.fmtRow} onPress={() => handleExport('excel')}>
+              <View style={[sc.fmtIcon, { backgroundColor: '#e8f5e9' }]}>
+                <Ionicons name="grid-outline" size={22} color="#2e7d32" />
+              </View>
+              <View style={sc.fmtInfo}>
+                <Text style={sc.fmtName}>Excel (.xlsx)</Text>
+                <Text style={sc.fmtDesc}>Two sheets: Trades + Summary. Open in Excel / Google Sheets.</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#ccc" />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={sc.fmtRow} onPress={() => handleExport('csv')}>
+              <View style={[sc.fmtIcon, { backgroundColor: '#e3f2fd' }]}>
+                <Ionicons name="document-text-outline" size={22} color="#1565c0" />
+              </View>
+              <View style={sc.fmtInfo}>
+                <Text style={sc.fmtName}>CSV (.csv)</Text>
+                <Text style={sc.fmtDesc}>Plain text, all columns. Import into any spreadsheet app.</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#ccc" />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={sc.fmtRow} onPress={() => handleExport('pdf')}>
+              <View style={[sc.fmtIcon, { backgroundColor: '#fce4ec' }]}>
+                <Ionicons name="document-outline" size={22} color="#c62828" />
+              </View>
+              <View style={sc.fmtInfo}>
+                <Text style={sc.fmtName}>PDF (.pdf)</Text>
+                <Text style={sc.fmtDesc}>Formatted report with summary cards. Print or share.</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#ccc" />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={sc.pickerCancel} onPress={() => setShowDownloadPicker(false)}>
+              <Text style={sc.pickerCancelTxt}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ── Exporting spinner overlay ── */}
+      {exporting && (
+        <View style={sc.exportingOverlay}>
+          <View style={sc.exportingCard}>
+            <ActivityIndicator color="#387ed1" size="large" />
+            <Text style={sc.exportingTxt}>Generating file…</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -965,6 +1114,23 @@ const sc = StyleSheet.create({
   taxVal: { fontSize:13, fontWeight:'700' },
   csvBtn: { flexDirection:'row', alignItems:'center', justifyContent:'center', gap:6, backgroundColor:'#1b5fe4', borderRadius:8, paddingVertical:10, marginTop:12 },
   csvBtnText: { color:'#fff', fontSize:13, fontWeight:'700' },
+
+  // ── Export picker ──
+  pickerOverlay: { flex:1, backgroundColor:'rgba(0,0,0,0.45)', justifyContent:'flex-end' },
+  pickerSheet: { backgroundColor:'#fff', borderTopLeftRadius:20, borderTopRightRadius:20, paddingTop:12, paddingBottom:32, paddingHorizontal:20 },
+  pickerHandle: { width:40, height:4, borderRadius:2, backgroundColor:'#d1d5db', alignSelf:'center', marginBottom:16 },
+  pickerTitle: { fontSize:17, fontWeight:'700', color:'#1a1a1a', marginBottom:4 },
+  pickerSub: { fontSize:12, color:'#888', marginBottom:20 },
+  fmtRow: { flexDirection:'row', alignItems:'center', paddingVertical:14, borderBottomWidth:1, borderBottomColor:'#f3f4f6', gap:14 },
+  fmtIcon: { width:44, height:44, borderRadius:12, alignItems:'center', justifyContent:'center' },
+  fmtInfo: { flex:1 },
+  fmtName: { fontSize:15, fontWeight:'600', color:'#1a1a1a', marginBottom:2 },
+  fmtDesc: { fontSize:12, color:'#6b7280' },
+  pickerCancel: { marginTop:18, paddingVertical:14, alignItems:'center', backgroundColor:'#f3f4f6', borderRadius:12 },
+  pickerCancelTxt: { fontSize:15, fontWeight:'600', color:'#374151' },
+  exportingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor:'rgba(0,0,0,0.35)', alignItems:'center', justifyContent:'center', zIndex:999 },
+  exportingCard: { backgroundColor:'#fff', borderRadius:16, padding:28, alignItems:'center', gap:14, minWidth:160 },
+  exportingTxt: { fontSize:14, color:'#374151', fontWeight:'600' },
   chargesLink: {
     color:'#1b5fe4', fontSize:13, fontWeight:'600',
     marginTop:10, textDecorationLine:'underline',
