@@ -12,6 +12,14 @@ const ORDER_TYPES = ['Regular', 'MTF', 'Iceberg', 'Cover'];
 const PRODUCT_TYPES = ['CNC', 'MIS', 'NRML'];
 const PRICE_MODES = ['Market', 'Limit', 'SL', 'SL-M'];
 
+function checkMarketOpen() {
+  const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const day = ist.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = ist.getHours() * 60 + ist.getMinutes();
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+}
+
 export default function OrderEntryScreen({ route, navigation }) {
   const { symbol, ltp = 0, defaultSide = 'BUY' } = route.params || {};
   const insets = useSafeAreaInsets();
@@ -26,6 +34,7 @@ export default function OrderEntryScreen({ route, navigation }) {
   const [productType, setProductType] = useState('CNC');
   const [loading, setLoading] = useState(false);
   const [wallet, setWallet] = useState(null);
+  const [marketOpen, setMarketOpen] = useState(checkMarketOpen());
 
   const nsePrice = Number(ltp);
   const bsePrice = Math.round((nsePrice - (nsePrice * 0.0001 + 0.50)) * 100) / 100;
@@ -33,6 +42,9 @@ export default function OrderEntryScreen({ route, navigation }) {
 
   useEffect(() => {
     api.getWallet().then(setWallet).catch(() => {});
+    // Re-check market status every minute so the button enables/disables live
+    const timer = setInterval(() => setMarketOpen(checkMarketOpen()), 60000);
+    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -279,9 +291,19 @@ export default function OrderEntryScreen({ route, navigation }) {
 
       {/* ── Footer: Place Order button ── */}
       <View style={[styles.footer, { paddingBottom: insets.bottom + 8 }]}>
+        {!marketOpen && (
+          <View style={styles.marketClosedBanner}>
+            <Ionicons name="time-outline" size={15} color="#B45309" />
+            <Text style={styles.marketClosedText}>
+              Market closed · NSE: Mon–Fri 9:15 AM – 3:30 PM IST
+            </Text>
+          </View>
+        )}
         <TouchableOpacity
-          style={[styles.placeOrderBtn, { backgroundColor: accentColor }]}
-          onPress={handlePlaceOrder}
+          style={[styles.placeOrderBtn, { backgroundColor: marketOpen ? accentColor : '#9CA3AF' }]}
+          onPress={marketOpen ? handlePlaceOrder : () =>
+            Alert.alert('Market Closed', 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.\n\nOrders can only be placed during market hours.')
+          }
           activeOpacity={0.88}
           disabled={loading}
         >
@@ -289,8 +311,9 @@ export default function OrderEntryScreen({ route, navigation }) {
             <ActivityIndicator color="#fff" size="small" />
           ) : (
             <Text style={styles.placeOrderText}>
-              {side} · {qty} {qty === 1 ? 'share' : 'shares'} · ₹
-              {totalAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {marketOpen
+                ? `${side} · ${qty} ${qty === 1 ? 'share' : 'shares'} · ₹${totalAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                : 'Market Closed'}
             </Text>
           )}
         </TouchableOpacity>
@@ -500,6 +523,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 12,
   },
+  marketClosedBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#FEF3C7', borderRadius: 6,
+    paddingHorizontal: 12, paddingVertical: 8, marginBottom: 10,
+  },
+  marketClosedText: { fontSize: 12, color: '#92400E', flex: 1 },
   placeOrderBtn: {
     height: 52,
     borderRadius: 8,

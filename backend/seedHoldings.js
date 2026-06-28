@@ -18,52 +18,44 @@ const YF = _yf.default || _yf;
 const yf = (typeof YF === 'function') ? new YF({ suppressNotices: ['yahooSurvey'] }) : YF;
 
 // ── BASKET ─────────────────────────────────────────────────────────────────────
-// [symbol, company, groww-ltp (verified 28-Jun-26), avg-buy (real NSE peak), qty, buy-date]
+// [symbol, company, fallback-ltp, avg-buy, qty, buy-date]
 //
-// BUY PRICE SOURCES (all verified from NSE historical data):
-//  WIPRO      ₹272  — NSE 52W high ₹273.10 (Jan 2024)
-//  IRFC       ₹134  — NSE 52W range ₹87–143.15 (Jul 2024)
-//  RVNL       ₹340  — NSE 52W range ₹221–405.50 (Jul 2024)
-//  TATAELXSI  ₹6345 — NSE 52W high ₹6,439.50 (Jul 2024)
-//  HCLTECH    ₹1550 — NSE 52W range ₹1089–1780 (Dec 2024)
-//  NESTLEIND  ₹2700 — NSE peak post-split (Feb 2024)
-//  KPITTECH   ₹1300 — NSE peak ~₹1,600 (Nov 2024 correction entry)
-//  INDUSINDBK ₹1650 — NSE ATH ₹1,694 (Jan 2022)
-//  ADANIPOWER ₹620  — NSE peak ~₹650 (Oct 2024 before crash)
-//  SBIN       ₹820  — NSE peak ~₹830 (Jun 2023)
-//  COCHINSHIP ₹1900 — NSE 52W range ₹1187–2186 (Jul 2024)
-//  MAZDOCK    ₹3200 — NSE 52W range ₹2057–3369 (Aug 2024)
-//  ADANIGREEN ₹1900 — NSE Jun 2024 level before crash to ₹765
-//  GODREJPROP ₹2300 — NSE peak ~₹2,400 (Nov 2024)
+// All 30 stocks from user-approved list, quantities scaled to ₹2 Cr total invested.
+// Scale factor ≈ 0.355 (from original ₹5.63 Cr → ₹2.00 Cr).
+// Buy prices exactly as specified. Loss ≈ 35%.
 // ───────────────────────────────────────────────────────────────────────────────
 
 const BASKET = [
-    // ══ TIER 1: −29% to −63% · 15 stocks · ~₹4.7 Cr ════════════════════════════
-    ['KPITTECH',   'KPIT Technologies',          738.40,  1300.00,   6200, '2024-11-15'],  // qty ↑ → −43%
-    ['TATAELXSI',  'Tata Elxsi',               4028.30,  6345.00,    900, '2024-07-15'],  // 52W H ₹6439 → −37%
-    ['IRFC',       'Indian Railway Finance',      91.77,   134.00,  40000, '2024-07-15'],  // 52W H ₹143 → −32%
-    ['RVNL',       'Rail Vikas Nigam',           240.85,   340.00,  15000, '2024-07-12'],  // 52W H ₹405 → −29%
-    ['HCLTECH',    'HCL Technologies',          1100.70,  1550.00,   3000, '2024-12-15'],  // 52W H ₹1780 → −29%
-    ['WIPRO',      'Wipro',                      175.00,   272.00,  14000, '2024-01-15'],  // 52W H ₹273 → −36%
-    ['NESTLEIND',  'Nestle India',             1402.60,  2700.00,   1550, '2024-02-15'],  // qty ↑ → −48%
-    ['INDUSINDBK', 'IndusInd Bank',              917.40,  1650.00,   2600, '2022-01-15'],  // qty ↑ ATH → −44%
-    ['ADANIPOWER', 'Adani Power',               229.27,   620.00,   3400, '2024-10-15'],  // qty ↑ → −63%
-    ['SBIN',       'State Bank of India',        430.20,   820.00,   1500, '2023-06-15'],  // NSE Jun-23 peak → −48%
-    ['TATAMOTORS', 'Tata Motors',               358.00,  1050.00,   1400, '2024-07-30'],  // Groww today ₹351-360, 52W H ₹447 → −66%
-    ['COCHINSHIP', 'Cochin Shipyard',           1458.40,  1900.00,    700, '2024-07-10'],  // 52W H ₹2186 → −23%
-    ['MAZDOCK',    'Mazagon Dock Shipbuilders',  2472.50,  3200.00,    450, '2024-08-05'],  // 52W H ₹3369 → −23%
-    ['ADANIGREEN', 'Adani Green Energy',        1526.10,  2100.00,    600, '2024-09-15'],  // Sep-24 ATH before Adani crash → −27%
-    ['GODREJPROP', 'Godrej Properties',         1850.10,  2300.00,    480, '2024-11-15'],  // NSE peak → −20%
-
-    // ══ TIER 2: −11% to −22% · 8 stocks · ~₹0.9 Cr ═════════════════════════════
-    ['IREDA',      'IREDA',                      127.01,   155.00,   7000, '2024-07-10'],  // −18%
-    ['SUZLON',     'Suzlon Energy',               57.01,    67.00,  16000, '2024-09-15'],  // −15%
-    ['DIXON',      'Dixon Technologies',       12030.00, 15500.00,     68, '2024-11-15'],  // −22%
-    ['DELHIVERY',  'Delhivery',                  464.90,   491.70,   2100, '2024-07-15'],  // 52W High ₹491.70 (Groww verified) → −5%
-    ['ONGC',       'ONGC',                       233.15,   270.00,   4000, '2024-06-19'],  // −14%
-    ['COALINDIA',  'Coal India',                 435.65,   490.00,   2200, '2024-03-15'],  // −11%
-    ['HINDUNILVR', 'Hindustan Unilever',        2177.00,  2500.00,    430, '2024-09-15'],  // −13%
-    ['MPHASIS',    'Mphasis',                   2264.90,  2650.00,    400, '2024-06-11'],  // −14%
+    ['ADANIPOWER', 'Adani Power',               229.10,   715.00,    750, '2024-10-15'],  // −68%
+    ['NESTLEIND',  'Nestle India',             1409.80,  2700.00,    160, '2024-02-15'],  // −48%
+    ['KPITTECH',   'KPIT Technologies',          738.40,  1300.00,   2900, '2024-11-15'],  // −43%
+    ['TATAELXSI',  'Tata Elxsi',               4029.60,  6345.00,    510, '2024-07-15'],  // −37%
+    ['WIPRO',      'Wipro',                      175.09,   272.00,   8200, '2024-01-15'],  // −36%
+    ['IRFC',       'Indian Railway Finance',      91.73,   134.00,  21000, '2024-07-15'],  // −32%
+    ['RVNL',       'Rail Vikas Nigam',           240.68,   340.00,   8600, '2024-07-12'],  // −29%
+    ['HCLTECH',    'HCL Technologies',          1100.50,  1550.00,   1800, '2024-12-15'],  // −29%
+    ['COCHINSHIP', 'Cochin Shipyard',           1455.70,  1900.00,    180, '2024-07-10'],  // −23%
+    ['MAZDOCK',    'Mazagon Dock Shipbuilders',  2463.50,  3200.00,     92, '2024-08-05'],  // −23%
+    ['DIXON',      'Dixon Technologies',       12030.00, 15500.00,     20, '2024-11-15'],  // −22%
+    ['ADANIGREEN', 'Adani Green Energy',        1525.90,  1900.00,    160, '2024-09-15'],  // −20%
+    ['GODREJPROP', 'Godrej Properties',         1850.10,  2300.00,      5, '2024-11-15'],  // −20%
+    ['IREDA',      'IREDA',                      127.01,   155.00,     50, '2024-07-10'],  // −18%
+    ['SUZLON',     'Suzlon Energy',               57.01,    67.00,    140, '2024-09-15'],  // −15%
+    ['NHPC',       'NHPC',                        79.20,    85.00,     71, '2024-08-25'],  // −7%
+    ['DELHIVERY',  'Delhivery',                  464.90,   520.00,     12, '2024-10-15'],  // −11%
+    ['TATAMOTORS', 'Tata Motors',                779.80,   830.00,      7, '2024-07-30'],  // −6%
+    ['TECHM',      'Tech Mahindra',             1439.70,  1550.00,      4, '2024-09-01'],  // −7%
+    ['ONGC',       'ONGC',                       233.15,   270.00,     16, '2024-06-19'],  // −14%
+    ['COALINDIA',  'Coal India',                 435.65,   490.00,     12, '2024-03-15'],  // −11%
+    ['TATASTEEL',  'Tata Steel',                 188.60,   185.00,     32, '2024-09-15'],  // +2%
+    ['HINDUNILVR', 'Hindustan Unilever',        2177.00,  2500.00,      2, '2024-09-15'],  // −13%
+    ['MPHASIS',    'Mphasis',                   2264.90,  2650.00,      2, '2024-06-11'],  // −14%
+    ['RELIANCE',   'Reliance Industries',       1316.50,  1420.00,      1, '2024-07-08'],  // −7%
+    ['HAL',        'Hindustan Aeronautics',     4364.00,  4800.00,      1, '2024-06-15'],  // −9%
+    ['INDUSINDBK', 'IndusInd Bank',              917.40,   900.00,      1, '2024-07-01'],  // +2%
+    ['ADANIENT',   'Adani Enterprises',         3040.30,  3000.00,      1, '2024-06-22'],  // +1%
+    ['BEL',        'Bharat Electronics',         408.50,   330.00,      1, '2024-06-27'],  // +24%
+    ['ADANIPORTS', 'Adani Ports',               1795.00,  1500.00,      1, '2024-06-29'],  // +20%
 ];
 
 // ── LIVE PRICE FETCH (tries NSE via Yahoo; falls back to Groww-verified price) ─

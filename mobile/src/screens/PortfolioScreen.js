@@ -67,9 +67,29 @@ export default function PortfolioScreen({ navigation }) {
   // ── Live socket updates ─────────────────────────────────────────
   useEffect(() => {
     const socket = getSocket();
+
+    // initialData fires once on socket connect — populates all state
+    // immediately without waiting for the first API call to complete.
+    const onInitialData = (data) => {
+      if (data.holdings)  setHoldings(data.holdings);
+      if (data.positions) setPositions(data.positions);
+    };
+    socket.on('initialData', onInitialData);
+
     const onOrderExecuted = (data) => {
       if (data.positions) setPositions(data.positions);
-      if (data.holdings)  setHoldings(data.holdings);
+      if (data.holdings) {
+        // Merge incoming DB holdings with current live ltps so current value
+        // updates instantly without waiting for the next marketData tick.
+        setHoldings(prev => {
+          const ltpMap = {};
+          prev.forEach(h => { ltpMap[h.stockSymbol] = h.ltp; });
+          return data.holdings.map(h => ({
+            ...h,
+            ltp: ltpMap[h.stockSymbol] ?? h.ltp,
+          }));
+        });
+      }
       if (data.order) {
         setFlashMsg(`${data.order.side} ${data.order.stockSymbol} executed`);
         Animated.sequence([
@@ -102,6 +122,7 @@ export default function PortfolioScreen({ navigation }) {
     socket.on('orderExecuted', onOrderExecuted);
     socket.on('marketData', onMarketData);
     return () => {
+      socket.off('initialData', onInitialData);
       socket.off('orderExecuted', onOrderExecuted);
       socket.off('marketData', onMarketData);
     };

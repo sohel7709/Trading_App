@@ -1,4 +1,6 @@
-const yahooFinance = require('yahoo-finance2').default;
+const _yf2 = require('yahoo-finance2');
+const _YF2 = _yf2.default || _yf2;
+const yahooFinance = (typeof _YF2 === 'function') ? new _YF2({ suppressNotices: ['yahooSurvey'] }) : _YF2;
 const liveDataService = require('./liveDataService');
 
 // Plain NSE symbols (no .NS suffix) — used by Groww API
@@ -8,7 +10,7 @@ const NSE_STOCK_SYMBOLS = [
     'LT', 'WIPRO', 'AXISBANK', 'SUNPHARMA', 'TATAMOTORS',
     'TITAN', 'ADANIENT', 'ADANIPORTS', 'NTPC', 'MARUTI',
     'POWERGRID', 'HCLTECH', 'TATASTEEL', 'ULTRACEMCO', 'ASIANPAINT',
-    'BAJFINANCE', 'NESTLEIND', 'ONGC', 'JSWSTEEL', 'TECHM',
+    'BAJFINANCE', 'ONGC', 'JSWSTEEL', 'TECHM',
     'DIVISLAB', 'CIPLA', 'DRREDDY', 'GRASIM', 'HDFCLIFE',
     'SBILIFE', 'BPCL', 'BAJAJFINSV', 'TATAPOWER', 'KPITTECH',
     'COALINDIA', 'EICHERMOT', 'BRITANNIA', 'HEROMOTOCO', 'HINDALCO',
@@ -42,11 +44,13 @@ function yahooToNseSymbol(yahooSymbol) {
 
 async function fetchQuote(symbol) {
     try {
-        const quote = await yahooFinance.quote(symbol);
-        if (!quote) return null;
+        // Yahoo Finance index symbols like ^BSESN must not have .NS appended
+        const yahooSym = symbol.startsWith('^') ? symbol : `${symbol}`;
+        const quote = await yahooFinance.quote(yahooSym, {}, { validateResult: false });
+        if (!quote || !quote.regularMarketPrice) return null;
         return {
             symbol: yahooToNseSymbol(symbol),
-            ltp: quote.regularMarketPrice || 0,
+            ltp: quote.regularMarketPrice,
             open: quote.regularMarketOpen || 0,
             high: quote.regularMarketDayHigh || 0,
             low: quote.regularMarketDayLow || 0,
@@ -54,9 +58,12 @@ async function fetchQuote(symbol) {
             volume: quote.regularMarketVolume || 0,
             change: quote.regularMarketChange || 0,
             changePercent: quote.regularMarketChangePercent || 0,
+            yearHigh: quote.fiftyTwoWeekHigh || 0,
+            yearLow: quote.fiftyTwoWeekLow || 0,
             currency: quote.currency || 'INR',
         };
     } catch (err) {
+        console.log(`[Market] fetchQuote(${symbol}) err: ${err.message?.slice(0,80)}`);
         return null;
     }
 }
@@ -84,13 +91,13 @@ const SIMULATED_PRICES = {
     'NTPC': { ltp: 381.00, prevClose: 379.00 },           // live Jun-2026
     'MARUTI': { ltp: 12000.00, prevClose: 11950.00 },     // live Jun-2026
     'POWERGRID': { ltp: 310.00, prevClose: 308.00 },
-    'TATAMOTORS': { ltp: 358.00, prevClose: 360.00, high52w: 447.79, low52w: 294.30, volume: 3100000 },
+    'TATAMOTORS': { ltp: 779.80, prevClose: 776.00, high52w: 1065.00, low52w: 580.00, volume: 3100000 },
     'HCLTECH': { ltp: 1101.00, prevClose: 1095.00, high52w: 1780.10, low52w: 1089.50, volume: 820000 },
     'TATASTEEL': { ltp: 189.00, prevClose: 187.00 },      // live Jun-2026
     'ULTRACEMCO': { ltp: 11250.80, prevClose: 11230.00 },
     'ASIANPAINT': { ltp: 3240.15, prevClose: 3235.00 },
     'BAJFINANCE': { ltp: 7120.50, prevClose: 7100.00 },
-    'NESTLEIND': { ltp: 1402.60, prevClose: 1400.00, high52w: 1498.10, low52w: 1084.70, volume: 155000 },
+    'NESTLEIND': { ltp: 1402.60, prevClose: 1400.00, high52w: 2750.00, low52w: 1084.70, volume: 155000 },  // 52H above avg ₹2700
     'ONGC': { ltp: 233.15, prevClose: 234.00, high52w: 307.50, low52w: 228.61, volume: 5100000 },
     'JSWSTEEL': { ltp: 985.40, prevClose: 982.00 },
     'TECHM': { ltp: 1440.00, prevClose: 1430.00 },       // live Jun-2026
@@ -121,24 +128,37 @@ const SIMULATED_PRICES = {
     'LTIM': { ltp: 5000.00, prevClose: 4990.00 },
 
     // ── Holdings stocks added for full 52W data on StockDetailScreen ──────────
+    'NHPC':       { ltp:   79.20, prevClose:   79.50, high52w:   95.00, low52w:   71.62, volume: 2100000 },  // 52H above avg ₹85
+    'HAL':        { ltp: 4364.00, prevClose: 4380.00, high52w: 5065.00, low52w: 3479.10, volume: 410000 },   // 52H above avg ₹4800
+    'BEL':        { ltp:  408.50, prevClose:  407.00, high52w:  473.45, low52w:  361.20, volume: 3100000 },  // 52H above avg ₹330
     'TATAELXSI':  { ltp: 4028.30, prevClose: 4020.00, high52w: 6439.50, low52w: 3926.10, volume: 105000 },
     'IRFC':       { ltp:   91.77, prevClose:   92.00, high52w:  143.15, low52w:   87.00, volume: 2100000 },
     'RVNL':       { ltp:  240.85, prevClose:  241.00, high52w:  405.50, low52w:  221.55, volume: 1600000 },
-    'ADANIPOWER': { ltp:  229.27, prevClose:  230.00, high52w:  254.20, low52w:  109.75, volume: 2000000 },
+    'ADANIPOWER': { ltp:  229.27, prevClose:  230.00, high52w:  750.00, low52w:  109.75, volume: 2000000 },  // 52H above avg ₹715 (Oct-24 peak)
     'COCHINSHIP': { ltp: 1458.40, prevClose: 1460.00, high52w: 2186.00, low52w: 1187.00, volume: 310000 },
     'MAZDOCK':    { ltp: 2472.50, prevClose: 2475.00, high52w: 3369.00, low52w: 2057.40, volume: 205000 },
-    'ADANIGREEN': { ltp: 1526.10, prevClose: 1525.00, high52w: 1557.00, low52w:  765.00, volume: 510000 },
+    'ADANIGREEN': { ltp: 1526.10, prevClose: 1525.00, high52w: 2200.00, low52w:  765.00, volume: 510000 },  // 52H above avg ₹1900 (Sep-24 peak)
     'GODREJPROP': { ltp: 1850.10, prevClose: 1852.00, high52w: 2420.00, low52w: 1434.00, volume: 410000 },
     'IREDA':      { ltp:  127.01, prevClose:  128.00, high52w:  310.00, low52w:  109.00, volume: 3100000 },
     'SUZLON':     { ltp:   57.01, prevClose:   57.50, high52w:   86.00, low52w:   38.19, volume: 10200000 },
     'DIXON':      { ltp: 12030.00, prevClose: 12050.00, high52w: 18471.00, low52w: 9600.00, volume: 52000 },
-    'DELHIVERY':  { ltp:  464.90, prevClose:  466.00, high52w:  491.70, low52w:  374.45, volume: 810000 },
+    'DELHIVERY':  { ltp:  464.90, prevClose:  466.00, high52w:  550.00, low52w:  374.45, volume: 810000 },  // 52H above avg ₹520 (Oct-24 level)
     'MPHASIS':    { ltp: 2264.90, prevClose: 2265.00, high52w: 3037.20, low52w: 2013.00, volume: 205000 },
     'HINDUNILVR': { ltp: 2177.00, prevClose: 2178.00, high52w: 2705.09, low52w: 2022.50, volume: 615000 },
 };
 
+// Returns true only during NSE trading hours (Mon–Fri, 9:15 AM–3:30 PM IST)
+function isMarketOpen() {
+    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const day = ist.getDay();
+    if (day === 0 || day === 6) return false;
+    const mins = ist.getHours() * 60 + ist.getMinutes();
+    return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+}
+
 function generateSimulatedPrice(basePrice) {
-    const variation = (Math.random() - 0.5) * (basePrice * 0.02); // ±1% random variation
+    if (!isMarketOpen()) return Math.round(basePrice * 100) / 100; // fixed when market closed
+    const variation = (Math.random() - 0.5) * (basePrice * 0.02); // ±1% during market hours
     return Math.round((basePrice + variation) * 100) / 100;
 }
 
@@ -167,13 +187,13 @@ function simulateStockPrices() {
     }
 
     // Simulated index data
-    const niftyBase = 22450;
+    const niftyBase = 24650;   // NIFTY 50 ~Jun 2026
     const niftyLtp = generateSimulatedPrice(niftyBase);
     indexData['NIFTY 50'] = { name: 'NIFTY 50', ltp: niftyLtp, change: niftyLtp - niftyBase, changePercent: ((niftyLtp - niftyBase) / niftyBase) * 100, symbol: 'NIFTY', isSimulated: true };
-    indexData['BANK NIFTY'] = { name: 'BANK NIFTY', ltp: generateSimulatedPrice(48250), change: 150, changePercent: 0.31, symbol: 'BANKNIFTY', isSimulated: true };
-    indexData['SENSEX'] = { name: 'SENSEX', ltp: generateSimulatedPrice(74200), change: 200, changePercent: 0.27, symbol: 'SENSEX', isSimulated: true };
-    indexData['NIFTY IT'] = { name: 'NIFTY IT', ltp: generateSimulatedPrice(38100), change: -50, changePercent: -0.13, symbol: 'NIFTYIT', isSimulated: true };
-    indexData['FINNIFTY'] = { name: 'FINNIFTY', ltp: generateSimulatedPrice(21500), change: 80, changePercent: 0.37, symbol: 'FINNIFTY', isSimulated: true };
+    indexData['BANK NIFTY'] = { name: 'BANK NIFTY', ltp: generateSimulatedPrice(54800), change: 120, changePercent: 0.22, symbol: 'BANKNIFTY', isSimulated: true };
+    indexData['SENSEX'] = { name: 'SENSEX', ltp: generateSimulatedPrice(81200), change: 180, changePercent: 0.22, symbol: 'SENSEX', isSimulated: true };
+    indexData['NIFTY IT'] = { name: 'NIFTY IT', ltp: generateSimulatedPrice(35400), change: -45, changePercent: -0.13, symbol: 'NIFTYIT', isSimulated: true };
+    indexData['FINNIFTY'] = { name: 'FINNIFTY', ltp: generateSimulatedPrice(23200), change: 65, changePercent: 0.28, symbol: 'FINNIFTY', isSimulated: true };
 
     lastUpdated = new Date().toISOString();
 }
@@ -233,8 +253,12 @@ async function fetchAllStockPrices() {
             }
         }
 
-        // ── Step 3: Yahoo Finance fallback for missing indexes (e.g. SENSEX) ──
-        const missingIndexes = INDEX_SYMBOLS.filter(idx => !indexData[idx.name]);
+        // ── Step 3: Yahoo Finance fallback for indexes without NSE_LIVE source
+        // (includes SENSEX which is BSE — NSE never returns it)
+        const LIVE_SOURCES = new Set(['NSE_LIVE', 'YAHOO_LIVE']);
+        const missingIndexes = INDEX_SYMBOLS.filter(
+            idx => !indexData[idx.name] || !LIVE_SOURCES.has(indexData[idx.name]?.source)
+        );
         if (missingIndexes.length > 0) {
             const idxResults = await Promise.allSettled(
                 missingIndexes.map(idx => fetchQuote(idx.symbol))
@@ -244,8 +268,10 @@ async function fetchAllStockPrices() {
                     indexData[missingIndexes[i].name] = {
                         ...r.value,
                         name: missingIndexes[i].name,
+                        source: 'YAHOO_LIVE',  // tag so next cycle skips it
                     };
                     gotLiveIndexes = true;
+                    console.log(`[Market] Yahoo: ${missingIndexes[i].name} = ${r.value.ltp}`);
                 }
             });
         }

@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   RefreshControl, ActivityIndicator,
@@ -7,7 +7,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../theme/colors';
-import { api } from '../api/client';
+import { api, getSocket } from '../api/client';
 
 // ─── Helper: format INR with commas ─────────────────────────────────────────
 const fmt = (n) =>
@@ -44,6 +44,19 @@ export default function FundsScreen({ navigation }) {
   };
 
   useFocusEffect(useCallback(() => { fetchData(); }, []));
+
+  // Auto-load on socket connect + live update on orders
+  useEffect(() => {
+    const socket = getSocket();
+    const onInitialData = (data) => { if (data.wallet) setWallet(data.wallet); };
+    const onOrderExecuted = (data) => { if (data.wallet) setWallet(data.wallet); };
+    socket.on('initialData', onInitialData);
+    socket.on('orderExecuted', onOrderExecuted);
+    return () => {
+      socket.off('initialData', onInitialData);
+      socket.off('orderExecuted', onOrderExecuted);
+    };
+  }, []);
 
   const available = Number(wallet?.availableMargin ?? 0);
   const used      = Number(wallet?.usedMargin ?? 0);

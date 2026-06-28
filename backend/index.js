@@ -69,11 +69,28 @@ app.get('/allOrders', async (req, res) => {
     }
 });
 
+// NSE market hours: Mon–Fri 09:15–15:30 IST
+function isMarketOpen() {
+    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const day = ist.getDay();
+    if (day === 0 || day === 6) return false;
+    const mins = ist.getHours() * 60 + ist.getMinutes();
+    return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+}
+
 app.post('/newOrder', async (req, res) => {
     const { stockSymbol, qty: quantity, price, mode: type, side, productType } = req.body;
 
     if (!stockSymbol || !quantity || !price) {
         return res.status(400).json({ message: 'Missing required fields: stockSymbol, qty, price' });
+    }
+
+    if (!isMarketOpen()) {
+        return res.status(400).json({
+            message: 'Market is closed',
+            detail: 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.',
+            marketClosed: true,
+        });
     }
 
     try {
@@ -110,20 +127,7 @@ app.post('/newOrder', async (req, res) => {
         });
         await newTrade.save();
 
-        // Update wallet
-        let wallet = await WalletModel.findOne({});
-        if (!wallet) {
-            wallet = new WalletModel({ balance: 100000, usedMargin: 0, availableMargin: 100000 });
-        }
-
-        if (orderSide === 'BUY') {
-            wallet.usedMargin += totalValue;
-            wallet.availableMargin = wallet.balance - wallet.usedMargin;
-        } else {
-            wallet.usedMargin = Math.max(0, wallet.usedMargin - totalValue);
-            wallet.availableMargin = wallet.balance - wallet.usedMargin;
-        }
-        await wallet.save();
+        // Wallet is updated AFTER holdings are modified below; handled at broadcast step
 
         // Update holdings / positions
         if (orderSide === 'BUY') {
@@ -149,17 +153,18 @@ app.post('/newOrder', async (req, res) => {
             } else {
                 // CNC - Delivery holding
                 let holding = await HoldingsModel.findOne({ stockSymbol: stockSymbol.toUpperCase() });
+                const liveLtp = marketDataService.getStockPrice(stockSymbol.toUpperCase())?.ltp ?? Number(price);
                 if (holding) {
                     const totalQty = holding.quantity + Number(quantity);
-                    holding.avgPrice = ((holding.avgPrice * holding.quantity) + (Number(price) * Number(quantity))) / totalQty;
+                    holding.avgPrice = Math.round(((holding.avgPrice * holding.quantity) + (Number(price) * Number(quantity))) / totalQty * 100) / 100;
                     holding.quantity = totalQty;
-                    holding.ltp = Number(price);
+                    holding.ltp = liveLtp;
                 } else {
                     holding = new HoldingsModel({
                         stockSymbol: stockSymbol.toUpperCase(),
                         quantity: Number(quantity),
                         avgPrice: Number(price),
-                        ltp: Number(price),
+                        ltp: liveLtp,
                         productType: 'CNC',
                     });
                 }
@@ -190,15 +195,33 @@ app.post('/newOrder', async (req, res) => {
             }
         }
 
-        // Broadcast updated positions & holdings to all connected clients
-        const [updatedPositions, updatedHoldings] = await Promise.all([
+        // Delete the order once executed — trade record preserves history
+        await OrdersModel.deleteOne({ _id: newOrder._id });
+
+        // Broadcast updated positions, holdings & wallet — all computed from actual DB state
+        const [updatedPositions, updatedHoldings, wallet] = await Promise.all([
             PositionsModel.find({}),
             HoldingsModel.find({}),
+            WalletModel.findOne({}),
         ]);
+
+        // Sync wallet.usedMargin with actual holdings cost basis
+        if (wallet) {
+            const actualUsed = updatedHoldings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
+            wallet.usedMargin      = Math.round(actualUsed);
+            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin);
+            await wallet.save();
+        }
+
+        const holdingsWithLiveLtp = updatedHoldings.map(h => {
+            const live = marketDataService.getStockPrice(h.stockSymbol);
+            return { ...h.toObject(), ltp: live?.ltp ?? h.ltp };
+        });
         io.emit('orderExecuted', {
             order: newOrder,
             positions: updatedPositions,
-            holdings: updatedHoldings,
+            holdings: holdingsWithLiveLtp,
+            wallet: wallet?.toObject(),
         });
 
         res.status(201).json({
@@ -1436,16 +1459,35 @@ app.get('/market/history/:symbol', async (req, res) => {
 });
 
 // ============ SOCKET.IO ============
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
     console.log('Client connected:', socket.id);
 
-    // Send current market data immediately on connect
+    // Push market data immediately so the client doesn't wait 30s
     socket.emit('marketData', {
         prices: marketDataService.getStockPrices(),
         indexes: marketDataService.getIndexData(),
         movers: marketDataService.getMarketMovers(),
         lastUpdated: marketDataService.getLastUpdated(),
     });
+
+    // Push holdings, positions, wallet instantly on connect so every screen
+    // auto-populates without needing a manual pull-to-refresh.
+    try {
+        const [holdings, positions, wallet] = await Promise.all([
+            HoldingsModel.find({}),
+            PositionsModel.find({}),
+            WalletModel.findOne({}),
+        ]);
+        const holdingsLive = holdings.map(h => {
+            const live = marketDataService.getStockPrice(h.stockSymbol);
+            return { ...h.toObject(), ltp: live?.ltp ?? h.ltp };
+        });
+        socket.emit('initialData', {
+            holdings: holdingsLive,
+            positions,
+            wallet: wallet?.toObject(),
+        });
+    } catch (e) { /* non-fatal */ }
 
     socket.on('subscribe', (symbols) => {
         if (Array.isArray(symbols)) {
@@ -1493,6 +1535,20 @@ async function broadcastMarketData() {
     io.emit('marketData', data);
     console.log(`[Broadcast] source: ${data.source} | ${new Date().toLocaleTimeString()}`);
 }
+
+// Sync wallet.usedMargin with actual holdings on startup
+(async () => {
+    try {
+        const [holdings, wallet] = await Promise.all([HoldingsModel.find({}), WalletModel.findOne({})]);
+        if (wallet && holdings.length > 0) {
+            const actualUsed = holdings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
+            wallet.usedMargin      = Math.round(actualUsed);
+            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin);
+            await wallet.save();
+            console.log(`[Wallet] Synced usedMargin = ₹${wallet.usedMargin.toLocaleString('en-IN')} from ${holdings.length} holdings`);
+        }
+    } catch (e) { console.error('[Wallet] Sync error:', e.message); }
+})();
 
 // Initial fetch, then every 30 seconds
 broadcastMarketData();

@@ -6,6 +6,9 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import XLSX from 'xlsx';
 import { colors } from '../theme/colors';
 import { api } from '../api/client';
 
@@ -579,19 +582,83 @@ export default function PLScreen({ navigation }) {
   const handleGenerate = () => fetchPnl(segment, fromDate, toDate);
   const handleResetFilter = () => setSegment('combined');
 
-  /* CSV export */
-  const handleDownloadCSV = () => {
+  /* Excel export */
+  const handleDownloadCSV = async () => {
     const trades = pnlData?.trades || [];
     if (!trades.length) return Alert.alert('No data', 'Generate a report first');
-    const s = pnlData?.summary;
-    const header = 'Symbol,Buy Qty,Sell Qty,Buy Avg (₹),Sell Avg (₹),Buy Value (₹),Sell Value (₹),Realized P&L (₹),P&L %,Charges (₹)\n';
-    const rows = trades.map(t =>
-      `${t.stockSymbol},${t.buyQty},${t.sellQty},${t.buyAvg},${t.sellAvg},${t.buyValue},${t.sellValue},${t.realizedPL},${t.realizedPct}%,${t.charges}`
-    ).join('\n');
-    const summary = `\n\nSummary\nRealised P&L,${s?.realizedPL ?? 0}\nUnrealised P&L,${s?.unrealizedPL ?? 0}\nCharges & Taxes,${s?.chargesAndTaxes ?? 0}\nNet P&L,${s?.netRealizedPL ?? 0}\n`;
-    const csv = `P&L Report: ${fromDate} to ${toDate}\nSegment: ${segLabel}\n\n` + header + rows + summary;
-    Share.share({ message: csv, title: `P&L_${fromDate}_${toDate}.csv` })
-      .catch(() => {});
+
+    try {
+      const s = pnlData?.summary;
+      const wb = XLSX.utils.book_new();
+
+      // ── Sheet 1: Trades ──────────────────────────────────────────────
+      const tradeRows = [
+        ['P&L Report', `${fromDate}  to  ${toDate}`, '', '', '', '', 'Segment:', segLabel],
+        [],
+        ['#', 'Symbol', 'Date', 'Buy Qty', 'Sell Qty',
+          'Buy Avg (₹)', 'Sell Avg (₹)', 'Buy Value (₹)', 'Sell Value (₹)',
+          'Realised P&L (₹)', 'P&L %', 'Charges (₹)', 'Net P&L (₹)'],
+        ...trades.map((t, i) => [
+          i + 1,
+          t.stockSymbol,
+          t.tradeDate ? new Date(t.tradeDate).toLocaleDateString('en-IN') : '',
+          t.buyQty ?? t.quantity,
+          t.sellQty ?? t.quantity,
+          Number(t.buyAvg?.toFixed(2) ?? 0),
+          Number(t.sellAvg?.toFixed(2) ?? 0),
+          Number(t.buyValue?.toFixed(2) ?? 0),
+          Number(t.sellValue?.toFixed(2) ?? 0),
+          Number(t.realizedPL?.toFixed(2) ?? 0),
+          `${t.realizedPct >= 0 ? '+' : ''}${t.realizedPct ?? 0}%`,
+          Number(t.charges?.toFixed(2) ?? 0),
+          Number(t.netPL?.toFixed(2) ?? 0),
+        ]),
+      ];
+      const wsT = XLSX.utils.aoa_to_sheet(tradeRows);
+      wsT['!cols'] = [
+        {wch:4},{wch:22},{wch:12},{wch:8},{wch:8},
+        {wch:12},{wch:12},{wch:14},{wch:14},
+        {wch:16},{wch:8},{wch:12},{wch:14},
+      ];
+      XLSX.utils.book_append_sheet(wb, wsT, 'Trades');
+
+      // ── Sheet 2: Summary ─────────────────────────────────────────────
+      const summaryRows = [
+        ['P&L Summary', `${fromDate}  to  ${toDate}`],
+        [],
+        ['Metric', 'Value (₹)'],
+        ['Realised P&L',    Number((s?.realizedPL      ?? 0).toFixed(2))],
+        ['Unrealised P&L',  Number((s?.unrealizedPL    ?? 0).toFixed(2))],
+        ['Charges & Taxes', Number((s?.chargesAndTaxes ?? 0).toFixed(2))],
+        ['Net Realised P&L',Number((s?.netRealizedPL   ?? 0).toFixed(2))],
+        [],
+        ['Winning Trades',  s?.winningTrades ?? 0],
+        ['Losing Trades',   s?.losingTrades  ?? 0],
+        ['Total Trades',    trades.length],
+      ];
+      const wsS = XLSX.utils.aoa_to_sheet(summaryRows);
+      wsS['!cols'] = [{wch:20},{wch:16}];
+      XLSX.utils.book_append_sheet(wb, wsS, 'Summary');
+
+      // ── Write to base64, save to cache, share ────────────────────────
+      const base64 = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+      const fileName = `PnL_${segLabel.replace(/\s+/g, '_')}_${fromDate}_${toDate}.xlsx`;
+      const uri = FileSystem.cacheDirectory + fileName;
+      await FileSystem.writeAsStringAsync(uri, base64, { encoding: FileSystem.EncodingType.Base64 });
+
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(uri, {
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          dialogTitle: 'Save P&L Report',
+          UTI: 'com.microsoft.excel.xlsx',
+        });
+      } else {
+        Alert.alert('Sharing unavailable', 'Cannot open share sheet on this device.');
+      }
+    } catch (e) {
+      Alert.alert('Export failed', e.message);
+    }
   };
 
   const segLabel = SEGMENTS.find(s => s.key === segment)?.label || 'Combined';
@@ -618,7 +685,7 @@ export default function PLScreen({ navigation }) {
         {hasLoaded && !loading && (
           <TouchableOpacity style={sc.downloadBtn} onPress={handleDownloadCSV}>
             <Ionicons name="download-outline" size={18} color="#1b5fe4" />
-            <Text style={sc.downloadText}>CSV</Text>
+            <Text style={sc.downloadText}>Excel</Text>
           </TouchableOpacity>
         )}
         <TouchableOpacity style={sc.menuBtn} onPress={() => setShowFilter(true)}>
@@ -734,7 +801,7 @@ export default function PLScreen({ navigation }) {
                 </View>
                 <TouchableOpacity style={sc.csvBtn} onPress={handleDownloadCSV}>
                   <Ionicons name="download-outline" size={15} color="#fff" />
-                  <Text style={sc.csvBtnText}>Download Tax P&L CSV</Text>
+                  <Text style={sc.csvBtnText}>Download Tax P&L Excel</Text>
                 </TouchableOpacity>
               </View>
 
