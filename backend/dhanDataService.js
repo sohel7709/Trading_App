@@ -6,10 +6,43 @@
 const DHAN_BASE = 'https://api.dhan.co';
 const SCRIP_MASTER_URL = 'https://images.dhan.co/api-data/api-scrip-master.csv';
 
-// symbol → integer securityId (loaded from Dhan scrip master CSV)
-let securityIdMap = {};
+// Verified from Dhan scrip master CSV (NSE EQ series, July 2026)
+// TATAMOTORS maps to TMCV (759782) — Tata Motors after commercial vehicle demerger
+const FALLBACK_SECURITY_IDS = {
+    'RELIANCE':    2885,   'TCS':         11536,  'HDFCBANK':    1333,
+    'INFY':        1594,   'ICICIBANK':   4963,   'HINDUNILVR':  1394,
+    'KOTAKBANK':   1922,   'SBIN':        3045,   'BHARTIARTL':  10604,
+    'ITC':         1660,   'LT':          11483,  'WIPRO':       3787,
+    'AXISBANK':    5900,   'SUNPHARMA':   3351,   'TATAMOTORS':  759782,
+    'TITAN':       3506,   'ADANIENT':    25,     'ADANIPORTS':  15083,
+    'NTPC':        11630,  'MARUTI':      10999,  'POWERGRID':   14977,
+    'HCLTECH':     7229,   'TATASTEEL':   3499,   'ULTRACEMCO':  11532,
+    'ASIANPAINT':  236,    'BAJFINANCE':  317,    'NESTLEIND':   17963,
+    'ONGC':        2475,   'JSWSTEEL':    11723,  'TECHM':       13538,
+    'DIVISLAB':    10940,  'CIPLA':       694,    'DRREDDY':     881,
+    'GRASIM':      1232,   'HDFCLIFE':   467,    'SBILIFE':     21808,
+    'BPCL':        526,    'BAJAJFINSV':  16675,  'TATAPOWER':   3426,
+    'KPITTECH':    9683,   'COALINDIA':   20374,  'EICHERMOT':   910,
+    'BRITANNIA':   547,    'HEROMOTOCO':  1348,   'HINDALCO':    1363,
+    'APOLLOHOSP':  157,    'INDUSINDBK':  5258,   'SHREECEM':    3103,
+    'M&M':         2031,   'BAJAJ-AUTO':  16669,  'UPL':         11287,
+    'AWL':         8110,   'BANDHANBNK':  2263,   'NYKAA':       6545,
+    'IEX':         220,    'LTIM':        17818,
+    // Holdings extras
+    'NHPC':        17400,  'HAL':         2303,   'BEL':         383,
+    'TATAELXSI':   3411,   'IRFC':        2029,   'RVNL':        9552,
+    'ADANIPOWER':  17388,  'COCHINSHIP':  21508,  'MAZDOCK':     509,
+    'ADANIGREEN':  3563,   'GODREJPROP':  17875,  'IREDA':       20261,
+    'SUZLON':      12018,  'DIXON':       21690,  'DELHIVERY':   9599,
+    'MPHASIS':     4503,   'TATACONSUM':  3432,
+};
+
+// symbol → integer securityId (starts with fallbacks, scrip master overwrites on load)
+let securityIdMap = { ...FALLBACK_SECURITY_IDS };
 // string(securityId) → symbol (reverse lookup)
-let securityIdToSymbol = {};
+let securityIdToSymbol = Object.fromEntries(
+    Object.entries(FALLBACK_SECURITY_IDS).map(([s, id]) => [String(id), s])
+);
 let scripMasterLoaded = false;
 let scripMasterLoading = false;
 
@@ -20,7 +53,7 @@ async function loadScripMaster() {
     scripMasterLoading = true;
     try {
         const res = await fetch(SCRIP_MASTER_URL, {
-            signal: AbortSignal.timeout(20000),
+            signal: AbortSignal.timeout(60000),
             headers: { 'User-Agent': 'Mozilla/5.0' },
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -144,14 +177,16 @@ async function fetchDhanStockQuotes(symbols) {
                 const sym = idToSym[secIdStr];
                 if (!sym) continue;
 
-                // Field names vary slightly across Dhan API versions — handle both
-                const ltp       = q.last_price ?? q.ltp ?? q.lastPrice ?? 0;
-                const prevClose = q.close ?? q.prev_close ?? q.previousClose ?? 0;
-                const open      = q.open  ?? 0;
-                const high      = q.high  ?? 0;
-                const low       = q.low   ?? 0;
-                const volume    = q.volume ?? q.tot_trd_qty ?? 0;
-                const change    = ltp - prevClose;
+                // Confirmed Dhan v2 /marketfeed/quote response shape:
+                // last_price, ohlc.{open,high,low,close}, volume,
+                // net_change, 52_week_high, 52_week_low
+                const ltp       = q.last_price ?? 0;
+                const open      = q.ohlc?.open  ?? 0;
+                const high      = q.ohlc?.high  ?? 0;
+                const low       = q.ohlc?.low   ?? 0;
+                const prevClose = q.ohlc?.close ?? 0;
+                const volume    = q.volume ?? 0;
+                const change    = q.net_change ?? (ltp - prevClose);
                 const chgPct    = prevClose > 0 ? (change / prevClose) * 100 : 0;
 
                 results[sym] = {
@@ -164,6 +199,8 @@ async function fetchDhanStockQuotes(symbols) {
                     volume,
                     change:        Math.round(change * 100) / 100,
                     changePercent: Math.round(chgPct  * 100) / 100,
+                    high52w:       q['52_week_high'] ?? 0,
+                    low52w:        q['52_week_low']  ?? 0,
                     currency:      'INR',
                     source:        'DHAN_LIVE',
                 };
@@ -220,10 +257,9 @@ async function fetchDhanLTP(symbols) {
             for (const [secIdStr, q] of Object.entries(nseEq)) {
                 const sym = idToSym[secIdStr];
                 if (!sym) continue;
-                const ltp = q.last_price ?? q.ltp ?? q.lastPrice ?? 0;
                 results[sym] = {
                     symbol: sym,
-                    ltp: Math.round(ltp * 100) / 100,
+                    ltp: Math.round((q.last_price ?? 0) * 100) / 100,
                     source: 'DHAN_LIVE',
                 };
             }
