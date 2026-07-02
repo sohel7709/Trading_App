@@ -2,6 +2,7 @@ const _yf2 = require('yahoo-finance2');
 const _YF2 = _yf2.default || _yf2;
 const yahooFinance = (typeof _YF2 === 'function') ? new _YF2({ suppressNotices: ['yahooSurvey'] }) : _YF2;
 const liveDataService = require('./liveDataService');
+const dhanDataService = require('./dhanDataService');
 
 // Plain NSE symbols (no .NS suffix) — used by Groww API
 const NSE_STOCK_SYMBOLS = [
@@ -203,14 +204,38 @@ async function fetchAllStockPrices() {
     isFetching = true;
 
     try {
-        // ── Step 1: Try NSE (indices) + Groww (stocks) ──
-        const live = await liveDataService.fetchLiveMarketData(NSE_STOCK_SYMBOLS);
-
         let gotLiveStocks = false;
         let gotLiveIndexes = false;
 
-        if (live.stockData && Object.keys(live.stockData).length > 0) {
-            // Merge Groww stock data into stockPrices
+        // ── Step 0: Dhan API (primary — if credentials are set) ──────────────
+        if (dhanDataService.isConfigured()) {
+            try {
+                const dhanData = await dhanDataService.fetchDhanStockQuotes(NSE_STOCK_SYMBOLS);
+                const count = Object.keys(dhanData).length;
+                if (count > 0) {
+                    for (const [sym, d] of Object.entries(dhanData)) {
+                        // Preserve 52W high/low from SIMULATED_PRICES if Dhan doesn't return them
+                        const sim = SIMULATED_PRICES[sym];
+                        stockPrices[sym] = {
+                            ...d,
+                            high52w: d.high52w || sim?.high52w || Math.round(d.ltp * 1.35 * 100) / 100,
+                            low52w:  d.low52w  || sim?.low52w  || Math.round(d.ltp * 0.72 * 100) / 100,
+                        };
+                    }
+                    gotLiveStocks = true;
+                    console.log(`[Market] Dhan: ${count} stocks updated`);
+                }
+            } catch (e) {
+                console.warn('[Market] Dhan fetch error:', e.message);
+            }
+        }
+
+        // ── Step 1: NSE (indices) + Groww stocks (if Dhan didn't provide stocks) ──
+        const live = await liveDataService.fetchLiveMarketData(
+            gotLiveStocks ? [] : NSE_STOCK_SYMBOLS   // skip Groww if Dhan succeeded
+        );
+
+        if (!gotLiveStocks && live.stockData && Object.keys(live.stockData).length > 0) {
             for (const [sym, d] of Object.entries(live.stockData)) {
                 stockPrices[sym] = d;
             }
@@ -219,7 +244,6 @@ async function fetchAllStockPrices() {
         }
 
         if (live.indexData && Object.keys(live.indexData).length > 0) {
-            // Merge NSE index data
             for (const [name, d] of Object.entries(live.indexData)) {
                 indexData[name] = d;
             }
@@ -229,7 +253,7 @@ async function fetchAllStockPrices() {
 
         // ── Step 2: Yahoo Finance fallback for any missing stocks ──
         if (!gotLiveStocks) {
-            console.log('[Market] Groww failed, trying Yahoo Finance for stocks…');
+            console.log('[Market] Dhan+Groww failed, trying Yahoo Finance for stocks…');
             let yahooSuccess = false;
             const batchSize = 10;
             for (let i = 0; i < NSE_SYMBOLS.length; i += batchSize) {
@@ -268,7 +292,7 @@ async function fetchAllStockPrices() {
                     indexData[missingIndexes[i].name] = {
                         ...r.value,
                         name: missingIndexes[i].name,
-                        source: 'YAHOO_LIVE',  // tag so next cycle skips it
+                        source: 'YAHOO_LIVE',
                     };
                     gotLiveIndexes = true;
                     console.log(`[Market] Yahoo: ${missingIndexes[i].name} = ${r.value.ltp}`);
@@ -282,8 +306,9 @@ async function fetchAllStockPrices() {
             simulateStockPrices();
         }
 
-        dataSource = gotLiveStocks && gotLiveIndexes ? 'NSE+GROWW'
-            : gotLiveStocks ? 'GROWW_LIVE'
+        dataSource = gotLiveStocks && gotLiveIndexes
+            ? (dhanDataService.isConfigured() ? 'DHAN+NSE' : 'NSE+GROWW')
+            : gotLiveStocks ? (dhanDataService.isConfigured() ? 'DHAN_LIVE' : 'GROWW_LIVE')
             : gotLiveIndexes ? 'NSE_LIVE'
             : Object.keys(stockPrices).length > 0 ? 'YAHOO'
             : 'SIMULATED';
