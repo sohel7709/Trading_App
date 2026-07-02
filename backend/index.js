@@ -13,8 +13,9 @@ const { WalletModel } = require('./model/WalletModel');
 const { WatchlistModel } = require('./model/WatchlistModel');
 const { FundTransactionModel } = require('./model/FundTransactionModel');
 const { PriceAlertModel } = require('./model/PriceAlertModel');
-const marketDataService = require('./marketDataService');
-const tokenService      = require('./tokenService');
+const marketDataService  = require('./marketDataService');
+const tokenService       = require('./tokenService');
+const dhanAutoRenew      = require('./dhanAutoRenew');
 let ioInstance = null; // set after io is created
 const candleDataService = require('./candleDataService');
 const { ChatModel } = require('./model/ChatModel');
@@ -41,6 +42,7 @@ mongoose.connect(MONGO_URI)
     .then(async () => {
         console.log('Connected to MongoDB');
         await tokenService.loadTokenFromDB();
+        dhanAutoRenew.startAutoRenewCron();
     })
     .catch(err => console.error('Error connecting to MongoDB:', err));
 
@@ -1862,6 +1864,35 @@ app.post('/newOptionOrder', async (req, res) => {
 
     } catch (err) {
         res.status(500).json({ message: 'Error processing option order', error: err.message });
+    }
+});
+
+// ============ DHAN POSTBACK (auto-receives new token from portal) ============
+// Set this URL in dhanhq.co/developers → your app → Postback URL:
+//   https://your-server.com/dhan/token-postback
+app.post('/dhan/token-postback', async (req, res) => {
+    // Dhan posts various field names — handle all known variants
+    const accessToken =
+        req.body?.['access-token']  ||
+        req.body?.accessToken       ||
+        req.body?.access_token      ||
+        req.body?.token;
+    const clientId =
+        req.body?.dhanClientId      ||
+        req.body?.clientId          ||
+        req.body?.client_id         ||
+        process.env.DHAN_CLIENT_ID;
+
+    if (!accessToken) {
+        console.warn('[Postback] Received postback but no token found. Body:', JSON.stringify(req.body));
+        return res.status(400).json({ message: 'No access token in postback body' });
+    }
+    try {
+        const info = await tokenService.saveToken(clientId, accessToken);
+        console.log(`[Postback] ✅ Token updated via Dhan postback | expires: ${info.expiresAt}`);
+        res.status(200).json({ message: 'Token updated', expiresAt: info.expiresAt });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
     }
 });
 
