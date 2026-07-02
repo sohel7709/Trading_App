@@ -39,6 +39,7 @@ export default function PortfolioScreen({ navigation }) {
   const [positions, setPositions]   = useState([]);   // open net positions
   const [dayPositions, setDayPos]   = useState([]);   // today's traded contracts
   const [dayPnl, setDayPnl]         = useState(0);
+  const [optionPositions, setOptPos] = useState([]);  // open F&O positions
   const [refreshing, setRefreshing] = useState(false);
   const [indexes, setIndexes]       = useState({});
   const [analyticsOn, setAnalyticsOn] = useState(false);
@@ -49,15 +50,17 @@ export default function PortfolioScreen({ navigation }) {
   // ── Data fetch ──────────────────────────────────────────────────
   const fetchData = async () => {
     try {
-      const [h, p, dp] = await Promise.all([
+      const [h, p, dp, op] = await Promise.all([
         api.getHoldings(),
         api.getPositions(),
         api.getDayPositions(),
+        api.getOptionPositions(),
       ]);
       setHoldings(h);
       setPositions(p);
       setDayPos(dp.positions || []);
       setDayPnl(dp.totalPnl || 0);
+      setOptPos(op || []);
     } catch (e) { console.warn(e.message); }
     finally { setRefreshing(false); }
   };
@@ -119,12 +122,17 @@ export default function PortfolioScreen({ navigation }) {
         return { ...pos, ltp, unrealizedPnl: unrealized, pnl: realized + unrealized };
       }));
     };
+    const onOptionOrderExecuted = () => {
+      api.getOptionPositions().then(setOptPos).catch(() => {});
+    };
     socket.on('orderExecuted', onOrderExecuted);
     socket.on('marketData', onMarketData);
+    socket.on('optionOrderExecuted', onOptionOrderExecuted);
     return () => {
       socket.off('initialData', onInitialData);
       socket.off('orderExecuted', onOrderExecuted);
       socket.off('marketData', onMarketData);
+      socket.off('optionOrderExecuted', onOptionOrderExecuted);
     };
   }, []);
 
@@ -423,6 +431,38 @@ export default function PortfolioScreen({ navigation }) {
         }
       />
 
+      {/* ── Open F&O Positions (always visible if any) ── */}
+      {optionPositions.length > 0 && (
+        <View style={styles.optSection}>
+          <View style={styles.optHeader}>
+            <Text style={styles.optHeaderTxt}>F&O Positions ({optionPositions.length})</Text>
+            <TouchableOpacity onPress={() => navigation.navigate('OptionChain')}>
+              <Text style={styles.optTrade}>+ Trade</Text>
+            </TouchableOpacity>
+          </View>
+          {optionPositions.map(pos => {
+            const pnl    = pos.pnl ?? 0;
+            const isGain = pnl >= 0;
+            return (
+              <View key={pos._id} style={styles.optRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.optSymbol}>{pos.symbol}</Text>
+                  <Text style={styles.optMeta}>
+                    {pos.lots} lots × {pos.lotSize} = {pos.quantity} qty · Avg ₹{pos.avgPremium.toFixed(2)}
+                  </Text>
+                </View>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text style={[styles.optPnl, { color: isGain ? colors.gain : colors.loss }]}>
+                    {isGain ? '+' : ''}₹{Math.abs(pnl).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                  </Text>
+                  <Text style={styles.optLtp}>LTP ₹{(pos.ltp ?? 0).toFixed(2)}</Text>
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      )}
+
       {/* Index FAB */}
       <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('IndexChart', { indexName: 'NIFTY 50' })}>
         <Ionicons name="trending-up" size={18} color={colors.primary} />
@@ -603,4 +643,28 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08, shadowRadius: 4, elevation: 3,
   },
   fabTxt: { fontSize: 13, fontWeight: '700', color: colors.primary },
+
+  // ── F&O open positions panel ──
+  optSection: {
+    backgroundColor: '#fff',
+    marginHorizontal: 0,
+    borderTopWidth: 1, borderTopColor: '#E8E8E8',
+  },
+  optHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: '#F0F0F0',
+    backgroundColor: '#F8F9FF',
+  },
+  optHeaderTxt: { fontSize: 12, fontWeight: '700', color: '#4338CA', letterSpacing: 0.3 },
+  optTrade:     { fontSize: 12, fontWeight: '700', color: colors.primary },
+  optRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: '#F0F0F0',
+  },
+  optSymbol: { fontSize: 13, fontWeight: '700', color: '#1E1E1E', marginBottom: 2 },
+  optMeta:   { fontSize: 11, color: '#738390' },
+  optPnl:    { fontSize: 14, fontWeight: '700', marginBottom: 2 },
+  optLtp:    { fontSize: 11, color: '#738390' },
 });

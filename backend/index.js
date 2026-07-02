@@ -14,10 +14,12 @@ const { WatchlistModel } = require('./model/WatchlistModel');
 const { FundTransactionModel } = require('./model/FundTransactionModel');
 const { PriceAlertModel } = require('./model/PriceAlertModel');
 const marketDataService = require('./marketDataService');
+const tokenService      = require('./tokenService');
 let ioInstance = null; // set after io is created
 const candleDataService = require('./candleDataService');
 const { ChatModel } = require('./model/ChatModel');
 const { PLRecordModel } = require('./model/PLRecordModel');
+const { OptionPositionsModel } = require('./model/OptionPositionsModel');
 
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.DATABASE_URL;
@@ -36,7 +38,10 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'Zerodha Kite API', version: '1.0.0' }));
 
 mongoose.connect(MONGO_URI)
-    .then(() => console.log('Connected to MongoDB'))
+    .then(async () => {
+        console.log('Connected to MongoDB');
+        await tokenService.loadTokenFromDB();
+    })
     .catch(err => console.error('Error connecting to MongoDB:', err));
 
 // ============ HOLDINGS ============
@@ -1579,27 +1584,36 @@ io.on('connection', async (socket) => {
     });
 });
 
-// Fetch market data every 30 seconds and broadcast
-async function broadcastMarketData() {
-    await marketDataService.fetchAllStockPrices();
+// ─── Smart market-hours detection (defined at top of file) ───────────────────
 
+// ─── Broadcast helpers ────────────────────────────────────────────────────────
+function emitMarketData() {
     const indexes = marketDataService.getIndexData();
-
-    // Feed live ticks into the candle accumulator for intraday live charts
     for (const [name, d] of Object.entries(indexes)) {
         if (d.ltp > 0) candleDataService.recordTick(name, d.ltp);
     }
-
     const data = {
-        prices: marketDataService.getStockPrices(),
+        prices:      marketDataService.getStockPrices(),
         indexes,
-        movers: marketDataService.getMarketMovers(),
+        movers:      marketDataService.getMarketMovers(),
         lastUpdated: marketDataService.getLastUpdated(),
-        source: marketDataService.getDataSource(),
+        source:      marketDataService.getDataSource(),
     };
-
     io.emit('marketData', data);
-    console.log(`[Broadcast] source: ${data.source} | ${new Date().toLocaleTimeString()}`);
+}
+
+// Full OHLC refresh — runs every 30s always (keeps 52W, volume, OHLC current)
+async function broadcastMarketData() {
+    await marketDataService.fetchAllStockPrices();
+    emitMarketData();
+    console.log(`[Broadcast] full | source: ${marketDataService.getDataSource()} | ${new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+}
+
+// Fast LTP-only refresh — runs every 2s during market hours
+async function fastTickBroadcast() {
+    if (!isMarketOpen()) return;
+    await marketDataService.fastRefresh();
+    emitMarketData();
 }
 
 // Sync wallet.usedMargin with actual holdings on startup
@@ -1616,9 +1630,10 @@ async function broadcastMarketData() {
     } catch (e) { console.error('[Wallet] Sync error:', e.message); }
 })();
 
-// Initial fetch, then every 30 seconds
+// Initial full fetch, then full refresh every 30s + fast ticks every 2s
 broadcastMarketData();
 setInterval(broadcastMarketData, 30000);
+setInterval(fastTickBroadcast, 2000);
 
 // ============ DAY POSITIONS (today's F&O trades grouped by symbol) ============
 app.get('/positions/day', async (req, res) => {
@@ -1714,6 +1729,158 @@ app.get('/positions/day', async (req, res) => {
     } catch (err) {
         res.status(500).json({ message: 'Error fetching day positions', error: err.message });
     }
+});
+
+// ============ OPTIONS PAPER TRADING ============
+const OPTION_LOT_SIZES = {
+    'NIFTY 50':   75,
+    'BANK NIFTY': 15,
+    'SENSEX':     20,
+    'FINNIFTY':   40,
+};
+
+function buildOptionSymbol(underlying, expiry, strike, optionType) {
+    const d   = new Date(expiry + 'T12:00:00');
+    const mon = d.toLocaleDateString('en-US', { month: 'short' }).toUpperCase();
+    const yr  = String(d.getFullYear()).slice(2);
+    return `${underlying.replace(/\s+/g, '')}${yr}${mon}${strike}${optionType}`;
+}
+
+function getLiveOptionLTP(underlyingSymbol, strikePrice, optionType, expiry) {
+    try {
+        const chain = marketDataService.generateOptionChainForIndex(underlyingSymbol, expiry);
+        const row   = chain?.rows?.find(r => r.strike === Number(strikePrice));
+        return row ? (optionType === 'CE' ? row.ce.ltp : row.pe.ltp) : null;
+    } catch { return null; }
+}
+
+app.get('/optionPositions', async (req, res) => {
+    try {
+        const positions = await OptionPositionsModel.find({});
+        const enriched = positions.map(pos => {
+            const liveLTP = getLiveOptionLTP(pos.underlyingSymbol, pos.strikePrice, pos.optionType, pos.expiry);
+            const ltp     = liveLTP ?? pos.ltp;
+            const pnl     = pos.quantity * (ltp - pos.avgPremium);
+            const pnlPct  = pos.avgPremium > 0 ? (pnl / (pos.quantity * pos.avgPremium)) * 100 : 0;
+            return { ...pos.toObject(), ltp, pnl, pnlPct };
+        });
+        res.status(200).json(enriched);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching option positions', error: err.message });
+    }
+});
+
+app.post('/newOptionOrder', async (req, res) => {
+    const { underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action } = req.body;
+
+    if (!underlyingSymbol || !strikePrice || !optionType || !expiry || !lots || !premium || !action) {
+        return res.status(400).json({ message: 'Missing required fields: underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action' });
+    }
+    if (!['BUY', 'SELL'].includes(action)) {
+        return res.status(400).json({ message: 'action must be BUY or SELL' });
+    }
+
+    const lotSize = OPTION_LOT_SIZES[underlyingSymbol] || 50;
+    const qty     = Number(lots) * lotSize;
+    const prem    = Number(premium);
+    const total   = qty * prem;
+    const symbol  = buildOptionSymbol(underlyingSymbol, expiry, strikePrice, optionType);
+    const charges = Math.round(total * 0.001 * 100) / 100; // 0.1% F&O brokerage
+
+    try {
+        const wallet = await WalletModel.findOne({});
+
+        if (action === 'BUY') {
+            if (!wallet || wallet.availableMargin < total) {
+                return res.status(400).json({
+                    message: 'Insufficient funds',
+                    required: total,
+                    available: wallet?.availableMargin ?? 0,
+                });
+            }
+
+            let position = await OptionPositionsModel.findOne({ underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry });
+            if (position) {
+                const newQty = position.quantity + qty;
+                position.avgPremium = ((position.avgPremium * position.quantity) + (prem * qty)) / newQty;
+                position.lots      += Number(lots);
+                position.quantity   = newQty;
+                position.ltp        = prem;
+            } else {
+                position = new OptionPositionsModel({
+                    symbol,
+                    underlyingSymbol,
+                    strikePrice: Number(strikePrice),
+                    optionType,
+                    expiry,
+                    lotSize,
+                    lots: Number(lots),
+                    quantity: qty,
+                    avgPremium: prem,
+                    ltp: prem,
+                });
+            }
+            await position.save();
+
+            wallet.usedMargin      = (wallet.usedMargin || 0) + total;
+            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin);
+            await wallet.save();
+
+            await new TradeModel({ stockSymbol: symbol, quantity: qty, price: prem, side: 'BUY', productType: 'NRML', charges, totalValue: total }).save();
+
+            io.emit('optionOrderExecuted', { action: 'BUY', symbol, lots: Number(lots), qty, premium: prem, total, wallet: wallet.toObject() });
+            return res.status(201).json({ message: 'Option BUY executed', position, wallet });
+        }
+
+        // SELL
+        const position = await OptionPositionsModel.findOne({ underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry });
+        if (!position) return res.status(404).json({ message: 'No open position found for this option' });
+        if (Number(lots) > position.lots) return res.status(400).json({ message: `Cannot sell more than ${position.lots} lots held` });
+
+        const sellQty   = Number(lots) * lotSize;
+        const sellValue = sellQty * prem;
+        const costBasis = sellQty * position.avgPremium;
+        const pnl       = sellValue - costBasis;
+
+        if (Number(lots) >= position.lots) {
+            await OptionPositionsModel.deleteOne({ _id: position._id });
+        } else {
+            position.lots     -= Number(lots);
+            position.quantity -= sellQty;
+            await position.save();
+        }
+
+        wallet.usedMargin      = Math.max(0, (wallet.usedMargin || 0) - costBasis);
+        wallet.balance         = wallet.balance + pnl;
+        wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin);
+        await wallet.save();
+
+        await new TradeModel({ stockSymbol: symbol, quantity: sellQty, price: prem, side: 'SELL', productType: 'NRML', charges: Math.round(sellValue * 0.001 * 100) / 100, totalValue: sellValue }).save();
+
+        io.emit('optionOrderExecuted', { action: 'SELL', symbol, lots: Number(lots), qty: sellQty, premium: prem, pnl, wallet: wallet.toObject() });
+        return res.status(200).json({ message: 'Option SELL executed', pnl, wallet });
+
+    } catch (err) {
+        res.status(500).json({ message: 'Error processing option order', error: err.message });
+    }
+});
+
+// ============ ADMIN: TOKEN MANAGEMENT ============
+app.post('/admin/update-token', async (req, res) => {
+    const { clientId, accessToken } = req.body;
+    if (!clientId || !accessToken) {
+        return res.status(400).json({ message: 'clientId and accessToken are required' });
+    }
+    try {
+        const info = await tokenService.saveToken(clientId, accessToken);
+        res.json({ message: 'Token updated successfully', ...info });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+
+app.get('/admin/token-status', (req, res) => {
+    res.json(tokenService.getTokenStatus());
 });
 
 // ============ START SERVER ============

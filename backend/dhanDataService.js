@@ -270,12 +270,134 @@ async function fetchDhanLTP(symbols) {
     return results;
 }
 
+// ─── Index Quotes (IDX_I segment) ────────────────────────────────────────────
+// Verified live from Dhan API (July 2026):
+//   13=NIFTY 50, 25=BANK NIFTY, 51=SENSEX, 21=INDIA VIX,
+//   10=NIFTY IT, 11=NIFTY MID SELECT, 28=NIFTY NEXT 50
+const INDEX_SECURITY_IDS = {
+    'NIFTY 50':   13,
+    'BANK NIFTY': 25,
+    'SENSEX':     51,
+    'INDIA VIX':  21,
+    'NIFTY IT':   10,
+    'FINNIFTY':   27,
+};
+
+/**
+ * Fetch live index prices from Dhan IDX_I segment.
+ * Returns: { [indexName]: { name, ltp, change, changePercent, source } }
+ */
+async function fetchDhanIndices() {
+    if (!isConfigured()) return {};
+
+    const idToName = Object.fromEntries(
+        Object.entries(INDEX_SECURITY_IDS).map(([name, id]) => [String(id), name])
+    );
+    const secIds = Object.values(INDEX_SECURITY_IDS);
+
+    try {
+        const res = await fetch(`${DHAN_BASE}/v2/marketfeed/quote`, {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({ IDX_I: secIds }),
+            signal: AbortSignal.timeout(8000),
+        });
+        if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            console.warn(`[Dhan] Index quote error ${res.status}: ${body.slice(0, 80)}`);
+            return {};
+        }
+
+        const json = await res.json();
+        const idxData = json?.data?.IDX_I || {};
+        const results = {};
+
+        for (const [secIdStr, q] of Object.entries(idxData)) {
+            const name = idToName[secIdStr];
+            if (!name) continue;
+
+            const ltp       = q.last_price ?? 0;
+            const prevClose = q.ohlc?.close ?? 0;
+            const change    = q.net_change ?? (ltp - prevClose);
+            const chgPct    = prevClose > 0 ? (change / prevClose) * 100 : 0;
+
+            results[name] = {
+                name,
+                ltp:           Math.round(ltp * 100) / 100,
+                open:          q.ohlc?.open  ?? 0,
+                high:          q.ohlc?.high  ?? 0,
+                low:           q.ohlc?.low   ?? 0,
+                previousClose: prevClose,
+                change:        Math.round(change * 100) / 100,
+                changePercent: Math.round(chgPct  * 100) / 100,
+                symbol:        name.replace(/ /g, '_'),
+                source:        'DHAN_LIVE',
+            };
+        }
+
+        if (Object.keys(results).length > 0) {
+            console.log(`[Dhan] Indices: ${Object.keys(results).join(', ')}`);
+        }
+        return results;
+    } catch (e) {
+        console.warn('[Dhan] fetchDhanIndices error:', e.message);
+        return {};
+    }
+}
+
+/**
+ * Fast LTP-only refresh for stocks during market hours (single batch call).
+ * Merges into existing stockPrices cache — only updates ltp, change, changePercent.
+ */
+async function fetchDhanLTPAll(symbols) {
+    if (!isConfigured()) return {};
+
+    const reqSecIds = [];
+    const idToSym   = {};
+    for (const sym of symbols) {
+        const id = securityIdMap[sym];
+        if (id) { reqSecIds.push(id); idToSym[String(id)] = sym; }
+    }
+    if (reqSecIds.length === 0) return {};
+
+    const results = {};
+    try {
+        const res = await fetch(`${DHAN_BASE}/v2/marketfeed/ltp`, {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({ NSE_EQ: reqSecIds, IDX_I: Object.values(INDEX_SECURITY_IDS) }),
+            signal: AbortSignal.timeout(6000),
+        });
+        if (!res.ok) return {};
+        const json = await res.json();
+
+        // Stock LTPs
+        for (const [secIdStr, q] of Object.entries(json?.data?.NSE_EQ || {})) {
+            const sym = idToSym[secIdStr];
+            if (sym) results[sym] = { ltp: Math.round((q.last_price ?? 0) * 100) / 100, source: 'DHAN_LIVE' };
+        }
+        // Index LTPs
+        const idxIdToName = Object.fromEntries(
+            Object.entries(INDEX_SECURITY_IDS).map(([n, id]) => [String(id), n])
+        );
+        for (const [secIdStr, q] of Object.entries(json?.data?.IDX_I || {})) {
+            const name = idxIdToName[secIdStr];
+            if (name) results[`__IDX__${name}`] = { ltp: Math.round((q.last_price ?? 0) * 100) / 100 };
+        }
+    } catch (e) {
+        console.warn('[Dhan] fetchDhanLTPAll error:', e.message);
+    }
+    return results;
+}
+
 // Kick off scrip master download at module load (non-blocking)
 loadScripMaster().catch(() => {});
 
 module.exports = {
     fetchDhanStockQuotes,
     fetchDhanLTP,
+    fetchDhanIndices,
+    fetchDhanLTPAll,
     isConfigured,
     loadScripMaster,
     getSecurityId: (sym) => securityIdMap[sym] ?? null,

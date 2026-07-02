@@ -99,6 +99,10 @@ export const api = {
   // Option Chain
   getOptionChain: (symbol, expiry) => get(`/market/optionchain/${encodeURIComponent(symbol)}${expiry ? `?expiry=${expiry}` : ''}`),
 
+  // Option paper trading
+  getOptionPositions: () => get('/optionPositions'),
+  placeOptionOrder: (order) => post('/newOptionOrder', order),
+
   // Alerts
   getAlerts: () => get('/alerts'),
   createAlert: (data) => post('/alerts', data),

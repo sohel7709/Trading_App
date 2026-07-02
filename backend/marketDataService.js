@@ -1,10 +1,12 @@
+'use strict';
+
 const _yf2 = require('yahoo-finance2');
 const _YF2 = _yf2.default || _yf2;
 const yahooFinance = (typeof _YF2 === 'function') ? new _YF2({ suppressNotices: ['yahooSurvey'] }) : _YF2;
 const liveDataService = require('./liveDataService');
 const dhanDataService = require('./dhanDataService');
 
-// Plain NSE symbols (no .NS suffix) — used by Groww API
+// NSE symbols — used for Groww / Yahoo fallback
 const NSE_STOCK_SYMBOLS = [
     'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK',
     'HINDUNILVR', 'KOTAKBANK', 'SBIN', 'BHARTIARTL', 'ITC',
@@ -22,336 +24,219 @@ const NSE_STOCK_SYMBOLS = [
 // Yahoo Finance format (fallback only)
 const NSE_SYMBOLS = NSE_STOCK_SYMBOLS.map(s => s + '.NS');
 
-// Index symbols (Yahoo Finance fallback)
+// Index symbols for Yahoo Finance fallback
 const INDEX_SYMBOLS = [
-    { symbol: '^NSEI',              name: 'NIFTY 50' },
-    { symbol: '^NSEBANK',           name: 'BANK NIFTY' },
-    { symbol: '^BSESN',             name: 'SENSEX' },
-    { symbol: '^CNXIT',             name: 'NIFTY IT' },
-    { symbol: 'NIFTY_FIN_SERVICE.NS', name: 'FINNIFTY' },
+    { symbol: '^NSEI',               name: 'NIFTY 50' },
+    { symbol: '^NSEBANK',            name: 'BANK NIFTY' },
+    { symbol: '^BSESN',              name: 'SENSEX' },
+    { symbol: '^CNXIT',              name: 'NIFTY IT' },
+    { symbol: 'NIFTY_FIN_SERVICE.NS',name: 'FINNIFTY' },
 ];
 
-// In-memory cache for stock prices
+// In-memory cache
 let stockPrices = {};
-let indexData = {};
+let indexData   = {};
 let lastUpdated = null;
-let isFetching = false;
-let dataSource = 'SIMULATED'; // tracks current source
+let isFetching  = false;
+let dataSource  = 'LOADING';
 
-// Map Yahoo Finance symbol back to NSE symbol
-function yahooToNseSymbol(yahooSymbol) {
-    return yahooSymbol.replace('.NS', '').replace('.BO', '');
+function yahooToNseSymbol(sym) {
+    return sym.replace('.NS', '').replace('.BO', '');
 }
 
 async function fetchQuote(symbol) {
     try {
-        // Yahoo Finance index symbols like ^BSESN must not have .NS appended
-        const yahooSym = symbol.startsWith('^') ? symbol : `${symbol}`;
-        const quote = await yahooFinance.quote(yahooSym, {}, { validateResult: false });
+        const quote = await yahooFinance.quote(symbol, {}, { validateResult: false });
         if (!quote || !quote.regularMarketPrice) return null;
         return {
-            symbol: yahooToNseSymbol(symbol),
-            ltp: quote.regularMarketPrice,
-            open: quote.regularMarketOpen || 0,
-            high: quote.regularMarketDayHigh || 0,
-            low: quote.regularMarketDayLow || 0,
+            symbol:        yahooToNseSymbol(symbol),
+            ltp:           quote.regularMarketPrice,
+            open:          quote.regularMarketOpen || 0,
+            high:          quote.regularMarketDayHigh || 0,
+            low:           quote.regularMarketDayLow || 0,
             previousClose: quote.regularMarketPreviousClose || 0,
-            volume: quote.regularMarketVolume || 0,
-            change: quote.regularMarketChange || 0,
+            volume:        quote.regularMarketVolume || 0,
+            change:        quote.regularMarketChange || 0,
             changePercent: quote.regularMarketChangePercent || 0,
-            yearHigh: quote.fiftyTwoWeekHigh || 0,
-            yearLow: quote.fiftyTwoWeekLow || 0,
-            currency: quote.currency || 'INR',
+            high52w:       quote.fiftyTwoWeekHigh || 0,
+            low52w:        quote.fiftyTwoWeekLow  || 0,
+            currency:      quote.currency || 'INR',
+            source:        'YAHOO_LIVE',
         };
     } catch (err) {
-        console.log(`[Market] fetchQuote(${symbol}) err: ${err.message?.slice(0,80)}`);
+        console.log(`[Market] fetchQuote(${symbol}) err: ${err.message?.slice(0, 80)}`);
         return null;
     }
 }
 
-// Simulated base prices for NSE stocks (approximate real values)
-const SIMULATED_PRICES = {
-    'RELIANCE': { ltp: 1317.00, prevClose: 1312.00 },   // live Jun-2026
-    'TCS': { ltp: 3194.00, prevClose: 3185.00 },
-    'HDFCBANK': { ltp: 1522.35, prevClose: 1530.00 },
-    'INFY': { ltp: 1555.45, prevClose: 1570.00 },
-    'ICICIBANK': { ltp: 1280.60, prevClose: 1275.00 },
-    'HINDUNILVR': { ltp: 2177.00, prevClose: 2170.00 },  // live Jun-2026
-    'KOTAKBANK': { ltp: 1700.00, prevClose: 1695.00 },
-    'SBIN': { ltp: 430.20, prevClose: 425.00, high52w: 912.00, low52w: 400.00, volume: 5200000 },
-    'BHARTIARTL': { ltp: 541.15, prevClose: 538.00 },
-    'ITC': { ltp: 207.90, prevClose: 205.00 },
-    'LT': { ltp: 3654.30, prevClose: 3640.00 },
-    'WIPRO': { ltp: 175.00, prevClose: 174.00, high52w: 273.10, low52w: 171.49, volume: 21544904 },
-    'AXISBANK': { ltp: 1150.80, prevClose: 1145.00 },
-    'SUNPHARMA': { ltp: 1870.55, prevClose: 1865.00 },
-    'M&M': { ltp: 779.80, prevClose: 785.00 },
-    'TITAN': { ltp: 3450.20, prevClose: 3445.00 },
-    'ADANIENT': { ltp: 3040.00, prevClose: 3025.00 },    // live Jun-2026
-    'ADANIPORTS': { ltp: 1795.00, prevClose: 1788.00 },  // live Jun-2026
-    'NTPC': { ltp: 381.00, prevClose: 379.00 },           // live Jun-2026
-    'MARUTI': { ltp: 12000.00, prevClose: 11950.00 },     // live Jun-2026
-    'POWERGRID': { ltp: 310.00, prevClose: 308.00 },
-    'TATAMOTORS': { ltp: 779.80, prevClose: 776.00, high52w: 1065.00, low52w: 580.00, volume: 3100000 },
-    'HCLTECH': { ltp: 1101.00, prevClose: 1095.00, high52w: 1780.10, low52w: 1089.50, volume: 820000 },
-    'TATASTEEL': { ltp: 189.00, prevClose: 187.00 },      // live Jun-2026
-    'ULTRACEMCO': { ltp: 11250.80, prevClose: 11230.00 },
-    'ASIANPAINT': { ltp: 3240.15, prevClose: 3235.00 },
-    'BAJFINANCE': { ltp: 7120.50, prevClose: 7100.00 },
-    'NESTLEIND': { ltp: 1402.60, prevClose: 1400.00, high52w: 2750.00, low52w: 1084.70, volume: 155000 },  // 52H above avg ₹2700
-    'ONGC': { ltp: 233.15, prevClose: 234.00, high52w: 307.50, low52w: 228.61, volume: 5100000 },
-    'JSWSTEEL': { ltp: 985.40, prevClose: 982.00 },
-    'TECHM': { ltp: 1440.00, prevClose: 1430.00 },       // live Jun-2026
-    'DIVISLAB': { ltp: 3500.00, prevClose: 3495.00 },
-    'CIPLA': { ltp: 1580.35, prevClose: 1575.00 },
-    'DRREDDY': { ltp: 6350.80, prevClose: 6340.00 },
-    'GRASIM': { ltp: 2480.45, prevClose: 2475.00 },
-    'HDFCLIFE': { ltp: 640.30, prevClose: 638.00 },
-    'SBILIFE': { ltp: 1540.20, prevClose: 1535.00 },
-    'BPCL': { ltp: 345.60, prevClose: 343.00 },
-    'BAJAJFINSV': { ltp: 1680.50, prevClose: 1675.00 },
-    'TATAPOWER': { ltp: 124.15, prevClose: 122.00 },
-    'KPITTECH': { ltp: 738.00, prevClose: 732.00, high52w: 2058.00, low52w: 300.10, volume: 510000 },
-    'COALINDIA': { ltp: 436.00, prevClose: 433.00, high52w: 491.25, low52w: 368.65, volume: 3000000 },
-    'EICHERMOT': { ltp: 3850.35, prevClose: 3840.00 },
-    'BRITANNIA': { ltp: 5420.60, prevClose: 5410.00 },
-    'HEROMOTOCO': { ltp: 4150.25, prevClose: 4140.00 },
-    'HINDALCO': { ltp: 635.40, prevClose: 632.00 },
-    'APOLLOHOSP': { ltp: 6750.80, prevClose: 6740.00 },
-    'INDUSINDBK': { ltp: 917.00, prevClose: 912.00, high52w: 968.85, low52w: 710.60, volume: 1250000 },
-    'BAJAJ-AUTO': { ltp: 5240.50, prevClose: 5230.00 },
-    'SHREECEM': { ltp: 2580.40, prevClose: 2575.00 },
-    'UPL': { ltp: 590.50, prevClose: 588.00 },
-    'AWL': { ltp: 350.00, prevClose: 348.00 },
-    'BANDHANBNK': { ltp: 201.76, prevClose: 200.00 },
-    'NYKAA': { ltp: 301.35, prevClose: 299.00 },
-    'IEX': { ltp: 140.00, prevClose: 139.00 },
-    'LTIM': { ltp: 5000.00, prevClose: 4990.00 },
-
-    // ── Holdings stocks added for full 52W data on StockDetailScreen ──────────
-    'NHPC':       { ltp:   79.20, prevClose:   79.50, high52w:   95.00, low52w:   71.62, volume: 2100000 },  // 52H above avg ₹85
-    'HAL':        { ltp: 4364.00, prevClose: 4380.00, high52w: 5065.00, low52w: 3479.10, volume: 410000 },   // 52H above avg ₹4800
-    'BEL':        { ltp:  408.50, prevClose:  407.00, high52w:  473.45, low52w:  361.20, volume: 3100000 },  // 52H above avg ₹330
-    'TATAELXSI':  { ltp: 4028.30, prevClose: 4020.00, high52w: 6439.50, low52w: 3926.10, volume: 105000 },
-    'IRFC':       { ltp:   91.77, prevClose:   92.00, high52w:  143.15, low52w:   87.00, volume: 2100000 },
-    'RVNL':       { ltp:  240.85, prevClose:  241.00, high52w:  405.50, low52w:  221.55, volume: 1600000 },
-    'ADANIPOWER': { ltp:  229.27, prevClose:  230.00, high52w:  750.00, low52w:  109.75, volume: 2000000 },  // 52H above avg ₹715 (Oct-24 peak)
-    'COCHINSHIP': { ltp: 1458.40, prevClose: 1460.00, high52w: 2186.00, low52w: 1187.00, volume: 310000 },
-    'MAZDOCK':    { ltp: 2472.50, prevClose: 2475.00, high52w: 3369.00, low52w: 2057.40, volume: 205000 },
-    'ADANIGREEN': { ltp: 1526.10, prevClose: 1525.00, high52w: 2200.00, low52w:  765.00, volume: 510000 },  // 52H above avg ₹1900 (Sep-24 peak)
-    'GODREJPROP': { ltp: 1850.10, prevClose: 1852.00, high52w: 2420.00, low52w: 1434.00, volume: 410000 },
-    'IREDA':      { ltp:  127.01, prevClose:  128.00, high52w:  310.00, low52w:  109.00, volume: 3100000 },
-    'SUZLON':     { ltp:   57.01, prevClose:   57.50, high52w:   86.00, low52w:   38.19, volume: 10200000 },
-    'DIXON':      { ltp: 12030.00, prevClose: 12050.00, high52w: 18471.00, low52w: 9600.00, volume: 52000 },
-    'DELHIVERY':  { ltp:  464.90, prevClose:  466.00, high52w:  550.00, low52w:  374.45, volume: 810000 },  // 52H above avg ₹520 (Oct-24 level)
-    'MPHASIS':    { ltp: 2264.90, prevClose: 2265.00, high52w: 3037.20, low52w: 2013.00, volume: 205000 },
-    'HINDUNILVR': { ltp: 2177.00, prevClose: 2178.00, high52w: 2705.09, low52w: 2022.50, volume: 615000 },
-};
-
-// Returns true only during NSE trading hours (Mon–Fri, 9:15 AM–3:30 PM IST)
-function isMarketOpen() {
-    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    const day = ist.getDay();
-    if (day === 0 || day === 6) return false;
-    const mins = ist.getHours() * 60 + ist.getMinutes();
-    return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
-}
-
-function generateSimulatedPrice(basePrice) {
-    if (!isMarketOpen()) return Math.round(basePrice * 100) / 100; // fixed when market closed
-    const variation = (Math.random() - 0.5) * (basePrice * 0.02); // ±1% during market hours
-    return Math.round((basePrice + variation) * 100) / 100;
-}
-
-function simulateStockPrices() {
-    for (const [symbol, data] of Object.entries(SIMULATED_PRICES)) {
-        const ltp = generateSimulatedPrice(data.ltp);
-        const open = generateSimulatedPrice(data.prevClose);
-        const change = ltp - data.prevClose;
-        const changePercent = data.prevClose > 0 ? (change / data.prevClose) * 100 : 0;
-
-        stockPrices[symbol] = {
-            symbol,
-            ltp,
-            open,
-            high: Math.max(ltp, open) + Math.random() * (ltp * 0.005),
-            low: Math.min(ltp, open) - Math.random() * (ltp * 0.005),
-            previousClose: data.prevClose,
-            volume: data.volume || (Math.floor(Math.random() * 1000000) + 100000),
-            change: Math.round(change * 100) / 100,
-            changePercent: Math.round(changePercent * 100) / 100,
-            high52w: data.high52w || Math.round(data.ltp * 1.35 * 100) / 100,
-            low52w:  data.low52w  || Math.round(data.ltp * 0.72 * 100) / 100,
-            currency: 'INR',
-            isSimulated: true,
-        };
-    }
-
-    // Simulated index data
-    const niftyBase = 24650;   // NIFTY 50 ~Jun 2026
-    const niftyLtp = generateSimulatedPrice(niftyBase);
-    indexData['NIFTY 50'] = { name: 'NIFTY 50', ltp: niftyLtp, change: niftyLtp - niftyBase, changePercent: ((niftyLtp - niftyBase) / niftyBase) * 100, symbol: 'NIFTY', isSimulated: true };
-    indexData['BANK NIFTY'] = { name: 'BANK NIFTY', ltp: generateSimulatedPrice(54800), change: 120, changePercent: 0.22, symbol: 'BANKNIFTY', isSimulated: true };
-    indexData['SENSEX'] = { name: 'SENSEX', ltp: generateSimulatedPrice(81200), change: 180, changePercent: 0.22, symbol: 'SENSEX', isSimulated: true };
-    indexData['NIFTY IT'] = { name: 'NIFTY IT', ltp: generateSimulatedPrice(35400), change: -45, changePercent: -0.13, symbol: 'NIFTYIT', isSimulated: true };
-    indexData['FINNIFTY'] = { name: 'FINNIFTY', ltp: generateSimulatedPrice(23200), change: 65, changePercent: 0.28, symbol: 'FINNIFTY', isSimulated: true };
-
-    lastUpdated = new Date().toISOString();
-}
+// ─── Main fetch ───────────────────────────────────────────────────────────────
 
 async function fetchAllStockPrices() {
     if (isFetching) return;
     isFetching = true;
 
     try {
-        let gotLiveStocks = false;
+        let gotLiveStocks  = false;
         let gotLiveIndexes = false;
 
-        // ── Step 0: Dhan API (primary — if credentials are set) ──────────────
+        // ── Step 0: Dhan — stocks + indices (primary source) ──────────────────
         if (dhanDataService.isConfigured()) {
+            // Stocks via full quote (OHLC + 52W)
             try {
                 const dhanData = await dhanDataService.fetchDhanStockQuotes(NSE_STOCK_SYMBOLS);
-                const count = Object.keys(dhanData).length;
-                if (count > 0) {
+                if (Object.keys(dhanData).length > 0) {
                     for (const [sym, d] of Object.entries(dhanData)) {
-                        // Preserve 52W high/low from SIMULATED_PRICES if Dhan doesn't return them
-                        const sim = SIMULATED_PRICES[sym];
-                        stockPrices[sym] = {
-                            ...d,
-                            high52w: d.high52w || sim?.high52w || Math.round(d.ltp * 1.35 * 100) / 100,
-                            low52w:  d.low52w  || sim?.low52w  || Math.round(d.ltp * 0.72 * 100) / 100,
-                        };
+                        stockPrices[sym] = d;
                     }
                     gotLiveStocks = true;
-                    console.log(`[Market] Dhan: ${count} stocks updated`);
+                    console.log(`[Market] Dhan stocks: ${Object.keys(dhanData).length}`);
                 }
             } catch (e) {
-                console.warn('[Market] Dhan fetch error:', e.message);
+                console.warn('[Market] Dhan stock fetch error:', e.message);
+            }
+
+            // Indices via IDX_I segment
+            try {
+                const dhanIdx = await dhanDataService.fetchDhanIndices();
+                if (Object.keys(dhanIdx).length > 0) {
+                    for (const [name, d] of Object.entries(dhanIdx)) {
+                        indexData[name] = d;
+                    }
+                    gotLiveIndexes = true;
+                }
+            } catch (e) {
+                console.warn('[Market] Dhan index fetch error:', e.message);
             }
         }
 
-        // ── Step 1: NSE (indices) + Groww stocks (if Dhan didn't provide stocks) ──
+        // ── Step 1: NSE (indices) + Groww stocks — if Dhan didn't cover them ──
+        const needGroww = !gotLiveStocks;
         const live = await liveDataService.fetchLiveMarketData(
-            gotLiveStocks ? [] : NSE_STOCK_SYMBOLS   // skip Groww if Dhan succeeded
+            needGroww ? NSE_STOCK_SYMBOLS : []
         );
 
-        if (!gotLiveStocks && live.stockData && Object.keys(live.stockData).length > 0) {
+        if (needGroww && live.stockData && Object.keys(live.stockData).length > 0) {
             for (const [sym, d] of Object.entries(live.stockData)) {
                 stockPrices[sym] = d;
             }
             gotLiveStocks = true;
-            console.log(`[Market] Groww: ${Object.keys(live.stockData).length} stocks updated`);
+            console.log(`[Market] Groww stocks: ${Object.keys(live.stockData).length}`);
         }
 
-        if (live.indexData && Object.keys(live.indexData).length > 0) {
+        if (!gotLiveIndexes && live.indexData && Object.keys(live.indexData).length > 0) {
             for (const [name, d] of Object.entries(live.indexData)) {
                 indexData[name] = d;
             }
             gotLiveIndexes = true;
-            console.log(`[Market] NSE: ${Object.keys(live.indexData).length} indices updated`);
+            console.log(`[Market] NSE indices: ${Object.keys(live.indexData).length}`);
         }
 
-        // ── Step 2: Yahoo Finance fallback for any missing stocks ──
+        // ── Step 2: Yahoo Finance fallback for stocks ──────────────────────────
         if (!gotLiveStocks) {
-            console.log('[Market] Dhan+Groww failed, trying Yahoo Finance for stocks…');
-            let yahooSuccess = false;
+            console.log('[Market] Dhan+Groww failed, trying Yahoo Finance…');
+            let ok = false;
             const batchSize = 10;
             for (let i = 0; i < NSE_SYMBOLS.length; i += batchSize) {
                 const batch = NSE_SYMBOLS.slice(i, i + batchSize);
-                const results = await Promise.allSettled(batch.map(sym => fetchQuote(sym)));
-                results.forEach(r => {
+                const res = await Promise.allSettled(batch.map(s => fetchQuote(s)));
+                res.forEach(r => {
                     if (r.status === 'fulfilled' && r.value && r.value.ltp > 0) {
                         stockPrices[r.value.symbol] = r.value;
-                        yahooSuccess = true;
+                        ok = true;
                     }
                 });
                 if (i + batchSize < NSE_SYMBOLS.length) {
-                    await new Promise(resolve => setTimeout(resolve, 300));
+                    await new Promise(r => setTimeout(r, 300));
                 }
             }
-            if (yahooSuccess) {
+            if (ok) {
+                gotLiveStocks = true;
                 console.log('[Market] Yahoo Finance stocks: OK');
-            } else {
-                console.log('[Market] Yahoo Finance also failed, using simulated stocks');
-                simulateStockPrices();
             }
         }
 
-        // ── Step 3: Yahoo Finance fallback for indexes without NSE_LIVE source
-        // (includes SENSEX which is BSE — NSE never returns it)
-        const LIVE_SOURCES = new Set(['NSE_LIVE', 'YAHOO_LIVE']);
-        const missingIndexes = INDEX_SYMBOLS.filter(
-            idx => !indexData[idx.name] || !LIVE_SOURCES.has(indexData[idx.name]?.source)
+        // ── Step 3: Yahoo Finance fallback for missing indices ─────────────────
+        const LIVE_SOURCES = new Set(['NSE_LIVE', 'YAHOO_LIVE', 'DHAN_LIVE']);
+        const missingIdx = INDEX_SYMBOLS.filter(
+            i => !indexData[i.name] || !LIVE_SOURCES.has(indexData[i.name]?.source)
         );
-        if (missingIndexes.length > 0) {
-            const idxResults = await Promise.allSettled(
-                missingIndexes.map(idx => fetchQuote(idx.symbol))
-            );
-            idxResults.forEach((r, i) => {
+        if (missingIdx.length > 0) {
+            const idxRes = await Promise.allSettled(missingIdx.map(i => fetchQuote(i.symbol)));
+            idxRes.forEach((r, i) => {
                 if (r.status === 'fulfilled' && r.value && r.value.ltp > 0) {
-                    indexData[missingIndexes[i].name] = {
+                    indexData[missingIdx[i].name] = {
                         ...r.value,
-                        name: missingIndexes[i].name,
+                        name:   missingIdx[i].name,
                         source: 'YAHOO_LIVE',
                     };
                     gotLiveIndexes = true;
-                    console.log(`[Market] Yahoo: ${missingIndexes[i].name} = ${r.value.ltp}`);
+                    console.log(`[Market] Yahoo index: ${missingIdx[i].name} = ${r.value.ltp}`);
                 }
             });
         }
 
-        // ── Step 4: Simulate any still-missing indexes ──
-        if (!gotLiveIndexes && Object.keys(indexData).length === 0) {
-            console.log('[Market] No live index data, using simulated indexes');
-            simulateStockPrices();
-        }
-
-        dataSource = gotLiveStocks && gotLiveIndexes
-            ? (dhanDataService.isConfigured() ? 'DHAN+NSE' : 'NSE+GROWW')
-            : gotLiveStocks ? (dhanDataService.isConfigured() ? 'DHAN_LIVE' : 'GROWW_LIVE')
-            : gotLiveIndexes ? 'NSE_LIVE'
+        dataSource = dhanDataService.isConfigured() && gotLiveStocks && gotLiveIndexes
+            ? 'DHAN_LIVE'
+            : gotLiveStocks && gotLiveIndexes ? 'NSE+GROWW'
+            : gotLiveStocks  ? 'STOCKS_ONLY'
+            : gotLiveIndexes ? 'INDEX_ONLY'
             : Object.keys(stockPrices).length > 0 ? 'YAHOO'
-            : 'SIMULATED';
+            : 'NO_DATA';
 
         lastUpdated = new Date().toISOString();
-        console.log(`[Market] Update complete | source: ${dataSource} | stocks: ${Object.keys(stockPrices).length} | indexes: ${Object.keys(indexData).length}`);
+        console.log(`[Market] source: ${dataSource} | stocks: ${Object.keys(stockPrices).length} | idx: ${Object.keys(indexData).length}`);
     } catch (err) {
         console.error('[Market] fetchAllStockPrices error:', err.message);
-        simulateStockPrices();
-        dataSource = 'SIMULATED';
     } finally {
         isFetching = false;
     }
 }
 
-function getDataSource() { return dataSource; }
-
-function getStockPrices() {
-    return stockPrices;
+// ─── Fast LTP-only refresh (called every 2s during market hours) ──────────────
+async function fastRefresh() {
+    if (!dhanDataService.isConfigured()) return;
+    try {
+        const ltps = await dhanDataService.fetchDhanLTPAll(NSE_STOCK_SYMBOLS);
+        for (const [key, val] of Object.entries(ltps)) {
+            if (key.startsWith('__IDX__')) {
+                const name = key.replace('__IDX__', '');
+                if (indexData[name]) {
+                    indexData[name].ltp = val.ltp;
+                }
+            } else if (stockPrices[key]) {
+                const old = stockPrices[key];
+                const change    = val.ltp - (old.previousClose || old.ltp);
+                const chgPct    = old.previousClose > 0 ? (change / old.previousClose) * 100 : 0;
+                stockPrices[key] = {
+                    ...old,
+                    ltp:           val.ltp,
+                    change:        Math.round(change * 100) / 100,
+                    changePercent: Math.round(chgPct  * 100) / 100,
+                };
+            } else {
+                stockPrices[key] = { symbol: key, ltp: val.ltp, source: 'DHAN_LIVE' };
+            }
+        }
+        lastUpdated = new Date().toISOString();
+    } catch (e) {
+        console.warn('[Market] fastRefresh error:', e.message);
+    }
 }
 
-function getIndexData() {
-    return indexData;
-}
-
-function getLastUpdated() {
-    return lastUpdated;
-}
+function getDataSource()   { return dataSource; }
+function getStockPrices()  { return stockPrices; }
+function getIndexData()    { return indexData; }
+function getLastUpdated()  { return lastUpdated; }
 
 function getMarketMovers() {
     const stocks = Object.values(stockPrices)
         .filter(s => s.changePercent !== 0)
         .sort((a, b) => b.changePercent - a.changePercent);
-
-    const gainers = stocks.filter(s => s.changePercent > 0).slice(0, 5);
-    const losers = stocks.filter(s => s.changePercent < 0).sort((a, b) => a.changePercent - b.changePercent).slice(0, 5);
-
     return {
-        gainers,
-        losers,
-        mostActive: stocks
-            .sort((a, b) => (b.volume || 0) - (a.volume || 0))
-            .slice(0, 5),
+        gainers:    stocks.filter(s => s.changePercent > 0).slice(0, 5),
+        losers:     stocks.filter(s => s.changePercent < 0)
+                          .sort((a, b) => a.changePercent - b.changePercent).slice(0, 5),
+        mostActive: [...stocks].sort((a, b) => (b.volume || 0) - (a.volume || 0)).slice(0, 5),
     };
 }
 
@@ -359,24 +244,19 @@ function getStockPrice(symbol) {
     return stockPrices[symbol.toUpperCase()] || null;
 }
 
-// ============ OPTION CHAIN ============
+// ─── Option chain (calculated from live index price) ─────────────────────────
 
-// expiryDay: 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Fri,6=Sat (actual NSE/BSE schedule)
 const OPTION_CONFIG = {
-    'NIFTY 50':    { strikeGap: 50,  atmPremium: 120, weeklyExpiry: true,  expiryDay: 4 }, // Thursday
-    'BANK NIFTY':  { strikeGap: 100, atmPremium: 280, weeklyExpiry: true,  expiryDay: 3 }, // Wednesday
-    'SENSEX':      { strikeGap: 100, atmPremium: 350, weeklyExpiry: true,  expiryDay: 5 }, // Friday (BSE weekly)
-    'FINNIFTY':    { strikeGap: 50,  atmPremium: 80,  weeklyExpiry: true,  expiryDay: 2 }, // Tuesday
-    'NIFTY IT':    { strikeGap: 50,  atmPremium: 90,  weeklyExpiry: false, expiryDay: 4 }, // Monthly Thursday
-    'MIDCPNIFTY':  { strikeGap: 25,  atmPremium: 60,  weeklyExpiry: true,  expiryDay: 1 }, // Monday
+    'NIFTY 50':   { strikeGap: 50,  atmPremium: 120, weeklyExpiry: true,  expiryDay: 4 },
+    'BANK NIFTY': { strikeGap: 100, atmPremium: 280, weeklyExpiry: true,  expiryDay: 3 },
+    'SENSEX':     { strikeGap: 100, atmPremium: 350, weeklyExpiry: true,  expiryDay: 5 },
+    'FINNIFTY':   { strikeGap: 50,  atmPremium: 80,  weeklyExpiry: true,  expiryDay: 2 },
+    'NIFTY IT':   { strikeGap: 50,  atmPremium: 90,  weeklyExpiry: false, expiryDay: 4 },
+    'MIDCPNIFTY': { strikeGap: 25,  atmPremium: 60,  weeklyExpiry: true,  expiryDay: 1 },
 };
 
-// Format a Date as YYYY-MM-DD in LOCAL time (avoids UTC shift in toISOString())
 function localDateStr(d) {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function getExpiryDates(indexName) {
@@ -386,17 +266,13 @@ function getExpiryDates(indexName) {
     today.setHours(0, 0, 0, 0);
 
     if (cfg.weeklyExpiry) {
-        // Next 5 weekly expiry days starting from tomorrow
         const cur = new Date(today);
         cur.setDate(cur.getDate() + 1);
         while (expiries.length < 5) {
-            if (cur.getDay() === cfg.expiryDay) {
-                expiries.push(localDateStr(cur));
-            }
+            if (cur.getDay() === cfg.expiryDay) expiries.push(localDateStr(cur));
             cur.setDate(cur.getDate() + 1);
         }
     } else {
-        // Last expiryDay of next 4 months
         for (let m = 0; m < 4; m++) {
             const month = new Date(today.getFullYear(), today.getMonth() + m + 1, 0);
             while (month.getDay() !== cfg.expiryDay) month.setDate(month.getDate() - 1);
@@ -407,9 +283,7 @@ function getExpiryDates(indexName) {
 }
 
 function calcOptionPrice(type, indexPrice, strike, atmPremium, strikeGap) {
-    const intrinsic = type === 'CE'
-        ? Math.max(0, indexPrice - strike)
-        : Math.max(0, strike - indexPrice);
+    const intrinsic = type === 'CE' ? Math.max(0, indexPrice - strike) : Math.max(0, strike - indexPrice);
     const stepsFromATM = Math.abs(strike - indexPrice) / strikeGap;
     const decay = Math.exp(-stepsFromATM * 0.25);
     const timeValue = Math.max(0.5, atmPremium * decay);
@@ -418,11 +292,10 @@ function calcOptionPrice(type, indexPrice, strike, atmPremium, strikeGap) {
 }
 
 function generateOptionChainForIndex(indexName, expiry) {
-    const idxData = indexData[indexName];
-    const indexPrice = idxData ? idxData.ltp : 22450;
+    const idxEntry = indexData[indexName];
+    const indexPrice = idxEntry ? idxEntry.ltp : 24000;
     const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
     const { strikeGap, atmPremium } = cfg;
-
     const atmStrike = Math.round(indexPrice / strikeGap) * strikeGap;
     const rows = [];
 
@@ -430,12 +303,9 @@ function generateOptionChainForIndex(indexName, expiry) {
         const strike = atmStrike + i * strikeGap;
         const stepsFromATM = Math.abs(i);
         const iv = Math.round((14 + stepsFromATM * 0.4 + Math.random() * 1.5) * 100) / 100;
-
         const ceLtp = calcOptionPrice('CE', indexPrice, strike, atmPremium, strikeGap);
         const peLtp = calcOptionPrice('PE', indexPrice, strike, atmPremium, strikeGap);
-
         const oiBase = Math.round((5000000 - stepsFromATM * 200000) * (0.8 + Math.random() * 0.4));
-
         rows.push({
             strike,
             isATM: i === 0,
@@ -443,8 +313,7 @@ function generateOptionChainForIndex(indexName, expiry) {
                 oi: Math.max(100000, oiBase + Math.floor(Math.random() * 500000)),
                 oiChange: Math.floor((Math.random() - 0.3) * 300000),
                 volume: Math.floor(Math.random() * 150000) + 10000,
-                iv,
-                ltp: ceLtp,
+                iv, ltp: ceLtp,
                 change: Math.round((Math.random() - 0.5) * ceLtp * 0.3 * 100) / 100,
                 delta: Math.max(0, Math.min(1, Math.round((0.5 - i * 0.07) * 100) / 100)),
             },
@@ -452,8 +321,7 @@ function generateOptionChainForIndex(indexName, expiry) {
                 oi: Math.max(100000, oiBase + Math.floor(Math.random() * 500000)),
                 oiChange: Math.floor((Math.random() - 0.3) * 300000),
                 volume: Math.floor(Math.random() * 150000) + 10000,
-                iv,
-                ltp: peLtp,
+                iv, ltp: peLtp,
                 change: Math.round((Math.random() - 0.5) * peLtp * 0.3 * 100) / 100,
                 delta: Math.max(-1, Math.min(0, Math.round((-0.5 + i * 0.07) * 100) / 100)),
             },
@@ -461,23 +329,16 @@ function generateOptionChainForIndex(indexName, expiry) {
     }
 
     return {
-        indexName,
-        indexPrice,
-        expiry,
-        expiries: getExpiryDates(indexName),
-        atmStrike,
-        rows,
+        indexName, indexPrice, expiry,
+        expiries:  getExpiryDates(indexName),
+        atmStrike, rows,
         lastUpdated: new Date().toISOString(),
     };
 }
 
-// Seed simulated prices immediately at module load so all SIMULATED_PRICES
-// stocks are always available even before the first Groww fetch completes.
-// Live data from Groww/Yahoo will overwrite these for the stocks it covers.
-simulateStockPrices();
-
 module.exports = {
     fetchAllStockPrices,
+    fastRefresh,
     getStockPrices,
     getIndexData,
     getLastUpdated,

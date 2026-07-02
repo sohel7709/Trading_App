@@ -2,11 +2,14 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
   ScrollView, ActivityIndicator, RefreshControl,
+  Modal, TextInput, Alert, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { api, getSocket } from '../api/client';
+
+const LOT_SIZES = { 'NIFTY 50': 75, 'BANK NIFTY': 15, 'SENSEX': 20, 'FINNIFTY': 40 };
 
 const CHAIN_INDICES = ['NIFTY 50', 'BANK NIFTY', 'SENSEX', 'FINNIFTY'];
 
@@ -41,6 +44,12 @@ export default function OptionChainScreen({ navigation, route }) {
   const selectedExpiryRef = useRef(selectedExpiry);
   selectedIndexRef.current  = selectedIndex;
   selectedExpiryRef.current = selectedExpiry;
+
+  // Trade modal state
+  const [tradeModal, setTradeModal] = useState(null); // { strike, optionType, ltp, expiry }
+  const [tradeLots, setTradeLots] = useState('1');
+  const [tradeLoading, setTradeLoading] = useState(false);
+  const [optionPositions, setOptionPositions] = useState([]);
 
   const fetchChain = useCallback(async (forcedExpiry) => {
     const idx    = selectedIndexRef.current;
@@ -111,6 +120,55 @@ export default function OptionChainScreen({ navigation, route }) {
     fetchChain(exp);
   };
 
+  // Fetch open option positions to show SELL button when position exists
+  useEffect(() => {
+    api.getOptionPositions().then(setOptionPositions).catch(() => {});
+  }, []);
+
+  const openTradeModal = (item, optionType) => {
+    const ltp = optionType === 'CE' ? item.ce.ltp : item.pe.ltp;
+    setTradeModal({ strike: item.strike, optionType, ltp, expiry: selectedExpiryRef.current });
+    setTradeLots('1');
+  };
+
+  const getOpenPosition = (strike, optionType) => {
+    return optionPositions.find(
+      p => p.strikePrice === strike && p.optionType === optionType &&
+           p.expiry === selectedExpiryRef.current && p.underlyingSymbol === selectedIndexRef.current
+    );
+  };
+
+  const executeTrade = async (action) => {
+    if (!tradeModal) return;
+    const lots = parseInt(tradeLots, 10);
+    if (!lots || lots < 1) { Alert.alert('Invalid Lots', 'Enter at least 1 lot'); return; }
+    setTradeLoading(true);
+    try {
+      const result = await api.placeOptionOrder({
+        underlyingSymbol: selectedIndex,
+        strikePrice: tradeModal.strike,
+        optionType: tradeModal.optionType,
+        expiry: tradeModal.expiry,
+        lots,
+        premium: tradeModal.ltp,
+        action,
+      });
+      const lotSize = LOT_SIZES[selectedIndex] || 50;
+      const total = lots * lotSize * tradeModal.ltp;
+      const pnlLine = action === 'SELL' && result.pnl != null
+        ? `\nP&L: ${result.pnl >= 0 ? '+' : ''}₹${Math.abs(result.pnl).toFixed(2)}`
+        : `\nTotal: ₹${total.toFixed(2)}`;
+      Alert.alert(`${action} Executed`, `${tradeModal.strike} ${tradeModal.optionType} × ${lots} lots${pnlLine}`, [{ text: 'OK' }]);
+      setTradeModal(null);
+      // Refresh positions
+      api.getOptionPositions().then(setOptionPositions).catch(() => {});
+    } catch (e) {
+      Alert.alert('Order Failed', e.message);
+    } finally {
+      setTradeLoading(false);
+    }
+  };
+
   const formatDate = (dateStr) => {
     if (!dateStr) return '';
     // Add noon time to avoid UTC→local timezone date shifts
@@ -127,20 +185,25 @@ export default function OptionChainScreen({ navigation, route }) {
     const isATM = item.isATM;
     const ceIsGain = item.ce.change >= 0;
     const peIsGain = item.pe.change >= 0;
+    const cePos = getOpenPosition(item.strike, 'CE');
+    const pePos = getOpenPosition(item.strike, 'PE');
 
     return (
       <View style={[styles.row, isATM && styles.atmRow]}>
-        {/* CE side */}
-        <View style={styles.ceCell}>
+        {/* CE side — tappable */}
+        <TouchableOpacity style={styles.ceCell} onPress={() => openTradeModal(item, 'CE')} activeOpacity={0.7}>
           <Text style={[styles.cellOI, { color: item.ce.oiChange >= 0 ? colors.gain : colors.loss }]}>
             {formatOIChange(item.ce.oiChange)}
           </Text>
           <Text style={styles.cellIV}>{item.ce.iv}%</Text>
-          <Text style={[styles.cellLtp, isATM && styles.atmText]}>{item.ce.ltp.toFixed(1)}</Text>
+          <View style={{ alignItems: 'center' }}>
+            <Text style={[styles.cellLtp, isATM && styles.atmText]}>{item.ce.ltp.toFixed(1)}</Text>
+            {cePos && <View style={styles.posIndicator}><Text style={styles.posIndicatorTxt}>{cePos.lots}L</Text></View>}
+          </View>
           <Text style={[styles.cellChange, { color: ceIsGain ? colors.gain : colors.loss }]}>
             {ceIsGain ? '+' : ''}{item.ce.change.toFixed(1)}
           </Text>
-        </View>
+        </TouchableOpacity>
 
         {/* Strike */}
         <View style={[styles.strikeCell, isATM && styles.atmStrikeCell]}>
@@ -148,17 +211,20 @@ export default function OptionChainScreen({ navigation, route }) {
           {isATM && <View style={styles.atmBadge}><Text style={styles.atmBadgeText}>ATM</Text></View>}
         </View>
 
-        {/* PE side */}
-        <View style={styles.peCell}>
+        {/* PE side — tappable */}
+        <TouchableOpacity style={styles.peCell} onPress={() => openTradeModal(item, 'PE')} activeOpacity={0.7}>
           <Text style={[styles.cellChange, { color: peIsGain ? colors.gain : colors.loss }]}>
             {peIsGain ? '+' : ''}{item.pe.change.toFixed(1)}
           </Text>
-          <Text style={[styles.cellLtp, isATM && styles.atmText]}>{item.pe.ltp.toFixed(1)}</Text>
+          <View style={{ alignItems: 'center' }}>
+            <Text style={[styles.cellLtp, isATM && styles.atmText]}>{item.pe.ltp.toFixed(1)}</Text>
+            {pePos && <View style={styles.posIndicator}><Text style={styles.posIndicatorTxt}>{pePos.lots}L</Text></View>}
+          </View>
           <Text style={styles.cellIV}>{item.pe.iv}%</Text>
           <Text style={[styles.cellOI, { color: item.pe.oiChange >= 0 ? colors.gain : colors.loss }]}>
             {formatOIChange(item.pe.oiChange)}
           </Text>
-        </View>
+        </TouchableOpacity>
       </View>
     );
   };
@@ -293,13 +359,81 @@ export default function OptionChainScreen({ navigation, route }) {
       {/* Live indicator */}
       <View style={styles.liveBar}>
         <View style={styles.liveDot} />
-        <Text style={styles.liveText}>Live · Auto-updates every 5s</Text>
+        <Text style={styles.liveText}>Live · Auto-updates every 5s · Tap CE/PE to trade</Text>
         {chain?.lastUpdated && (
           <Text style={styles.liveTime}>
             {new Date(chain.lastUpdated).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
           </Text>
         )}
       </View>
+
+      {/* Trade Modal */}
+      <Modal visible={!!tradeModal} transparent animationType="slide" onRequestClose={() => setTradeModal(null)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+          <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setTradeModal(null)} />
+          {tradeModal && (() => {
+            const lotSize = LOT_SIZES[selectedIndex] || 50;
+            const lots    = parseInt(tradeLots, 10) || 0;
+            const qty     = lots * lotSize;
+            const total   = qty * tradeModal.ltp;
+            const openPos = getOpenPosition(tradeModal.strike, tradeModal.optionType);
+            return (
+              <View style={styles.modalSheet}>
+                <View style={styles.modalHandle} />
+                <Text style={styles.modalTitle}>
+                  {selectedIndex} {tradeModal.strike} {tradeModal.optionType}
+                </Text>
+                <Text style={styles.modalSubtitle}>
+                  {tradeModal.expiry} · LTP: <Text style={{ fontWeight: '700', color: colors.text }}>₹{tradeModal.ltp.toFixed(2)}</Text>
+                </Text>
+                {openPos && (
+                  <View style={styles.posInfoBanner}>
+                    <Text style={styles.posInfoText}>
+                      Open position: {openPos.lots} lots · Avg ₹{openPos.avgPremium.toFixed(2)} · P&L {openPos.pnl >= 0 ? '+' : ''}₹{(openPos.pnl ?? 0).toFixed(2)}
+                    </Text>
+                  </View>
+                )}
+
+                <View style={styles.modalRow}>
+                  <Text style={styles.modalLabel}>Lots</Text>
+                  <TextInput
+                    style={styles.lotsInput}
+                    value={tradeLots}
+                    onChangeText={setTradeLots}
+                    keyboardType="number-pad"
+                    selectTextOnFocus
+                  />
+                  <Text style={styles.modalLabel}>= {qty} qty</Text>
+                </View>
+
+                <View style={styles.modalRow}>
+                  <Text style={styles.modalLabel}>Total Premium</Text>
+                  <Text style={styles.totalText}>₹{total.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</Text>
+                </View>
+
+                <View style={styles.modalActions}>
+                  <TouchableOpacity
+                    style={styles.buyBtn}
+                    onPress={() => executeTrade('BUY')}
+                    disabled={tradeLoading}
+                  >
+                    <Text style={styles.buyBtnTxt}>{tradeLoading ? '...' : 'BUY'}</Text>
+                  </TouchableOpacity>
+                  {openPos && (
+                    <TouchableOpacity
+                      style={styles.sellBtn}
+                      onPress={() => executeTrade('SELL')}
+                      disabled={tradeLoading}
+                    >
+                      <Text style={styles.sellBtnTxt}>{tradeLoading ? '...' : 'SELL'}</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+            );
+          })()}
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -471,4 +605,53 @@ const styles = StyleSheet.create({
   },
   liveText: { fontSize: 11, color: colors.textSecondary, flex: 1 },
   liveTime: { fontSize: 11, color: colors.textMuted },
+
+  // Position indicator on chain cell
+  posIndicator: {
+    backgroundColor: '#6366F1', borderRadius: 3,
+    paddingHorizontal: 3, paddingVertical: 1, marginTop: 1,
+  },
+  posIndicatorTxt: { fontSize: 7, fontWeight: '800', color: '#fff' },
+
+  // Trade modal
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
+  modalSheet: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    padding: 20, paddingBottom: 36,
+  },
+  modalHandle: {
+    width: 40, height: 4, borderRadius: 2, backgroundColor: '#D1D5DB',
+    alignSelf: 'center', marginBottom: 16,
+  },
+  modalTitle: { fontSize: 18, fontWeight: '800', color: colors.text, textAlign: 'center' },
+  modalSubtitle: { fontSize: 13, color: colors.textSecondary, textAlign: 'center', marginTop: 4, marginBottom: 12 },
+  posInfoBanner: {
+    backgroundColor: '#EEF2FF', borderRadius: 8,
+    paddingHorizontal: 12, paddingVertical: 8, marginBottom: 12,
+  },
+  posInfoText: { fontSize: 12, color: '#4338CA', fontWeight: '600', textAlign: 'center' },
+  modalRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  modalLabel: { fontSize: 14, color: colors.textSecondary, flex: 1 },
+  lotsInput: {
+    borderWidth: 1.5, borderColor: colors.primary, borderRadius: 8,
+    paddingHorizontal: 14, paddingVertical: 8,
+    fontSize: 18, fontWeight: '700', textAlign: 'center',
+    width: 80, color: colors.text,
+  },
+  totalText: { fontSize: 16, fontWeight: '800', color: colors.text, flex: 1, textAlign: 'right' },
+  modalActions: { flexDirection: 'row', gap: 12, marginTop: 8 },
+  buyBtn: {
+    flex: 1, backgroundColor: '#16A34A', borderRadius: 10,
+    paddingVertical: 14, alignItems: 'center',
+  },
+  buyBtnTxt: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  sellBtn: {
+    flex: 1, backgroundColor: '#DC2626', borderRadius: 10,
+    paddingVertical: 14, alignItems: 'center',
+  },
+  sellBtnTxt: { color: '#fff', fontSize: 16, fontWeight: '800' },
 });
