@@ -1,120 +1,54 @@
 'use strict';
 
 /**
- * Dhan Token Auto-Renewal
+ * Dhan Token Renewal — OTP-based login means full auto-login isn't possible.
  *
- * Two strategies, tried in order:
+ * Two practical approaches (choose one or both):
  *
- * 1. CREDENTIALS AUTO-LOGIN (zero-click)
- *    Set DHAN_USER_ID + DHAN_PASSWORD in .env.
- *    Every morning at 8:30 AM IST this module logs in to Dhan and
- *    generates a fresh token automatically — no portal visit needed.
+ * OPTION A — Postback URL (1-click, no copy-paste) ← RECOMMENDED
+ *   In dhanhq.co/developers → your app → set Postback URL to:
+ *     https://your-server.com/dhan/token-postback
+ *   Every time you click "Generate Token" on the portal, Dhan automatically
+ *   POSTs the new token to your server. You just click the button — done.
  *
- * 2. POSTBACK URL (one-click, no copy-paste)
- *    Set the Postback URL in your Dhan app to:
- *      https://your-server.com/dhan/token-postback
- *    Then whenever you click "Generate Token" on dhanhq.co/developers,
- *    Dhan POSTs the token straight to your server — no copy-paste.
+ * OPTION B — Admin web page (paste token from browser/phone)
+ *   Open https://your-server.com/admin/token in any browser.
+ *   Paste the token from the Dhan portal and click Save.
+ *   Takes ~15 seconds. No curl, no copy-paste into terminal.
  *
- * Manual fallback:
- *    POST /admin/update-token   { clientId, accessToken }
+ * The daily cron below logs token status every morning so you see expiry
+ * warnings in your server logs without having to check manually.
  */
 
-const cron        = require('node-cron');
-const axios       = require('axios');
+const cron         = require('node-cron');
 const tokenService = require('./tokenService');
 
-// Dhan portal endpoints (internal, reverse-engineered from dhanhq.co portal)
-const DHAN_LOGIN_URL     = 'https://api.dhan.co/v1/login';
-const DHAN_TOKEN_GEN_URL = 'https://api.dhan.co/v1/generateToken';
-
-// ─── Auto-login flow ──────────────────────────────────────────────────────────
-async function autoRenewToken() {
-    const userId   = process.env.DHAN_USER_ID;
-    const password = process.env.DHAN_PASSWORD;
-    const clientId = process.env.DHAN_CLIENT_ID;
-    const appId    = process.env.DHAN_APP_ID;  // e.g. "14d9a7aa"
-
-    if (!userId || !password) {
-        console.warn('[AutoRenew] DHAN_USER_ID or DHAN_PASSWORD not set — skipping auto-renewal');
-        console.warn('[AutoRenew] Either set credentials in .env, or update token manually via POST /admin/update-token');
-        return false;
-    }
-
-    console.log('[AutoRenew] Attempting Dhan token auto-renewal...');
-
-    try {
-        // Step 1: Login to Dhan portal
-        const loginRes = await axios.post(DHAN_LOGIN_URL, {
-            userId,
-            password,
-        }, {
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 15000,
-        });
-
-        const sessionToken = loginRes.data?.data?.sessionToken || loginRes.data?.sessionToken;
-        if (!sessionToken) {
-            throw new Error('No session token in login response — check credentials or Dhan portal endpoint');
-        }
-
-        // Step 2: Generate a new access token
-        const tokenRes = await axios.post(DHAN_TOKEN_GEN_URL, {
-            appId: appId || '',
-        }, {
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${sessionToken}`,
-                'access-token': sessionToken,
-            },
-            timeout: 15000,
-        });
-
-        const accessToken = tokenRes.data?.data?.accessToken
-            || tokenRes.data?.accessToken
-            || tokenRes.data?.access_token
-            || tokenRes.data?.token;
-
-        if (!accessToken) {
-            throw new Error('No access token in token generation response');
-        }
-
-        await tokenService.saveToken(clientId, accessToken);
-        console.log('[AutoRenew] ✅ Token auto-renewed successfully');
-        return true;
-
-    } catch (err) {
-        const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-        console.error(`[AutoRenew] ❌ Auto-renewal failed: ${detail}`);
-        console.error('[AutoRenew] Fallback: update token manually → POST /admin/update-token');
-        return false;
-    }
-}
-
-// ─── Schedule: 8:30 AM IST daily ─────────────────────────────────────────────
-// node-cron uses server time; we adjust to IST (UTC+5:30) → 3:00 AM UTC
+// ─── Daily health check (8:30 AM IST = 3:00 AM UTC) ─────────────────────────
 function startAutoRenewCron() {
-    // Run at 3:00 AM UTC = 8:30 AM IST, Mon-Sat
-    cron.schedule('0 3 * * 1-6', async () => {
-        console.log('[AutoRenew] Scheduled token renewal triggered (8:30 AM IST)');
-        const ok = await autoRenewToken();
-        if (!ok) {
-            // Log status so you see it in server logs
-            const status = tokenService.getTokenStatus();
-            console.warn(`[AutoRenew] Current token status: ${status.status} | hoursLeft: ${status.hoursLeft}`);
+    cron.schedule('0 3 * * 1-6', () => {
+        const status = tokenService.getTokenStatus();
+        if (!status.configured) {
+            console.warn('[TokenCron] No Dhan token configured. Update via POST /admin/update-token or /admin/token web page.');
+            return;
         }
-    }, {
-        timezone: 'UTC',
-    });
+        if (status.expired) {
+            console.error('[TokenCron] ⛔ Dhan token has EXPIRED. Open https://dhanhq.co/developers → Generate Token, then visit /admin/token to update.');
+        } else if (status.hoursLeft < 2) {
+            console.error(`[TokenCron] ⚠️  Token expires in ${Math.round(status.hoursLeft * 60)} minutes! Update now via /admin/token`);
+        } else if (status.hoursLeft < 6) {
+            console.warn(`[TokenCron] ⚠️  Token expires in ${status.hoursLeft}h. Update today via /admin/token`);
+        } else {
+            console.log(`[TokenCron] ✅ Token valid | ${status.hoursLeft}h remaining | expires ${status.expiresAt}`);
+        }
+    }, { timezone: 'UTC' });
 
-    // Also check on startup: if token expires within 8 hours, try to renew immediately
+    // Immediate check on startup
     const status = tokenService.getTokenStatus();
-    if (status.configured && (status.expired || (status.hoursLeft != null && status.hoursLeft < 8))) {
-        console.log('[AutoRenew] Token expires in <8h on startup — attempting immediate renewal...');
-        autoRenewToken();
+    if (status.configured && status.hoursLeft != null && status.hoursLeft < 8) {
+        console.warn(`[TokenCron] ⚠️  Token expires in ${status.hoursLeft}h — update via /admin/token or POST /admin/update-token`);
     }
 
-    console.log('[AutoRenew] Cron scheduled: daily at 8:30 AM IST (Mon–Sat)');
+    console.log('[TokenCron] Daily health check scheduled: 8:30 AM IST (Mon–Sat)');
 }
 
-module.exports = { startAutoRenewCron, autoRenewToken };
+module.exports = { startAutoRenewCron };

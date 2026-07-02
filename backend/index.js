@@ -1867,6 +1867,105 @@ app.post('/newOptionOrder', async (req, res) => {
     }
 });
 
+// ============ ADMIN TOKEN WEB PAGE ============
+// Open http://your-server:8080/admin/token in any browser — paste token, save.
+app.get('/admin/token', (req, res) => {
+    const status = tokenService.getTokenStatus();
+    const statusColor = status.expired ? '#ef4444' : status.status === 'EXPIRING_SOON' ? '#f59e0b' : '#22c55e';
+    const statusText  = status.expired ? `EXPIRED` : status.hoursLeft != null ? `Valid — ${status.hoursLeft}h left` : 'Unknown';
+    const expiresLine = status.expiresAt ? `Expires: ${new Date(status.expiresAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST` : '';
+
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dhan Token Update</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, sans-serif; background: #f5f5f5; display: flex; justify-content: center; padding: 24px 16px; }
+    .card { background: #fff; border-radius: 12px; padding: 28px; max-width: 520px; width: 100%; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    h1 { font-size: 20px; font-weight: 700; color: #1e293b; margin-bottom: 4px; }
+    .sub { font-size: 13px; color: #64748b; margin-bottom: 20px; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px; background: #f1f5f9; margin-bottom: 8px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: ${statusColor}; }
+    .badge-txt { font-size: 13px; font-weight: 600; color: ${statusColor}; }
+    .expires { font-size: 12px; color: #94a3b8; margin-bottom: 20px; }
+    label { font-size: 13px; font-weight: 600; color: #374151; display: block; margin-bottom: 6px; }
+    .step { font-size: 12px; color: #64748b; margin-bottom: 14px; line-height: 1.6; }
+    .step a { color: #3b82f6; }
+    textarea { width: 100%; border: 1.5px solid #e2e8f0; border-radius: 8px; padding: 12px; font-size: 12px; font-family: monospace; color: #334155; resize: vertical; min-height: 90px; margin-bottom: 14px; outline: none; }
+    textarea:focus { border-color: #3b82f6; }
+    input[type=text] { width: 100%; border: 1.5px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #334155; margin-bottom: 14px; outline: none; }
+    input:focus { border-color: #3b82f6; }
+    button { width: 100%; background: #2563eb; color: #fff; border: none; border-radius: 8px; padding: 13px; font-size: 15px; font-weight: 700; cursor: pointer; }
+    button:hover { background: #1d4ed8; }
+    .result { margin-top: 14px; padding: 12px; border-radius: 8px; font-size: 13px; display: none; }
+    .ok  { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+    .err { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+    .tip { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px; font-size: 12px; color: #1d4ed8; line-height: 1.6; margin-top: 18px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Dhan Token</h1>
+    <p class="sub">Update your Dhan API access token</p>
+    <div class="badge"><div class="dot"></div><span class="badge-txt">${statusText}</span></div>
+    <p class="expires">${expiresLine}</p>
+
+    <p class="step">
+      1. Go to <a href="https://dhanhq.co/developers" target="_blank">dhanhq.co/developers</a><br>
+      2. Click your app → <strong>Generate Token</strong> (enter OTP)<br>
+      3. Copy the access token and paste below
+    </p>
+
+    <label>Client ID</label>
+    <input type="text" id="clientId" value="${status.clientId || ''}" placeholder="e.g. 1112426535" />
+    <label>New Access Token</label>
+    <textarea id="token" placeholder="Paste eyJ... token here"></textarea>
+    <button onclick="save()">Save Token</button>
+    <div id="result" class="result"></div>
+
+    <div class="tip">
+      <strong>Tip — skip copy-paste entirely:</strong><br>
+      Set Postback URL in your Dhan app to<br>
+      <code>https://your-server.com/dhan/token-postback</code><br>
+      Then just click "Generate Token" — Dhan sends it here automatically.
+    </div>
+  </div>
+  <script>
+    async function save() {
+      const clientId = document.getElementById('clientId').value.trim();
+      const token    = document.getElementById('token').value.trim();
+      const res      = document.getElementById('result');
+      if (!clientId || !token) { showResult('Enter both Client ID and Access Token', false); return; }
+      try {
+        const r = await fetch('/admin/update-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientId, accessToken: token }),
+        });
+        const data = await r.json();
+        if (r.ok) {
+          const exp = data.expiresAt ? new Date(data.expiresAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
+          showResult('✅ Token updated! Expires: ' + exp + ' IST', true);
+          setTimeout(() => location.reload(), 2000);
+        } else {
+          showResult('❌ ' + (data.message || 'Update failed'), false);
+        }
+      } catch(e) { showResult('❌ Network error: ' + e.message, false); }
+    }
+    function showResult(msg, ok) {
+      const el = document.getElementById('result');
+      el.textContent = msg;
+      el.className = 'result ' + (ok ? 'ok' : 'err');
+      el.style.display = 'block';
+    }
+  </script>
+</body>
+</html>`);
+});
+
 // ============ DHAN POSTBACK (auto-receives new token from portal) ============
 // Set this URL in dhanhq.co/developers → your app → Postback URL:
 //   https://your-server.com/dhan/token-postback
