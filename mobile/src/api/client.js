@@ -52,6 +52,19 @@ const del = async (path) => {
   return res.json();
 };
 
+const patch = async (path, body) => {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `PATCH ${path} failed: ${res.status}`);
+  }
+  return res.json();
+};
+
 export const api = {
   // Holdings
   getHoldings: () => get('/allHoldings'),
@@ -59,11 +72,26 @@ export const api = {
   // Positions
   getPositions: () => get('/allPositions'),
   getDayPositions: () => get('/positions/day'),
+  getDayPnl: () => get('/positions/dayPnl'),
+  getClosedPositions: () => get('/closedPositions'),
+  squareOffPosition: (id, quantity) => post(`/positions/${id}/squareoff`, quantity ? { quantity } : {}),
 
   // Orders
   getOrders: () => get('/allOrders'),
   cancelOrder: (id) => del(`/orders/${id}`),
   placeOrder: (order) => post('/newOrder', order),
+  modifyOrder: (id, changes) => patch(`/orders/${id}`, changes),
+  placeCoverOrder: (order) => post('/newCoverOrder', order),
+
+  // Baskets
+  getBaskets: () => get('/baskets'),
+  createBasket: (name, legs) => post('/baskets', { name, legs }),
+  deleteBasket: (id) => del(`/baskets/${id}`),
+  executeBasket: (id) => post(`/baskets/${id}/execute`, {}),
+
+  // Corporate actions
+  getCorporateActions: () => get('/corporate-actions'),
+  applyCorporateActions: () => post('/corporate-actions/apply', {}),
 
   // Trades
   getTrades: () => get('/trades'),
@@ -73,7 +101,7 @@ export const api = {
 
   // Funds
   getFunds: () => get('/funds'),
-  deposit: (amount) => post('/funds/deposit', { amount }),
+  deposit: (amount, method, upiApp) => post('/funds/deposit', { amount, method, upiApp }),
   withdraw: (amount) => post('/funds/withdraw', { amount }),
 
   // Watchlist
@@ -89,7 +117,7 @@ export const api = {
   getLiveMarket: () => cachedGet('/market/live', 2000),
   getIndexes: () => cachedGet('/market/indexes', 2000),
   getMovers: () => cachedGet('/market/movers', 5000),
-  getQuote: (symbol) => get(`/market/quote/${symbol}`),
+  getQuote: (symbol, exchange) => get(`/market/quote/${symbol}${exchange ? `?exchange=${exchange}` : ''}`),
   getCandles: (symbol, interval = '1d') => get(`/market/candles/${symbol}?interval=${interval}`),
   getHistory: (symbol, days = 30) => get(`/market/history/${symbol}?days=${days}`),
   getIndexCandles: (indexName, interval = '1d') => get(`/market/index-candles/${encodeURIComponent(indexName)}?interval=${interval}`),
@@ -102,6 +130,7 @@ export const api = {
   // Option paper trading
   getOptionPositions: () => get('/optionPositions'),
   placeOptionOrder: (order) => post('/newOptionOrder', order),
+  squareOffOptionPosition: (id, lots) => post(`/optionPositions/${id}/squareoff`, lots ? { lots } : {}),
 
   // Alerts
   getAlerts: () => get('/alerts'),

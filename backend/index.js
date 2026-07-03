@@ -13,6 +13,8 @@ const { WalletModel } = require('./model/WalletModel');
 const { WatchlistModel } = require('./model/WatchlistModel');
 const { FundTransactionModel } = require('./model/FundTransactionModel');
 const { PriceAlertModel } = require('./model/PriceAlertModel');
+const { BasketModel } = require('./model/BasketModel');
+const { CorporateActionModel } = require('./model/CorporateActionModel');
 const marketDataService  = require('./marketDataService');
 const tokenService       = require('./tokenService');
 const dhanAutoRenew      = require('./dhanAutoRenew');
@@ -21,6 +23,11 @@ const candleDataService = require('./candleDataService');
 const { ChatModel } = require('./model/ChatModel');
 const { PLRecordModel } = require('./model/PLRecordModel');
 const { OptionPositionsModel } = require('./model/OptionPositionsModel');
+const { ClosedPositionModel } = require('./model/ClosedPositionModel');
+const dhanDataService = require('./dhanDataService');
+const rules = require('./marketRules');
+const orderEngine = require('./orderEngine');
+const { calcCharges } = require('./chargesService');
 
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.DATABASE_URL;
@@ -31,6 +38,7 @@ const io = new Server(server, {
     cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 ioInstance = io;
+orderEngine.init(io);
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -46,50 +54,232 @@ mongoose.connect(MONGO_URI)
     })
     .catch(err => console.error('Error connecting to MongoDB:', err));
 
+// Merge live market price into a DB document — the stored `ltp` is only a
+// snapshot from the last BUY/SELL and goes stale immediately, which was
+// causing P&L to flicker to a wrong value on every refresh before the next
+// socket tick corrected it.
+function withLiveLtp(doc) {
+    const live = marketDataService.getStockPrice(doc.stockSymbol);
+    return { ...doc.toObject(), ltp: live?.ltp ?? doc.ltp };
+}
+
 // ============ HOLDINGS ============
 app.get('/allHoldings', async (req, res) => {
     try {
         const allHoldings = await HoldingsModel.find({});
-        res.status(200).json(allHoldings);
+        res.status(200).json(allHoldings.map(withLiveLtp));
     } catch (err) {
         res.status(500).json({ message: 'Error fetching holdings', error: err.message });
     }
 });
 
 // ============ POSITIONS ============
+// Live LTP + realised (today's matched round-trips) + unrealised (mark-to-
+// market on the still-open quantity) for one equity position.
+async function enrichEquityPosition(doc) {
+    const p = withLiveLtp(doc);
+    const unrealizedPnl = Math.round((p.ltp - p.avgPrice) * p.quantity * 100) / 100;
+    const realizedPnl   = await computeRealizedPnlToday(p.stockSymbol, p.productType);
+    return { ...p, unrealizedPnl, realizedPnl, pnl: Math.round((unrealizedPnl + realizedPnl) * 100) / 100 };
+}
+
 app.get('/allPositions', async (req, res) => {
     try {
         const allPositions = await PositionsModel.find({});
-        res.status(200).json(allPositions);
+        res.status(200).json(await Promise.all(allPositions.map(enrichEquityPosition)));
     } catch (err) {
         res.status(500).json({ message: 'Error fetching positions', error: err.message });
     }
 });
 
+// Positions-screen "Total P&L" — realised P&L from EVERY symbol traded today
+// (including ones already fully squared off and removed from Positions/
+// OptionPositions) plus unrealised mark-to-market on whatever is still open.
+app.get('/positions/dayPnl', async (req, res) => {
+    try {
+        const [equityPositions, optionPositionsRaw, totalRealizedPnl] = await Promise.all([
+            PositionsModel.find({}),
+            OptionPositionsModel.find({}),
+            computeTotalRealizedPnlToday(),
+        ]);
+        const equity  = await Promise.all(equityPositions.map(enrichEquityPosition));
+        const options = await enrichOptionPositions(optionPositionsRaw);
+        const totalUnrealizedPnl = Math.round(
+            (equity.reduce((s, p) => s + p.unrealizedPnl, 0) + options.reduce((s, p) => s + p.unrealizedPnl, 0)) * 100
+        ) / 100;
+        const totalPnl = Math.round((totalRealizedPnl + totalUnrealizedPnl) * 100) / 100;
+        res.status(200).json({ totalRealizedPnl, totalUnrealizedPnl, totalPnl });
+    } catch (err) {
+        res.status(500).json({ message: 'Error computing day P&L', error: err.message });
+    }
+});
+
+// Today's squared-off positions for the Positions screen — frozen P&L
+// (booked at close time), with a live reference LTP merged in for display
+// only (never used to recompute pnl). Scoped to today's dateStr so the
+// screen naturally starts fresh each trading day without deleting history —
+// the ClosedPositionModel rows themselves are kept forever for the trade
+// book / overall P&L reports.
+app.get('/closedPositions', async (req, res) => {
+    try {
+        const { dateStr } = istDayRange();
+        const closed = await ClosedPositionModel.find({ dateStr: req.query.date || dateStr })
+            .sort({ closedAt: -1 }).lean();
+        const withLtp = await Promise.all(closed.map(async (c) => {
+            if (c.kind === 'option' && c.underlyingSymbol) {
+                const liveLtp = await getLiveOptionLTP(c.underlyingSymbol, c.strikePrice, c.optionType, c.expiry);
+                return { ...c, ltp: liveLtp ?? c.exitPrice };
+            }
+            const live = marketDataService.getStockPrice(c.symbol);
+            return { ...c, ltp: live?.ltp ?? c.exitPrice };
+        }));
+        res.status(200).json(withLtp);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching closed positions', error: err.message });
+    }
+});
+
+// Square off (fully or partially close) an equity MIS/NRML position at the
+// current live LTP — the long-press "Square off" action in the app.
+app.post('/positions/:id/squareoff', async (req, res) => {
+    if (!isMarketOpen()) {
+        return res.status(400).json({
+            message: 'Market is closed',
+            detail: 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.',
+            marketClosed: true,
+        });
+    }
+    try {
+        const position = await PositionsModel.findById(req.params.id);
+        if (!position) return res.status(404).json({ message: 'Position not found' });
+
+        const isShort = position.quantity < 0;
+        const side = isShort ? 'BUY' : 'SELL'; // cover a short, exit a long
+        const requestedQty = req.body?.quantity ? Number(req.body.quantity) : Math.abs(position.quantity);
+        const quantity = Math.min(requestedQty, Math.abs(position.quantity));
+
+        const liveLtp = marketDataService.getStockPrice(position.stockSymbol)?.ltp ?? position.ltp;
+
+        const result = await orderEngine.placeOrder({
+            stockSymbol: position.stockSymbol, quantity, price: liveLtp,
+            type: 'MARKET', side, productType: position.productType,
+        });
+        res.status(201).json({ message: 'Position squared off', order: result.order, trade: result.trade });
+    } catch (err) {
+        if (err instanceof orderEngine.OrderRejectedError) return res.status(400).json({ message: err.message });
+        res.status(500).json({ message: 'Error squaring off position', error: err.message });
+    }
+});
+
 // ============ ORDERS ============
+// Orders "vanish" at every new trading day: the API only returns orders
+// placed today (IST); the daily prep job deletes older ones from the DB.
 app.get('/allOrders', async (req, res) => {
     try {
-        const allOrders = await OrdersModel.find({}).sort({ createdAt: -1 });
+        const { start } = istDayRange();
+        const allOrders = await OrdersModel.find({ createdAt: { $gte: start } }).sort({ createdAt: -1 });
         res.status(200).json(allOrders);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching orders', error: err.message });
     }
 });
 
-// NSE market hours: Mon–Fri 09:15–15:30 IST
-function isMarketOpen() {
-    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    const day = ist.getDay();
-    if (day === 0 || day === 6) return false;
-    const mins = ist.getHours() * 60 + ist.getMinutes();
-    return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+// NSE market hours: Mon–Fri 09:15–15:30 IST, excluding NSE holidays — single
+// source of truth lives in marketRules.js (was duplicated inline before).
+const isMarketOpen = rules.isMarketOpen;
+
+// Today's date boundaries in IST (works regardless of server timezone)
+function istDayRange(d = new Date()) {
+    const ist = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const dateStr = `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, '0')}-${String(ist.getDate()).padStart(2, '0')}`;
+    return {
+        start: new Date(`${dateStr}T00:00:00.000+05:30`),
+        end:   new Date(`${dateStr}T23:59:59.999+05:30`),
+        dateStr,
+    };
 }
 
+// A PositionsModel/OptionPositionsModel document only holds the still-OPEN
+// net quantity — it has no memory of round-trips already closed earlier
+// today. "Realised" P&L for the position screen has to come from FIFO-
+// matching today's actual BUY/SELL trade log for that exact symbol.
+async function computeRealizedPnlToday(stockSymbol, productType) {
+    const { start, end } = istDayRange();
+    const trades = await TradeModel.find({
+        stockSymbol, productType, createdAt: { $gte: start, $lte: end },
+    }).sort({ createdAt: 1 }).lean();
+
+    const buyQueue = trades.filter(t => t.side === 'BUY').map(b => ({ price: b.price, remaining: b.quantity }));
+    const sells = trades.filter(t => t.side === 'SELL');
+
+    let realized = 0;
+    for (const sell of sells) {
+        let remainToMatch = sell.quantity;
+        for (const buy of buyQueue) {
+            if (remainToMatch <= 0) break;
+            if (buy.remaining <= 0) continue;
+            const matchQty = Math.min(remainToMatch, buy.remaining);
+            realized += (sell.price - buy.price) * matchQty;
+            buy.remaining -= matchQty;
+            remainToMatch -= matchQty;
+        }
+    }
+    return Math.round(realized * 100) / 100;
+}
+
+// Realised P&L for a symbol only exists while today's trades are still on
+// the books — but a position document is DELETED once its quantity nets to
+// zero (see applyEquityFillMIS / executeOptionOrder), so a fully squared-off
+// symbol drops out of enrichEquityPosition/enrichOptionPositions entirely.
+// The Positions-screen "Total P&L" has to include those closed round-trips
+// too, so it's computed from the full trade log for today — independent of
+// which positions are still open — rather than summed off currently-open
+// position docs.
+async function computeTotalRealizedPnlToday() {
+    const { start, end } = istDayRange();
+    const trades = await TradeModel.find({ createdAt: { $gte: start, $lte: end } })
+        .select('stockSymbol productType').lean();
+
+    const seen = new Set();
+    let total = 0;
+    for (const t of trades) {
+        const key = `${t.stockSymbol}|${t.productType}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        total += await computeRealizedPnlToday(t.stockSymbol, t.productType);
+    }
+    return Math.round(total * 100) / 100;
+}
+
+// Frozen snapshot for the Positions screen's "squared off" section — see
+// orderEngine.recordClosedEquityPosition for the equity-side counterpart.
+async function recordClosedOptionPosition({ symbol, productType, quantity, lots, avgPrice, exitPrice, pnl, underlyingSymbol, strikePrice, optionType, expiry }) {
+    try {
+        await new ClosedPositionModel({
+            kind: 'option', symbol, productType, quantity, lots, avgPrice, exitPrice,
+            pnl: Math.round(pnl * 100) / 100, dateStr: istDayRange().dateStr,
+            underlyingSymbol, strikePrice, optionType, expiry,
+        }).save();
+    } catch (e) { console.error('[Index] recordClosedOptionPosition error:', e.message); }
+}
+
+// Places MARKET orders instantly; LIMIT/SL/SL-M rest as PENDING and are
+// picked up by orderEngine.evaluatePendingOrders() on the next market tick —
+// a real resting order book instead of "everything fills immediately".
 app.post('/newOrder', async (req, res) => {
-    const { stockSymbol, qty: quantity, price, mode: type, side, productType } = req.body;
+    const { stockSymbol, qty: quantity, price, mode: type, triggerPrice, side, productType, exchange } = req.body;
 
     if (!stockSymbol || !quantity || !price) {
         return res.status(400).json({ message: 'Missing required fields: stockSymbol, qty, price' });
+    }
+    // `!quantity`/`!price` above only reject 0/null/undefined — a negative
+    // quantity is truthy and sails through. For SELL orders that's a real
+    // exploit: applyEquityFillCNC's `quantity > holding.quantity` oversell
+    // guard is trivially satisfied by a negative number, and `holding.quantity
+    // -= quantity` then *adds* shares for free (checkFunds is also skipped
+    // entirely for non-BUY sides, so there's no funds gate to catch it either).
+    if (!Number.isFinite(Number(quantity)) || Number(quantity) <= 0 || !Number.isFinite(Number(price)) || Number(price) <= 0) {
+        return res.status(400).json({ message: 'qty and price must be positive numbers' });
     }
 
     if (!isMarketOpen()) {
@@ -101,143 +291,192 @@ app.post('/newOrder', async (req, res) => {
     }
 
     try {
-        // Create the order
-        const orderType = type || 'MARKET';
-        const orderSide = side || 'BUY';
-        const orderProductType = productType || 'CNC';
+        marketDataService.trackSymbol(stockSymbol);
+        const orderType = ['MARKET', 'LIMIT', 'SL', 'SLM'].includes(type) ? type : 'MARKET';
 
-        const newOrder = new OrdersModel({
-            stockSymbol: stockSymbol.toUpperCase(),
-            quantity: Number(quantity),
-            price: Number(price),
-            type: orderType === 'BUY' || orderType === 'SELL' ? 'MARKET' : orderType,
-            side: orderSide,
-            status: 'EXECUTED', // Auto-execute for demo
-            productType: orderProductType,
+        const result = await orderEngine.placeOrder({
+            stockSymbol, quantity, price, triggerPrice,
+            type: orderType, side: side || 'BUY',
+            productType: productType || 'CNC', exchange,
         });
 
-        await newOrder.save();
-
-        // Create a trade record
-        const totalValue = Number(quantity) * Number(price);
-        const charges = Math.round(totalValue * 0.0005 * 100) / 100; // 0.05% brokerage
-
-        const newTrade = new TradeModel({
-            stockSymbol: stockSymbol.toUpperCase(),
-            quantity: Number(quantity),
-            price: Number(price),
-            side: orderSide,
-            productType: orderProductType,
-            orderId: newOrder._id,
-            charges,
-            totalValue,
-        });
-        await newTrade.save();
-
-        // Wallet is updated AFTER holdings are modified below; handled at broadcast step
-
-        // Update holdings / positions
-        if (orderSide === 'BUY') {
-            if (orderProductType === 'MIS') {
-                // Intraday position
-                let position = await PositionsModel.findOne({ stockSymbol: stockSymbol.toUpperCase(), productType: 'MIS' });
-                if (position) {
-                    const totalQty = position.quantity + Number(quantity);
-                    position.avgPrice = ((position.avgPrice * position.quantity) + (Number(price) * Number(quantity))) / totalQty;
-                    position.quantity = totalQty;
-                    position.ltp = Number(price);
-                } else {
-                    position = new PositionsModel({
-                        stockSymbol: stockSymbol.toUpperCase(),
-                        quantity: Number(quantity),
-                        avgPrice: Number(price),
-                        ltp: Number(price),
-                        productType: 'MIS',
-                        isIntraday: true,
-                    });
-                }
-                await position.save();
-            } else {
-                // CNC - Delivery holding
-                let holding = await HoldingsModel.findOne({ stockSymbol: stockSymbol.toUpperCase() });
-                const liveLtp = marketDataService.getStockPrice(stockSymbol.toUpperCase())?.ltp ?? Number(price);
-                if (holding) {
-                    const totalQty = holding.quantity + Number(quantity);
-                    holding.avgPrice = Math.round(((holding.avgPrice * holding.quantity) + (Number(price) * Number(quantity))) / totalQty * 100) / 100;
-                    holding.quantity = totalQty;
-                    holding.ltp = liveLtp;
-                } else {
-                    holding = new HoldingsModel({
-                        stockSymbol: stockSymbol.toUpperCase(),
-                        quantity: Number(quantity),
-                        avgPrice: Number(price),
-                        ltp: liveLtp,
-                        productType: 'CNC',
-                    });
-                }
-                await holding.save();
-            }
+        if (result.immediate) {
+            res.status(201).json({
+                message: 'Order executed successfully',
+                order: result.order,
+                trade: result.trade,
+            });
         } else {
-            // SELL
-            if (orderProductType === 'MIS') {
-                let position = await PositionsModel.findOne({ stockSymbol: stockSymbol.toUpperCase(), productType: 'MIS' });
-                if (position) {
-                    position.quantity -= Number(quantity);
-                    if (position.quantity <= 0) {
-                        await PositionsModel.deleteOne({ _id: position._id });
-                    } else {
-                        await position.save();
-                    }
-                }
-            } else {
-                let holding = await HoldingsModel.findOne({ stockSymbol: stockSymbol.toUpperCase() });
-                if (holding) {
-                    holding.quantity -= Number(quantity);
-                    if (holding.quantity <= 0) {
-                        await HoldingsModel.deleteOne({ _id: holding._id });
-                    } else {
-                        await holding.save();
-                    }
-                }
+            res.status(201).json({
+                message: `${orderType} order placed — resting until triggered`,
+                order: result.order,
+            });
+        }
+    } catch (err) {
+        if (err instanceof orderEngine.OrderRejectedError) {
+            return res.status(400).json({ message: err.message });
+        }
+        res.status(500).json({ message: 'Error creating order', error: err.message });
+    }
+});
+
+// Modify a resting PENDING order's price/qty/trigger
+app.patch('/orders/:id', async (req, res) => {
+    try {
+        const order = await OrdersModel.findById(req.params.id);
+        if (!order) return res.status(404).json({ message: 'Order not found' });
+        if (order.status !== 'PENDING') {
+            return res.status(400).json({ message: `Cannot modify a ${order.status.toLowerCase()} order` });
+        }
+        const { qty, price, triggerPrice } = req.body;
+        if (qty != null) order.quantity = Number(qty);
+        if (price != null) {
+            if (!rules.isValidTick(Number(price))) {
+                return res.status(400).json({ message: `Price must be in multiples of ₹${rules.TICK_SIZE}` });
+            }
+            order.price = Number(price);
+        }
+        if (triggerPrice != null) order.triggerPrice = Number(triggerPrice);
+        order.slTriggered = false; // re-arm SL if trigger/price changed
+        await order.save();
+        io.emit('orderModified', { order: order.toObject() });
+        res.json({ message: 'Order modified', order });
+    } catch (err) {
+        res.status(500).json({ message: 'Error modifying order', error: err.message });
+    }
+});
+
+// ============ BASKET ORDERS ============
+// Bundle multiple legs and place them together. Each leg still goes through
+// the normal order engine — MARKET legs fill immediately, LIMIT/SL/SL-M legs
+// rest as PENDING, exactly like placing them one at a time.
+app.get('/baskets', async (req, res) => {
+    try {
+        res.json(await BasketModel.find({}).sort({ createdAt: -1 }));
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching baskets', error: err.message });
+    }
+});
+
+app.post('/baskets', async (req, res) => {
+    const { name, legs } = req.body;
+    if (!name || !Array.isArray(legs) || legs.length === 0) {
+        return res.status(400).json({ message: 'name and a non-empty legs array are required' });
+    }
+    try {
+        const basket = new BasketModel({
+            name,
+            legs: legs.map(l => ({
+                stockSymbol: String(l.stockSymbol).toUpperCase(),
+                quantity: Number(l.quantity), price: Number(l.price),
+                triggerPrice: l.triggerPrice ? Number(l.triggerPrice) : null,
+                type: l.type || 'MARKET', side: l.side, productType: l.productType || 'CNC',
+                exchange: l.exchange || 'NSE',
+            })),
+        });
+        await basket.save();
+        res.status(201).json(basket);
+    } catch (err) {
+        res.status(500).json({ message: 'Error creating basket', error: err.message });
+    }
+});
+
+app.delete('/baskets/:id', async (req, res) => {
+    try {
+        await BasketModel.findByIdAndDelete(req.params.id);
+        res.json({ message: 'Basket deleted' });
+    } catch (err) {
+        res.status(500).json({ message: 'Error deleting basket', error: err.message });
+    }
+});
+
+app.post('/baskets/:id/execute', async (req, res) => {
+    if (!isMarketOpen()) {
+        return res.status(400).json({ message: 'Market is closed', marketClosed: true });
+    }
+    try {
+        const basket = await BasketModel.findById(req.params.id);
+        if (!basket) return res.status(404).json({ message: 'Basket not found' });
+        if (basket.executed) return res.status(400).json({ message: 'Basket already executed' });
+
+        const results = [];
+        for (const leg of basket.legs) {
+            try {
+                marketDataService.trackSymbol(leg.stockSymbol);
+                const result = await orderEngine.placeOrder({
+                    stockSymbol: leg.stockSymbol, quantity: leg.quantity, price: leg.price,
+                    triggerPrice: leg.triggerPrice, type: leg.type, side: leg.side,
+                    productType: leg.productType, exchange: leg.exchange,
+                });
+                results.push({ stockSymbol: leg.stockSymbol, status: 'ok', immediate: result.immediate, orderId: result.order._id });
+            } catch (e) {
+                results.push({ stockSymbol: leg.stockSymbol, status: 'failed', error: e.message });
             }
         }
+        basket.executed = true;
+        basket.executedAt = new Date();
+        await basket.save();
+        res.json({ message: 'Basket executed', results });
+    } catch (err) {
+        res.status(500).json({ message: 'Error executing basket', error: err.message });
+    }
+});
 
-        // Delete the order once executed — trade record preserves history
-        await OrdersModel.deleteOne({ _id: newOrder._id });
+// ============ COVER ORDERS ============
+// A Cover Order is always a MARKET entry paired with a compulsory SL-M exit
+// leg — the whole point is extra intraday leverage in exchange for a
+// guaranteed stop-loss. If the entry order can't fill, no SL leg is created.
+const COVER_ORDER_LEVERAGE = 20; // approximation — real Kite CO margin is exchange-published and varies by scrip
 
-        // Broadcast updated positions, holdings & wallet — all computed from actual DB state
-        const [updatedPositions, updatedHoldings, wallet] = await Promise.all([
-            PositionsModel.find({}),
-            HoldingsModel.find({}),
-            WalletModel.findOne({}),
-        ]);
+app.post('/newCoverOrder', async (req, res) => {
+    const { stockSymbol, quantity, price, stopLossTriggerPrice, side, exchange } = req.body;
+    if (!stockSymbol || !quantity || !price || !stopLossTriggerPrice || !side) {
+        return res.status(400).json({ message: 'Missing required fields: stockSymbol, quantity, price, stopLossTriggerPrice, side' });
+    }
+    // Same class of bug as /newOrder: `!quantity`/`!price` don't catch
+    // negative values, which would corrupt the margin/notional math below.
+    if (!Number.isFinite(Number(quantity)) || Number(quantity) <= 0 || !Number.isFinite(Number(price)) || Number(price) <= 0) {
+        return res.status(400).json({ message: 'quantity and price must be positive numbers' });
+    }
+    if (!isMarketOpen()) {
+        return res.status(400).json({ message: 'Market is closed', marketClosed: true, detail: 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.' });
+    }
 
-        // Sync wallet.usedMargin with actual holdings cost basis
-        if (wallet) {
-            const actualUsed = updatedHoldings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
-            wallet.usedMargin      = Math.round(actualUsed);
-            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin);
-            await wallet.save();
+    try {
+        marketDataService.trackSymbol(stockSymbol);
+        const ltp = marketDataService.getStockPrice(stockSymbol.toUpperCase())?.ltp ?? Number(price);
+        const notional = Number(quantity) * ltp;
+        const required = notional / COVER_ORDER_LEVERAGE;
+        const wallet = await WalletModel.findOne({});
+        if (!wallet || wallet.availableMargin < required) {
+            return res.status(400).json({ message: 'Insufficient funds for cover order', required, available: wallet?.availableMargin ?? 0 });
         }
 
-        const holdingsWithLiveLtp = updatedHoldings.map(h => {
-            const live = marketDataService.getStockPrice(h.stockSymbol);
-            return { ...h.toObject(), ltp: live?.ltp ?? h.ltp };
+        // Main leg — always MARKET, always MIS (cover orders are intraday-only)
+        const mainResult = await orderEngine.placeOrder({
+            stockSymbol, quantity, price: ltp, type: 'MARKET', side,
+            productType: 'MIS', exchange,
         });
-        io.emit('orderExecuted', {
-            order: newOrder,
-            positions: updatedPositions,
-            holdings: holdingsWithLiveLtp,
-            wallet: wallet?.toObject(),
-        });
+        mainResult.order.isCoverOrder = true;
+        await mainResult.order.save();
 
-        res.status(201).json({
-            message: 'Order executed successfully',
-            order: newOrder,
-            trade: newTrade,
+        // Compulsory SL-M exit leg, opposite side, rests until the stop is hit
+        const slSide = side === 'BUY' ? 'SELL' : 'BUY';
+        const slOrder = new OrdersModel({
+            stockSymbol: stockSymbol.toUpperCase(), quantity: Number(quantity),
+            price: Number(stopLossTriggerPrice), triggerPrice: Number(stopLossTriggerPrice),
+            type: 'SLM', side: slSide, productType: 'MIS', exchange: exchange || 'NSE',
+            status: 'PENDING', isCoverOrder: true, linkedOrderId: mainResult.order._id,
         });
+        await slOrder.save();
+        mainResult.order.linkedOrderId = slOrder._id;
+        await mainResult.order.save();
+
+        io.emit('coverOrderPlaced', { mainOrder: mainResult.order, slOrder });
+        res.status(201).json({ message: 'Cover order placed', mainOrder: mainResult.order, slOrder, trade: mainResult.trade });
     } catch (err) {
-        res.status(500).json({ message: 'Error creating order', error: err.message });
+        if (err instanceof orderEngine.OrderRejectedError) return res.status(400).json({ message: err.message });
+        res.status(500).json({ message: 'Error placing cover order', error: err.message });
     }
 });
 
@@ -351,7 +590,7 @@ app.get('/pnl', async (req, res) => {
         if (segKey === 'equity') holdingsQuery = { productType: { $in: ['CNC'] } };
         else if (segKey === 'mtf')  holdingsQuery = { productType: 'MIS' };
 
-        const holdings = await HoldingsModel.find(holdingsQuery);
+        const holdings = (await HoldingsModel.find(holdingsQuery)).map(withLiveLtp);
         const totalInvestment = holdings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
         const currentValue    = holdings.reduce((s, h) => s + h.ltp    * h.quantity, 0);
         const unrealizedPL    = parseFloat((currentValue - totalInvestment).toFixed(2));
@@ -428,9 +667,9 @@ app.get('/pnl/records', async (req, res) => {
         // other segments (fno, currency, commodity, …) have none.
         let unrealizedPL = 0;
         if (segKey === '' || segKey === 'combined' || segKey === 'equity') {
-            const holdings = await HoldingsModel.find(
+            const holdings = (await HoldingsModel.find(
                 segKey === 'equity' ? { productType: 'CNC' } : {}
-            );
+            )).map(withLiveLtp);
             unrealizedPL = holdings.reduce((s, h) => s + (h.ltp - h.avgPrice) * h.quantity, 0);
         }
 
@@ -883,11 +1122,21 @@ app.get('/tax-pnl', async (req, res) => {
 // ============ WALLET ============
 app.get('/wallet', async (req, res) => {
     try {
-        let wallet = await WalletModel.findOne({});
-        if (!wallet) {
-            wallet = new WalletModel({ balance: 100000, usedMargin: 0, availableMargin: 100000 });
-            await wallet.save();
-        }
+        // Atomic get-or-create: the previous find-then-conditionally-create
+        // pattern had a TOCTOU window — two concurrent requests hitting an
+        // empty wallet collection could both pass `!wallet` before either
+        // saved, creating two wallet documents (every other route's blind
+        // `findOne({})` would then non-deterministically pick either one).
+        // `findOneAndUpdate` + upsert does the check-and-create in one
+        // atomic op instead of two round trips.
+        let wallet = await WalletModel.findOneAndUpdate(
+            {},
+            { $setOnInsert: { balance: 100000, usedMargin: 0, blockedMargin: 0, availableMargin: 100000 } },
+            { upsert: true, new: true }
+        );
+        // Blocked margin (funds reserved by resting PENDING orders) is
+        // recomputed fresh on every read so it can never drift.
+        wallet = await orderEngine.recomputeBlockedMargin(wallet);
         res.status(200).json(wallet);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching wallet', error: err.message });
@@ -905,41 +1154,46 @@ app.get('/funds', async (req, res) => {
 });
 
 app.post('/funds/deposit', async (req, res) => {
-    const { amount } = req.body;
+    const { amount, method, upiApp } = req.body;
     if (!amount || amount <= 0) {
         return res.status(400).json({ message: 'Invalid amount' });
     }
 
     try {
-        let wallet = await WalletModel.findOne({});
-        if (!wallet) {
-            wallet = new WalletModel({ balance: 100000, usedMargin: 0, availableMargin: 100000 });
-        }
+        // Atomic get-or-create — see /wallet route for why the previous
+        // find-then-conditionally-create pattern was a TOCTOU risk.
+        let wallet = await WalletModel.findOneAndUpdate(
+            {},
+            { $setOnInsert: { balance: 100000, usedMargin: 0, blockedMargin: 0, availableMargin: 100000 } },
+            { upsert: true, new: true }
+        );
 
         wallet.balance += Number(amount);
-        wallet.availableMargin = wallet.balance - wallet.usedMargin;
+        // Must include blockedMargin like every other wallet-write path
+        // (recomputeBlockedMargin, executeOrder, etc.) — omitting it here
+        // silently "unblocked" funds already reserved by resting pending
+        // orders every time a user deposited or withdrew.
+        wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
         await wallet.save();
 
-        const txn = new FundTransactionModel({ type: 'DEPOSIT', amount: Number(amount), status: 'SUCCESS' });
+        const txn = new FundTransactionModel({
+            type: 'DEPOSIT',
+            amount: Number(amount),
+            status: 'SUCCESS',
+            method: (method || 'NETBANKING').toUpperCase() === 'UPI' ? 'UPI' : 'NETBANKING',
+            upiApp: upiApp || null,
+            reference: `UTR${Date.now()}${Math.floor(Math.random() * 1000)}`,
+        });
         await txn.save();
 
+        io.emit('walletUpdated', { wallet: wallet.toObject(), transaction: txn });
         res.status(200).json({ message: 'Deposit successful', wallet, transaction: txn });
     } catch (err) {
         res.status(500).json({ message: 'Error processing deposit', error: err.message });
     }
 });
 
-// Withdrawals are temporarily suspended due to a technical issue.
-const WITHDRAW_SUSPENDED = true;
-
 app.post('/funds/withdraw', async (req, res) => {
-    if (WITHDRAW_SUSPENDED) {
-        return res.status(503).json({
-            message: 'Withdrawals are temporarily suspended due to a technical issue. Our team is working on it — please try again later.',
-            suspended: true,
-        });
-    }
-
     const { amount } = req.body;
     if (!amount || amount <= 0) {
         return res.status(400).json({ message: 'Invalid amount' });
@@ -956,12 +1210,20 @@ app.post('/funds/withdraw', async (req, res) => {
         }
 
         wallet.balance -= Number(amount);
-        wallet.availableMargin = wallet.balance - wallet.usedMargin;
+        // Same fix as /funds/deposit — must include blockedMargin.
+        wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
         await wallet.save();
 
-        const txn = new FundTransactionModel({ type: 'WITHDRAW', amount: Number(amount), status: 'SUCCESS' });
+        const txn = new FundTransactionModel({
+            type: 'WITHDRAW',
+            amount: Number(amount),
+            status: 'SUCCESS',
+            method: 'BANK',
+            reference: `WDR${Date.now()}${Math.floor(Math.random() * 1000)}`,
+        });
         await txn.save();
 
+        io.emit('walletUpdated', { wallet: wallet.toObject(), transaction: txn });
         res.status(200).json({ message: 'Withdrawal successful', wallet, transaction: txn });
     } catch (err) {
         res.status(500).json({ message: 'Error processing withdrawal', error: err.message });
@@ -1011,6 +1273,11 @@ app.post('/watchlists/:id/stock', async (req, res) => {
         if (!watchlist.stocks.includes(symbol)) {
             watchlist.stocks.push(symbol);
             await watchlist.save();
+        }
+
+        // Start streaming live prices for this symbol right away
+        if (marketDataService.trackSymbol(symbol)) {
+            marketDataService.fetchAllStockPrices().catch(() => {});
         }
 
         res.status(200).json(watchlist);
@@ -1102,6 +1369,8 @@ const NSE_STOCKS = [
     { symbol: "SHREECEM", name: "Shree Cement Ltd", sector: "Cement" },
 ];
 
+// Searches the full NSE equity universe (Dhan scrip master ≈ 2000+ symbols),
+// falling back to the curated list if the scrip master hasn't loaded.
 app.get('/market/search', (req, res) => {
     const { q } = req.query;
     if (!q) {
@@ -1109,11 +1378,15 @@ app.get('/market/search', (req, res) => {
     }
 
     const query = q.toUpperCase();
-    const results = NSE_STOCKS.filter(stock =>
+    const curated = NSE_STOCKS.filter(stock =>
         stock.symbol.includes(query) || stock.name.toUpperCase().includes(query)
     );
 
-    res.status(200).json(results);
+    const scripHits = dhanDataService.searchScrips(query, 25)
+        .filter(hit => !curated.some(c => c.symbol === hit.symbol))
+        .map(hit => ({ symbol: hit.symbol, name: hit.name, sector: null }));
+
+    res.status(200).json([...curated, ...scripHits].slice(0, 25));
 });
 
 app.get('/market/stocks', (req, res) => {
@@ -1130,10 +1403,23 @@ app.get('/alerts', async (req, res) => {
     }
 });
 
+// Plain price alerts AND GTT orders both live here — GTT is just an alert
+// with gtt:true plus order details, evaluated by orderEngine.evaluateAlerts()
+// on every market tick and turned into a real order when triggered.
 app.post('/alerts', async (req, res) => {
-    const { stockSymbol, targetPrice, condition } = req.body;
+    const {
+        stockSymbol, targetPrice, condition,
+        gtt, side, quantity, limitPrice, productType,
+        triggerType, ocoTargetPrice, ocoCondition,
+    } = req.body;
     if (!stockSymbol || !targetPrice || !condition) {
         return res.status(400).json({ message: 'Missing required fields: stockSymbol, targetPrice, condition' });
+    }
+    if (gtt && (!side || !quantity || !limitPrice)) {
+        return res.status(400).json({ message: 'GTT orders require side, quantity, and limitPrice' });
+    }
+    if (triggerType === 'oco' && (!ocoTargetPrice || !ocoCondition)) {
+        return res.status(400).json({ message: 'OCO GTTs require ocoTargetPrice and ocoCondition' });
     }
 
     try {
@@ -1141,6 +1427,14 @@ app.post('/alerts', async (req, res) => {
             stockSymbol: stockSymbol.toUpperCase(),
             targetPrice: Number(targetPrice),
             condition,
+            gtt: !!gtt,
+            side: gtt ? side : null,
+            quantity: gtt ? Number(quantity) : null,
+            limitPrice: gtt ? Number(limitPrice) : null,
+            productType: gtt ? (productType || 'CNC') : 'CNC',
+            triggerType: triggerType === 'oco' ? 'oco' : 'single',
+            ocoTargetPrice: triggerType === 'oco' ? Number(ocoTargetPrice) : null,
+            ocoCondition: triggerType === 'oco' ? ocoCondition : null,
         });
         await alert.save();
         res.status(201).json(alert);
@@ -1158,37 +1452,132 @@ app.delete('/alerts/:id', async (req, res) => {
     }
 });
 
+// ============ CORPORATE ACTIONS (dividend / split / bonus) ============
+// No free live NSE corporate-actions feed exists, so this is a curated
+// calendar (seeded below) that gets applied to matching holdings once its
+// ex-date passes — same day-prep job that handles T1/MIS/options settlement.
+app.get('/corporate-actions', async (req, res) => {
+    try {
+        const actions = await CorporateActionModel.find({}).sort({ exDate: -1 });
+        res.status(200).json(actions);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching corporate actions', error: err.message });
+    }
+});
+
+app.post('/corporate-actions', async (req, res) => {
+    const { stockSymbol, type, exDate, dividendPerShare, ratio } = req.body;
+    if (!stockSymbol || !type || !exDate) {
+        return res.status(400).json({ message: 'Missing required fields: stockSymbol, type, exDate' });
+    }
+    try {
+        const action = new CorporateActionModel({
+            stockSymbol: stockSymbol.toUpperCase(), type, exDate: new Date(exDate),
+            dividendPerShare: dividendPerShare != null ? Number(dividendPerShare) : null,
+            ratio: ratio != null ? Number(ratio) : null,
+        });
+        await action.save();
+        res.status(201).json(action);
+    } catch (err) {
+        res.status(500).json({ message: 'Error creating corporate action', error: err.message });
+    }
+});
+
+// Applies every due-and-unapplied corporate action to matching holdings.
+// Idempotent — actions are flagged `applied` so re-running is a no-op.
+async function applyDueCorporateActions() {
+    const due = await CorporateActionModel.find({ applied: false, exDate: { $lte: new Date() } });
+    if (due.length === 0) return 0;
+
+    const wallet = await WalletModel.findOne({});
+    let dividendCredit = 0;
+
+    for (const action of due) {
+        const holdings = await HoldingsModel.find({ stockSymbol: action.stockSymbol });
+        for (const holding of holdings) {
+            if (action.type === 'DIVIDEND' && action.dividendPerShare) {
+                dividendCredit += action.dividendPerShare * holding.quantity;
+            } else if ((action.type === 'SPLIT' || action.type === 'BONUS') && action.ratio > 1) {
+                const newQty = Math.round(holding.quantity * action.ratio);
+                holding.avgPrice = Math.round((holding.avgPrice * holding.quantity / newQty) * 100) / 100;
+                holding.quantity = newQty;
+                // Bonus/split shares inherit the parent lot's settlement state
+                holding.t1Quantity = Math.round((holding.t1Quantity || 0) * action.ratio);
+                await holding.save();
+            }
+        }
+        action.applied = true;
+        action.appliedAt = new Date();
+        await action.save();
+    }
+
+    if (wallet && dividendCredit !== 0) {
+        wallet.balance += Math.round(dividendCredit * 100) / 100;
+        wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
+        await wallet.save();
+    }
+    if (ioInstance) ioInstance.emit('corporateActionsApplied', { count: due.length, dividendCredit });
+    return due.length;
+}
+
+app.post('/corporate-actions/apply', async (req, res) => {
+    try {
+        const count = await applyDueCorporateActions();
+        res.json({ message: `Applied ${count} corporate action(s)` });
+    } catch (err) {
+        res.status(500).json({ message: 'Error applying corporate actions', error: err.message });
+    }
+});
+
 // ============ SEED DATA (optional, one-time) ============
 app.post('/seed', async (req, res) => {
     try {
         // Seed wallet with consistent financial picture:
-        // Opening balance ₹3.40 Cr (Nov 1) → options trading profit ₹96.13L → account grows to ₹4.36 Cr
-        // Additional ₹1.20 Cr deposit from user → total ₹5.56 Cr → ₹4.60 Cr used for stock holdings
-        // Remaining liquid cash: ₹5.56 Cr − ₹4.60 Cr = ₹96.13 Lakh
+        // Opening balance ₹97.33 Lakh (Nov 1) → additional ₹1.20 Cr deposit →
+        // total ₹2.174 Cr → ₹1.99 Cr used for stock holdings (~-38% today)
+        // Remaining liquid cash: ₹2.174 Cr − ₹1.99 Cr = ~₹18.16 Lakh
+        // `balance` is total contributed capital (deposits + realized P&L) —
+        // every other place in this file computes `availableMargin = balance
+        // - usedMargin`, so `balance` must include the money currently
+        // parked in holdings, not just the leftover liquid slice. It must
+        // equal usedMargin + the liquid cash we want available.
+        const LIQUID_CASH = 1816247.35;  // ~₹18.16 Lakh — spendable cash
+        const USED_MARGIN = 19949322;    // ₹1.99 Cr — cost of equity holdings
+        const TOTAL_BALANCE = LIQUID_CASH + USED_MARGIN; // ~₹2.174 Cr total capital
+
         let wallet = await WalletModel.findOne({});
         if (!wallet) {
             wallet = new WalletModel({
-                balance: 9613521,       // ₹96.13 Lakh — remaining liquid cash
-                usedMargin: 45964581,   // ₹4.60 Cr — cost of equity holdings
-                availableMargin: 9613521,
+                balance: TOTAL_BALANCE,
+                usedMargin: USED_MARGIN,
+                misMargin: 0,
+                optionMargin: 0,
+                availableMargin: LIQUID_CASH,
             });
             await wallet.save();
         }
-        // Always update wallet to correct demo values
-        wallet.balance = 9613521;
-        wallet.usedMargin = 45964581;
-        wallet.availableMargin = 9613521;
+        // Always update wallet to correct demo values. misMargin/optionMargin
+        // reset to 0 too — this route doesn't clear open MIS/option
+        // positions, but the seeded holdings basket has none, so any nonzero
+        // value left over here would be stale data from a prior session that
+        // the next equity/option fill's formula-based recompute would then
+        // silently bake into availableMargin.
+        wallet.balance = TOTAL_BALANCE;
+        wallet.usedMargin = USED_MARGIN;
+        wallet.misMargin = 0;
+        wallet.optionMargin = 0;
+        wallet.availableMargin = LIQUID_CASH;
         await wallet.save();
 
         // Fund transactions showing the capital journey — clear & reseed
         await FundTransactionModel.deleteMany({});
         const fundDocs = [
-            { type: 'DEPOSIT',  amount: 34000000, status: 'SUCCESS', createdAt: new Date('2025-11-01T09:15:00.000Z'), updatedAt: new Date('2025-11-01T09:15:00.000Z') },  // ₹3.40 Cr — Nov 1 opening balance
-            { type: 'DEPOSIT',  amount: 12000000, status: 'SUCCESS', createdAt: new Date('2025-06-01T09:15:00.000Z'), updatedAt: new Date('2025-06-01T09:15:00.000Z') },  // ₹1.20 Cr — additional capital for stock purchases
-            { type: 'WITHDRAW', amount: 45960000, status: 'SUCCESS', createdAt: new Date('2025-08-15T10:00:00.000Z'), updatedAt: new Date('2025-08-15T10:00:00.000Z') }, // ₹4.60 Cr — deployed into stock holdings
+            { type: 'DEPOSIT',  amount: 9765569.35, status: 'SUCCESS', createdAt: new Date('2025-11-01T09:15:00.000Z'), updatedAt: new Date('2025-11-01T09:15:00.000Z') },  // ~₹97.66 Lakh — Nov 1 opening balance
+            { type: 'DEPOSIT',  amount: 12000000,   status: 'SUCCESS', createdAt: new Date('2025-06-01T09:15:00.000Z'), updatedAt: new Date('2025-06-01T09:15:00.000Z') },  // ₹1.20 Cr — additional capital for stock purchases
+            { type: 'WITHDRAW', amount: 19949322,   status: 'SUCCESS', createdAt: new Date('2025-08-15T10:00:00.000Z'), updatedAt: new Date('2025-08-15T10:00:00.000Z') }, // ₹1.99 Cr — deployed into stock holdings
         ];
         await FundTransactionModel.collection.insertMany(fundDocs);
-        console.log('[Seed] Fund transactions: ₹3.40 Cr opening + ₹1.20 Cr deposit − ₹4.60 Cr stock purchase');
+        console.log('[Seed] Fund transactions: ~₹97.66 Lakh opening + ₹1.20 Cr deposit − ₹1.99 Cr stock purchase');
 
         // Seed a default watchlist
         let watchlist = await WatchlistModel.findOne({ name: 'Nifty 50' });
@@ -1206,34 +1595,38 @@ app.post('/seed', async (req, res) => {
         const base = new Date();
         const daysAgo = (d) => new Date(base.getTime() - d * 86400000);
 
-        // Authentic LTPs for the new realistic basket
+        // Scaled-down basket: ~₹1.99 Cr invested, ~-38% overall (₹75.8L loss)
+        // — same 16-stock story as before, quantities and LTPs scaled so the
+        // total lands in the requested ₹2 Cr invested / 33-40% loss band.
         const fallbackPrices = {
-            'UPL': 500.00, 'WIPRO': 460.00, 'AWL': 350.00, 'BANDHANBNK': 190.00, 
-            'NYKAA': 160.00, 'HINDUNILVR': 2250.00, 'KOTAKBANK': 1700.00,
-            'IEX': 140.00, 'LTIM': 5000.00, 'DIVISLAB': 3500.00, 'TECHM': 1200.00,
-            'INFY': 1555.45, 'HDFCBANK': 1522.35, 'TATAMOTORS': 985.70, 
-            'SBIN': 430.20, 'ITC': 207.90
+            'UPL': 468.78, 'WIPRO': 431.28, 'AWL': 328.15, 'BANDHANBNK': 178.14,
+            'NYKAA': 150.01, 'HINDUNILVR': 2109.51, 'KOTAKBANK': 1593.85,
+            'IEX': 131.26, 'LTIM': 4687.79, 'DIVISLAB': 3281.45, 'TECHM': 1125.07,
+            'INFY': 1458.32, 'HDFCBANK': 1427.29, 'TATAMOTORS': 924.15,
+            'SBIN': 403.34, 'ITC': 194.92
         };
 
-        // 100% Authentic Indian Market History. Target: -33.8% Overall.
+        // 100% Authentic Indian Market History. Target: ~-38% Overall.
+        // (`pct` is solved so ltp*(1+pct) reproduces the original avgPrice
+        // targets in the comments, after `ltp` itself was scaled down below.)
         const basket = [
-            { symbol: 'UPL',        pct: 0.7000, qty: 7000, daysAgo: 283 }, // Buy @ ₹850
-            { symbol: 'WIPRO',      pct: 0.5652, qty: 6000, daysAgo: 248 }, // Buy @ ₹720
-            { symbol: 'AWL',        pct: 1.4286, qty: 4000, daysAgo: 232 }, // Buy @ ₹850
-            { symbol: 'BANDHANBNK', pct: 2.8421, qty: 4000, daysAgo: 317 }, // Buy @ ₹730
-            { symbol: 'NYKAA',      pct: 1.5625, qty: 7000, daysAgo: 304 }, // Buy @ ₹410
-            { symbol: 'HINDUNILVR', pct: 0.2667, qty: 1200, daysAgo: 219 }, // Buy @ ₹2850
-            { symbol: 'KOTAKBANK',  pct: 0.2941, qty: 1500, daysAgo: 195 }, // Buy @ ₹2200
-            { symbol: 'IEX',        pct: 1.1428, qty: 8000, daysAgo: 258 }, // Buy @ ₹300
-            { symbol: 'LTIM',       pct: 0.5000, qty: 300,  daysAgo: 162 }, // Buy @ ₹7500
-            { symbol: 'DIVISLAB',   pct: 0.5428, qty: 400,  daysAgo: 209 }, // Buy @ ₹5400
-            { symbol: 'TECHM',      pct: 0.5000, qty: 1500, daysAgo: 293 }, // Buy @ ₹1800
-            { symbol: 'INFY',       pct: 0.2536, qty: 2000, daysAgo: 227 }, // Buy @ ₹1950
-            { symbol: 'HDFCBANK',   pct: 0.1495, qty: 2500, daysAgo: 156 }, // Buy @ ₹1750
+            { symbol: 'UPL',        pct: 0.8132, qty: 3050, daysAgo: 283 }, // Buy @ ₹850
+            { symbol: 'WIPRO',      pct: 0.6694, qty: 2600, daysAgo: 248 }, // Buy @ ₹720
+            { symbol: 'AWL',        pct: 1.5903, qty: 1750, daysAgo: 232 }, // Buy @ ₹850
+            { symbol: 'BANDHANBNK', pct: 3.0980, qty: 1750, daysAgo: 317 }, // Buy @ ₹730
+            { symbol: 'NYKAA',      pct: 1.7332, qty: 3050, daysAgo: 304 }, // Buy @ ₹410
+            { symbol: 'HINDUNILVR', pct: 0.3511, qty: 500,  daysAgo: 219 }, // Buy @ ₹2850
+            { symbol: 'KOTAKBANK',  pct: 0.3803, qty: 650,  daysAgo: 195 }, // Buy @ ₹2200
+            { symbol: 'IEX',        pct: 1.2855, qty: 3500, daysAgo: 258 }, // Buy @ ₹300
+            { symbol: 'LTIM',       pct: 0.5999, qty: 150,  daysAgo: 162 }, // Buy @ ₹7500
+            { symbol: 'DIVISLAB',   pct: 0.6456, qty: 150,  daysAgo: 209 }, // Buy @ ₹5400
+            { symbol: 'TECHM',      pct: 0.5999, qty: 650,  daysAgo: 293 }, // Buy @ ₹1800
+            { symbol: 'INFY',       pct: 0.3371, qty: 850,  daysAgo: 227 }, // Buy @ ₹1950
+            { symbol: 'HDFCBANK',   pct: 0.2261, qty: 1100, daysAgo: 156 }, // Buy @ ₹1750
             // Profit Anchors (Bought in June/July 2025 — down-trend survivors)
-            { symbol: 'TATAMOTORS', pct: -0.3913, qty: 1000, daysAgo: 385 }, // Buy @ ₹600
-            { symbol: 'SBIN',       pct: -0.3026, qty: 2000, daysAgo: 378 }, // Buy @ ₹300
-            { symbol: 'ITC',        pct: -0.2304, qty: 5000, daysAgo: 338 }, // Buy @ ₹160
+            { symbol: 'TATAMOTORS', pct: -0.3508, qty: 450,  daysAgo: 385 }, // Buy @ ₹600
+            { symbol: 'SBIN',       pct: -0.2562, qty: 850,  daysAgo: 378 }, // Buy @ ₹300
+            { symbol: 'ITC',        pct: -0.1791, qty: 2200, daysAgo: 338 }, // Buy @ ₹160
         ];
 
         const holdingsDocs = basket.map(({ symbol, pct, qty, daysAgo: days }) => {
@@ -1302,6 +1695,18 @@ app.post('/seed', async (req, res) => {
             await TradeModel.insertMany(
                 sampleTrades.map(t => ({ ...t, orderId: new mongoose.Types.ObjectId() }))
             );
+        }
+
+        // Seed a curated corporate-action calendar if empty — one already-due
+        // dividend + bonus (demonstrates /corporate-actions/apply immediately)
+        // and one future dividend (shows up as pending).
+        const corpActionsCount = await CorporateActionModel.countDocuments({});
+        if (corpActionsCount === 0) {
+            await CorporateActionModel.insertMany([
+                { stockSymbol: 'ITC',   type: 'DIVIDEND', exDate: daysAgo(10), dividendPerShare: 6.5 },
+                { stockSymbol: 'WIPRO', type: 'BONUS',    exDate: daysAgo(5),  ratio: 2 },
+                { stockSymbol: 'HDFCBANK', type: 'DIVIDEND', exDate: new Date(base.getTime() + 15 * 86400000), dividendPerShare: 19 },
+            ]);
         }
 
         res.status(200).json({ message: 'Seed data loaded successfully' });
@@ -1407,9 +1812,27 @@ app.get('/market/ipos', async (req, res) => {
     }
 });
 
-app.get('/market/quote/:symbol', (req, res) => {
+app.get('/market/quote/:symbol', async (req, res) => {
     const { symbol } = req.params;
-    const price = marketDataService.getStockPrice(symbol);
+
+    // Real BSE_EQ quote — replaces the old "NSE price minus ~0.01%" fake formula
+    if ((req.query.exchange || '').toUpperCase() === 'BSE') {
+        const bseQuote = await dhanDataService.fetchDhanBseQuote(symbol.toUpperCase());
+        if (!bseQuote) {
+            return res.status(404).json({ message: `No BSE data for symbol: ${symbol}` });
+        }
+        return res.status(200).json(bseQuote);
+    }
+
+    let price = marketDataService.getStockPrice(symbol);
+    if (!price) {
+        // Not in the tracked universe yet — pull it on demand and keep tracking it
+        marketDataService.trackSymbol(symbol);
+        try {
+            const quotes = await dhanDataService.fetchDhanStockQuotes([symbol.toUpperCase()]);
+            price = quotes[symbol.toUpperCase()] || null;
+        } catch { /* fall through to 404 */ }
+    }
     if (!price) {
         return res.status(404).json({ message: `No data for symbol: ${symbol}` });
     }
@@ -1420,6 +1843,7 @@ app.get('/market/quote/:symbol', (req, res) => {
 app.get('/market/status', (req, res) => {
     const liveDataService = require('./liveDataService');
     res.status(200).json({
+        isOpen: isMarketOpen(),
         source: marketDataService.getDataSource(),
         lastUpdated: marketDataService.getLastUpdated(),
         liveStats: liveDataService.getStats(),
@@ -1432,7 +1856,7 @@ app.get('/market/status', (req, res) => {
 app.get('/market/index-candles/:indexName', async (req, res) => {
     const indexName = decodeURIComponent(req.params.indexName);
     const { interval = '1d' } = req.query;
-    const validIntervals = ['1m', '3m', '5m', '15m', '30m', '1h', '1d'];
+    const validIntervals = candleDataService.SUPPORTED_INTERVALS;
     if (!validIntervals.includes(interval)) {
         return res.status(400).json({ message: `Invalid interval. Valid: ${validIntervals.join(', ')}` });
     }
@@ -1457,17 +1881,23 @@ app.get('/market/live-candles/:indexName', (req, res) => {
 });
 
 // ============ OPTION CHAIN ============
-const SUPPORTED_INDICES = ['NIFTY 50', 'BANK NIFTY', 'SENSEX', 'FINNIFTY', 'NIFTY IT'];
+// Every NSE/BSE index that actually has a listed option contract.
+// NIFTY IT was removed — it has no F&O contract on NSE (index-only, no chain).
+const SUPPORTED_INDICES = ['NIFTY 50', 'BANK NIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTY NEXT 50', 'SENSEX', 'BANKEX'];
 
-app.get('/market/optionchain/:symbol', (req, res) => {
+app.get('/market/optionchain/:symbol', async (req, res) => {
     const rawSymbol = decodeURIComponent(req.params.symbol).toUpperCase();
     const indexName = SUPPORTED_INDICES.find(n => n === rawSymbol || n.replace(' ', '') === rawSymbol.replace(' ', ''));
     if (!indexName) {
         return res.status(400).json({ message: `Unsupported index. Supported: ${SUPPORTED_INDICES.join(', ')}` });
     }
-    const { expiry } = req.query;
-    const chain = marketDataService.generateOptionChainForIndex(indexName, expiry || null);
-    res.status(200).json(chain);
+    try {
+        // Real NFO chain from Dhan (LTP, OI, IV, greeks); simulated fallback
+        const chain = await marketDataService.getOptionChain(indexName, req.query.expiry || null);
+        res.status(200).json(chain);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching option chain', error: err.message });
+    }
 });
 
 // ============ CANCEL ORDER ============
@@ -1482,6 +1912,8 @@ app.delete('/orders/:id', async (req, res) => {
         }
         order.status = 'CANCELLED';
         await order.save();
+        const wallet = await orderEngine.recomputeBlockedMargin();
+        io.emit('orderCancelled', { order: order.toObject(), wallet: wallet?.toObject() });
         res.status(200).json({ message: 'Order cancelled', order });
     } catch (err) {
         res.status(500).json({ message: 'Error cancelling order', error: err.message });
@@ -1494,7 +1926,7 @@ app.get('/market/candles/:symbol', async (req, res) => {
     const { interval } = req.query;
     const candleInterval = interval || '1d';
 
-    const validIntervals = ['1m', '3m', '5m', '15m', '30m', '1h', '1d'];
+    const validIntervals = candleDataService.SUPPORTED_INTERVALS;
     if (!validIntervals.includes(candleInterval)) {
         return res.status(400).json({ message: `Invalid interval. Valid values: ${validIntervals.join(', ')}` });
     }
@@ -1551,13 +1983,9 @@ io.on('connection', async (socket) => {
             PositionsModel.find({}),
             WalletModel.findOne({}),
         ]);
-        const holdingsLive = holdings.map(h => {
-            const live = marketDataService.getStockPrice(h.stockSymbol);
-            return { ...h.toObject(), ltp: live?.ltp ?? h.ltp };
-        });
         socket.emit('initialData', {
-            holdings: holdingsLive,
-            positions,
+            holdings: holdings.map(withLiveLtp),
+            positions: positions.map(withLiveLtp),
             wallet: wallet?.toObject(),
         });
     } catch (e) { /* non-fatal */ }
@@ -1594,8 +2022,12 @@ function emitMarketData() {
     for (const [name, d] of Object.entries(indexes)) {
         if (d.ltp > 0) candleDataService.recordTick(name, d.ltp);
     }
+    const prices = marketDataService.getStockPrices();
+    for (const [symbol, d] of Object.entries(prices)) {
+        if (d.ltp > 0) candleDataService.recordTick(symbol, d.ltp);
+    }
     const data = {
-        prices:      marketDataService.getStockPrices(),
+        prices,
         indexes,
         movers:      marketDataService.getMarketMovers(),
         lastUpdated: marketDataService.getLastUpdated(),
@@ -1604,18 +2036,51 @@ function emitMarketData() {
     io.emit('marketData', data);
 }
 
+// Both intervals below guard against overlapping runs the same way the
+// _pnlTickBusy-guarded interval further down already does. `setInterval`
+// fires on wall-clock schedule regardless of whether the previous async
+// invocation has resolved — without a busy flag, a slow upstream call (Dhan/
+// Yahoo) taking longer than the interval period would let two invocations
+// of fastTickBroadcast run concurrently, and `evaluatePendingOrders()` could
+// then pick up and execute the same resting order twice before the first
+// execution's `orderDoc.status = 'EXECUTED'` save commits — a double-fill.
+let _fullBroadcastBusy = false;
+let _fastTickBusy = false;
+
 // Full OHLC refresh — runs every 30s always (keeps 52W, volume, OHLC current)
 async function broadcastMarketData() {
-    await marketDataService.fetchAllStockPrices();
-    emitMarketData();
-    console.log(`[Broadcast] full | source: ${marketDataService.getDataSource()} | ${new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+    if (_fullBroadcastBusy) return;
+    _fullBroadcastBusy = true;
+    try {
+        await marketDataService.fetchAllStockPrices();
+        emitMarketData();
+        console.log(`[Broadcast] full | source: ${marketDataService.getDataSource()} | ${new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+    } finally {
+        _fullBroadcastBusy = false;
+    }
 }
 
-// Fast LTP-only refresh — runs every 2s during market hours
+// Fast LTP-only refresh — runs every 1s during market hours
 async function fastTickBroadcast() {
-    if (!isMarketOpen()) return;
-    await marketDataService.fastRefresh();
-    emitMarketData();
+    if (!isMarketOpen() || _fastTickBusy) return;
+    _fastTickBusy = true;
+    try {
+        await marketDataService.fastRefresh();
+        emitMarketData();
+
+        // Order-engine ticks: fill resting LIMIT/SL/SL-M orders, fire GTT/alerts,
+        // and square off MIS positions at 3:20 PM — all against the price data
+        // that was just refreshed above.
+        try {
+            await orderEngine.evaluatePendingOrders();
+            await orderEngine.evaluateAlerts();
+            await orderEngine.checkSameDayMisSquareOff();
+        } catch (e) {
+            console.error('[OrderEngine] tick error:', e.message);
+        }
+    } finally {
+        _fastTickBusy = false;
+    }
 }
 
 // Sync wallet.usedMargin with actual holdings on startup
@@ -1625,24 +2090,248 @@ async function fastTickBroadcast() {
         if (wallet && holdings.length > 0) {
             const actualUsed = holdings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
             wallet.usedMargin      = Math.round(actualUsed);
-            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin);
+            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
             await wallet.save();
             console.log(`[Wallet] Synced usedMargin = ₹${wallet.usedMargin.toLocaleString('en-IN')} from ${holdings.length} holdings`);
         }
     } catch (e) { console.error('[Wallet] Sync error:', e.message); }
 })();
 
+// ─── New trading day preparation ─────────────────────────────────────────────
+// Runs once per IST day (on startup + 8:45 AM IST cron), like a broker's BOD job:
+//  1. Archives every not-yet-archived trade's realised P&L into the
+//     permanent P&L books (PLRecordModel) — trade history + its P&L survive
+//     forever, independent of what gets cleared below
+//  2. Clears yesterday's orders (the Executed screen starts fresh each day)
+//  3. Squares off leftover MIS (intraday) positions at LTP, realizing P&L
+//  4. Settles expired option positions at LTP, releasing margin
+const cron = require('node-cron');
+
+// Tiny key-value state doc to remember the last prep date across restarts
+const AppStateModel = mongoose.model('AppState', new mongoose.Schema({
+    key:   { type: String, unique: true },
+    value: { type: String },
+}, { timestamps: true }));
+
+// TradeModel is the permanent, never-deleted trade log — but the P&L
+// reports (/pnl/records, monthly-breakdown, statement download) read from
+// PLRecordModel, which historically only held seeded/imported data and was
+// never fed from trades actually placed live through the app. This rolls
+// every not-yet-archived trade into a permanent per-symbol/day PLRecord
+// (FIFO-matched, same method as computeRealizedPnlToday) so live trading
+// shows up in the P&L books forever — independent of orders/positions being
+// cleared for the new day. `archived` on TradeModel makes this idempotent:
+// re-running day-prep (or a multi-day gap) never re-sums the same trade.
+function classifySegment(symbol) {
+    return /CE$|PE$|FUT$/.test(symbol) ? 'fno' : 'equity';
+}
+
+async function archivePastTradesToPLRecords(beforeDate) {
+    const trades = await TradeModel.find({ archived: { $ne: true }, createdAt: { $lt: beforeDate } })
+        .sort({ createdAt: 1 }).lean();
+    if (trades.length === 0) return 0;
+
+    const groups = new Map(); // "day|symbol|productType" -> trades[]
+    for (const t of trades) {
+        const day = rules.istDateStr(t.createdAt);
+        const key = `${day}|${t.stockSymbol}|${t.productType}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(t);
+    }
+
+    const docs = [];
+    for (const [key, group] of groups) {
+        const [day, symbol] = key.split('|');
+        const buys  = group.filter(t => t.side === 'BUY');
+        const sells = group.filter(t => t.side === 'SELL');
+        const buyValue  = buys.reduce((s, t) => s + t.quantity * t.price, 0);
+        const sellValue = sells.reduce((s, t) => s + t.quantity * t.price, 0);
+        const charges   = Math.round(group.reduce((s, t) => s + (t.charges || 0), 0) * 100) / 100;
+
+        const buyQueue = buys.map(b => ({ price: b.price, remaining: b.quantity }));
+        let realizedPL = 0;
+        for (const sell of sells) {
+            let remain = sell.quantity;
+            for (const buy of buyQueue) {
+                if (remain <= 0) break;
+                if (buy.remaining <= 0) continue;
+                const m = Math.min(remain, buy.remaining);
+                realizedPL += (sell.price - buy.price) * m;
+                buy.remaining -= m;
+                remain -= m;
+            }
+        }
+        realizedPL = Math.round(realizedPL * 100) / 100;
+        const netPL = Math.round((realizedPL - charges) * 100) / 100;
+        const quantity = sells.reduce((s, t) => s + t.quantity, 0) || buys.reduce((s, t) => s + t.quantity, 0);
+        const realizedPLPct = buyValue > 0 ? Math.round((realizedPL / buyValue) * 10000) / 100 : 0;
+
+        docs.push({
+            tradeDate: new Date(`${day}T09:15:00.000Z`),
+            symbol, quantity, buyValue, sellValue, realizedPL, charges, netPL, realizedPLPct,
+            segment: classifySegment(symbol), source: 'live',
+        });
+    }
+
+    await PLRecordModel.insertMany(docs);
+    await TradeModel.updateMany({ _id: { $in: trades.map(t => t._id) } }, { $set: { archived: true } });
+    return docs.length;
+}
+
+async function prepareNewTradingDay(force = false) {
+    try {
+        const { start, dateStr } = istDayRange();
+        const state = await AppStateModel.findOne({ key: 'lastTradingDayPrep' });
+        if (!force && state?.value === dateStr) return; // already prepared today
+
+        // 1. Roll every not-yet-archived trade into the permanent P&L books
+        // BEFORE anything gets cleared — orders/positions are transient, but
+        // the trade history + its realised P&L must survive forever.
+        const archivedCount = await archivePastTradesToPLRecords(start);
+
+        // 2. Yesterday's orders vanish (DAY validity — unfilled orders expire at EOD)
+        const oldOrders = await OrdersModel.deleteMany({ createdAt: { $lt: start } });
+
+        // 3. Safety-net square-off for any MIS position that somehow survived
+        // past the same-day 3:20 PM auto square-off (e.g. server was down).
+        const misSquaredOff = await orderEngine.squareOffAllMIS('Day-prep safety-net square-off');
+
+        // 3.5. T1 settlement — quantity bought yesterday-or-earlier is now
+        // fully settled into demat and sellable.
+        const t1Result = await HoldingsModel.updateMany(
+            { t1Date: { $lt: start } },
+            { $set: { t1Quantity: 0 } }
+        );
+
+        const wallet = await WalletModel.findOne({});
+
+        // 4. Settle expired option positions at their last premium
+        const optionPositions = await OptionPositionsModel.find({ expiry: { $lt: dateStr } });
+        for (const pos of optionPositions) {
+            const ltp = (await getLiveOptionLTP(pos.underlyingSymbol, pos.strikePrice, pos.optionType, pos.expiry)) ?? pos.ltp;
+            const sellValue = ltp * pos.quantity;
+            const costBasis = pos.avgPremium * pos.quantity;
+            await new TradeModel({
+                stockSymbol: pos.symbol, quantity: pos.quantity, price: ltp,
+                side: 'SELL', productType: 'NRML',
+                charges: Math.round(sellValue * 0.001 * 100) / 100, totalValue: sellValue,
+            }).save();
+            if (wallet) {
+                // Release from `optionMargin`, not `usedMargin` — see the
+                // WalletSchema comment for why these are now tracked
+                // separately.
+                wallet.optionMargin = Math.max(0, (wallet.optionMargin || 0) - costBasis);
+                wallet.balance     += sellValue - costBasis;
+            }
+            await recordClosedOptionPosition({
+                symbol: pos.symbol, productType: pos.productType || 'NRML', quantity: pos.quantity,
+                lots: pos.lots, avgPrice: pos.avgPremium, exitPrice: ltp, pnl: sellValue - costBasis,
+                underlyingSymbol: pos.underlyingSymbol, strikePrice: pos.strikePrice, optionType: pos.optionType, expiry: pos.expiry,
+            });
+            await OptionPositionsModel.deleteOne({ _id: pos._id });
+        }
+
+        if (wallet) {
+            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
+            await wallet.save();
+        }
+        await orderEngine.recomputeBlockedMargin();
+
+        // 5. Apply any corporate actions (dividend/split/bonus) whose ex-date has passed
+        const corpActionsApplied = await applyDueCorporateActions();
+
+        await AppStateModel.updateOne(
+            { key: 'lastTradingDayPrep' },
+            { $set: { value: dateStr } },
+            { upsert: true }
+        );
+        console.log(`[DayPrep] ${dateStr} ready | trade groups archived to P&L: ${archivedCount} | orders cleared: ${oldOrders.deletedCount} | MIS squared off: ${misSquaredOff} | options settled: ${optionPositions.length} | T1 rolled: ${t1Result.modifiedCount} | corp actions: ${corpActionsApplied}`);
+    } catch (e) {
+        console.error('[DayPrep] error:', e.message);
+    }
+}
+
+// 8:45 AM IST every weekday, before market open
+cron.schedule('45 8 * * 1-5', () => prepareNewTradingDay(), { timezone: 'Asia/Kolkata' });
+
+// Manual trigger for testing / ops
+app.post('/admin/prepare-day', async (req, res) => {
+    await prepareNewTradingDay(true);
+    res.json({ message: 'Trading day prepared' });
+});
+
+// Track every symbol the user already owns or watches so live prices cover them
+async function trackPortfolioSymbols() {
+    try {
+        const [holdings, positions, watchlists] = await Promise.all([
+            HoldingsModel.find({}, 'stockSymbol'),
+            PositionsModel.find({}, 'stockSymbol'),
+            WatchlistModel.find({}, 'stocks'),
+        ]);
+        holdings.forEach(h => marketDataService.trackSymbol(h.stockSymbol));
+        positions.forEach(p => marketDataService.trackSymbol(p.stockSymbol));
+        watchlists.forEach(w => (w.stocks || []).forEach(s => marketDataService.trackSymbol(s)));
+    } catch (e) { console.error('[Track] error:', e.message); }
+}
+
 // Initial full fetch, then full refresh every 30s + fast ticks every 2s
-broadcastMarketData();
+(async () => {
+    await mongoose.connection.asPromise().catch(() => {});
+    await trackPortfolioSymbols();
+    await broadcastMarketData();
+    await prepareNewTradingDay();
+})();
 setInterval(broadcastMarketData, 30000);
-setInterval(fastTickBroadcast, 2000);
+setInterval(fastTickBroadcast, 1000);
+
+// Real-time position P&L push: every 1s during market hours, recomputed from
+// already-cached prices (no extra Dhan calls) so both equity and option open
+// positions re-price continuously without the client ever polling for it.
+let _pnlTickBusy = false;
+setInterval(async () => {
+    if (!isMarketOpen() || _pnlTickBusy) return;
+    _pnlTickBusy = true;
+    try {
+        const { dateStr } = istDayRange();
+        const [equityPositions, optionPositionsRaw, totalRealizedPnl, closedRaw] = await Promise.all([
+            PositionsModel.find({}),
+            OptionPositionsModel.find({}),
+            computeTotalRealizedPnlToday(),
+            ClosedPositionModel.find({ dateStr }).sort({ closedAt: -1 }).lean(),
+        ]);
+
+        const equity = equityPositions.length > 0 ? await Promise.all(equityPositions.map(enrichEquityPosition)) : [];
+        const options = optionPositionsRaw.length > 0 ? await enrichOptionPositions(optionPositionsRaw) : [];
+
+        // Squared-off rows keep their booked pnl frozen forever, but the LTP
+        // shown alongside them still tracks the live market — re-priced here
+        // from the same already-cached quotes as the open positions above,
+        // so it costs nothing extra per tick.
+        const closed = await Promise.all(closedRaw.map(async (c) => {
+            if (c.kind === 'option' && c.underlyingSymbol) {
+                const liveLtp = await getLiveOptionLTP(c.underlyingSymbol, c.strikePrice, c.optionType, c.expiry);
+                return { ...c, ltp: liveLtp ?? c.exitPrice };
+            }
+            const live = marketDataService.getStockPrice(c.symbol);
+            return { ...c, ltp: live?.ltp ?? c.exitPrice };
+        }));
+
+        // Total P&L = every symbol's realised P&L today (even ones already
+        // squared off and gone from the open-position lists) + unrealised
+        // mark-to-market on whatever is still open — so booking a profit/loss
+        // on one leg keeps moving the total even after that position closes.
+        const totalUnrealizedPnl = equity.reduce((s, p) => s + p.unrealizedPnl, 0) + options.reduce((s, p) => s + p.unrealizedPnl, 0);
+        const totalPnl = Math.round((totalRealizedPnl + totalUnrealizedPnl) * 100) / 100;
+        io.emit('positionsTick', { positions: equity, optionPositions: options, closedPositions: closed, totalPnl, totalRealizedPnl, at: Date.now() });
+    } catch { /* next tick */ }
+    finally { _pnlTickBusy = false; }
+}, 1000);
 
 // ============ DAY POSITIONS (today's F&O trades grouped by symbol) ============
 app.get('/positions/day', async (req, res) => {
     try {
-        // Always show June 19 2026 data (the seeded option trading day)
-        const startUTC = new Date('2026-06-19T00:00:00.000Z');
-        const endUTC   = new Date('2026-06-19T23:59:59.999Z');
+        // Today's F&O + intraday trades (IST trading day)
+        const { start: startUTC, end: endUTC } = istDayRange();
 
         const trades = await TradeModel.find({
             createdAt:   { $gte: startUTC, $lte: endUTC },
@@ -1734,11 +2423,15 @@ app.get('/positions/day', async (req, res) => {
 });
 
 // ============ OPTIONS PAPER TRADING ============
+// NSE/BSE contract lot sizes, effective Jan 2026 revision
 const OPTION_LOT_SIZES = {
-    'NIFTY 50':   75,
-    'BANK NIFTY': 15,
-    'SENSEX':     20,
-    'FINNIFTY':   40,
+    'NIFTY 50':      75,
+    'BANK NIFTY':    30,
+    'SENSEX':        20,
+    'FINNIFTY':      65,
+    'MIDCPNIFTY':    120,
+    'NIFTY NEXT 50': 25,
+    'BANKEX':        30,
 };
 
 function buildOptionSymbol(underlying, expiry, strike, optionType) {
@@ -1748,29 +2441,204 @@ function buildOptionSymbol(underlying, expiry, strike, optionType) {
     return `${underlying.replace(/\s+/g, '')}${yr}${mon}${strike}${optionType}`;
 }
 
-function getLiveOptionLTP(underlyingSymbol, strikePrice, optionType, expiry) {
-    try {
-        const chain = marketDataService.generateOptionChainForIndex(underlyingSymbol, expiry);
-        const row   = chain?.rows?.find(r => r.strike === Number(strikePrice));
-        return row ? (optionType === 'CE' ? row.ce.ltp : row.pe.ltp) : null;
-    } catch { return null; }
+// Live premium from the Dhan option chain (falls back to synthetic pricing)
+async function getLiveOptionLTP(underlyingSymbol, strikePrice, optionType, expiry) {
+    return marketDataService.getOptionLTP(underlyingSymbol, strikePrice, optionType, expiry);
+}
+
+// Enrich open option positions with live LTP + mark-to-market P&L
+async function enrichOptionPositions(positions) {
+    return Promise.all(positions.map(async pos => {
+        const liveLTP = await getLiveOptionLTP(pos.underlyingSymbol, pos.strikePrice, pos.optionType, pos.expiry);
+        const ltp     = liveLTP ?? pos.ltp;
+        // Mark-to-market on the quantity still open (sign-correct for shorts:
+        // quantity < 0 for a written option, so a falling premium profits).
+        const unrealizedPnl = Math.round(pos.quantity * (ltp - pos.avgPremium) * 100) / 100;
+        const realizedPnl   = await computeRealizedPnlToday(pos.symbol, pos.productType || 'NRML');
+        const pnl     = Math.round((realizedPnl + unrealizedPnl) * 100) / 100;
+        const pnlPct  = pos.avgPremium > 0 ? (unrealizedPnl / (Math.abs(pos.quantity) * pos.avgPremium)) * 100 : 0;
+        return {
+            ...pos.toObject(),
+            ltp,
+            realizedPnl,
+            unrealizedPnl,
+            pnl,
+            pnlPct: Math.round(pnlPct * 100) / 100,
+        };
+    }));
 }
 
 app.get('/optionPositions', async (req, res) => {
     try {
         const positions = await OptionPositionsModel.find({});
-        const enriched = positions.map(pos => {
-            const liveLTP = getLiveOptionLTP(pos.underlyingSymbol, pos.strikePrice, pos.optionType, pos.expiry);
-            const ltp     = liveLTP ?? pos.ltp;
-            const pnl     = pos.quantity * (ltp - pos.avgPremium);
-            const pnlPct  = pos.avgPremium > 0 ? (pnl / (pos.quantity * pos.avgPremium)) * 100 : 0;
-            return { ...pos.toObject(), ltp, pnl, pnlPct };
-        });
-        res.status(200).json(enriched);
+        res.status(200).json(await enrichOptionPositions(positions));
     } catch (err) {
         res.status(500).json({ message: 'Error fetching option positions', error: err.message });
     }
 });
+
+// Core option order execution — shared by /newOptionOrder (user-initiated)
+// and /optionPositions/:id/squareoff (closes an existing position at market).
+// Returns { status, body } instead of writing to a response directly so both
+// callers can shape their own HTTP reply.
+async function executeOptionOrder({ underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action }) {
+    const lotSize = OPTION_LOT_SIZES[underlyingSymbol] || 50;
+    const qty     = Number(lots) * lotSize;
+    const prem    = Number(premium);
+    const total   = qty * prem;
+    const symbol  = buildOptionSymbol(underlyingSymbol, expiry, strikePrice, optionType);
+    const charges = calcCharges({ segment: 'options', side: action, turnover: total });
+    const underlyingPrice = marketDataService.getStockPrice(underlyingSymbol)?.ltp
+        ?? marketDataService.getIndexData()[underlyingSymbol]?.ltp ?? 0;
+
+    try {
+        const wallet = await WalletModel.findOne({});
+        let position = await OptionPositionsModel.findOne({ underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry });
+        let realizedPnl = 0;
+        let marginDelta = 0; // change in wallet.usedMargin
+
+        if (action === 'BUY') {
+            if (position && position.quantity < 0) {
+                // Covering (part or all of) a written/short position
+                const shortQty = Math.abs(position.quantity);
+                const coverQty = Math.min(qty, shortQty);
+                const coverPnl = (position.avgPremium - prem) * coverQty;
+                realizedPnl += coverPnl;
+                const releasedMargin = (rules.approxOptionWriteMargin(underlyingPrice, coverQty, position.avgPremium));
+                marginDelta -= releasedMargin;
+
+                const overflow = qty - shortQty;
+                const oldAvgPremium = position.avgPremium;
+                if (overflow > 0) {
+                    await recordClosedOptionPosition({
+                        symbol, productType: 'NRML', quantity: -shortQty, lots: -shortQty / lotSize,
+                        avgPrice: oldAvgPremium, exitPrice: prem, pnl: coverPnl,
+                        underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
+                    });
+                    position.quantity = overflow;
+                    position.lots = overflow / lotSize;
+                    position.avgPremium = prem;
+                    marginDelta += overflow * prem; // new long leg costs full premium
+                } else {
+                    position.quantity += qty;
+                    position.lots = position.quantity / lotSize;
+                }
+                position.ltp = prem;
+                if (position.quantity === 0) {
+                    await recordClosedOptionPosition({
+                        symbol, productType: 'NRML', quantity: -shortQty, lots: -shortQty / lotSize,
+                        avgPrice: oldAvgPremium, exitPrice: prem, pnl: coverPnl,
+                        underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
+                    });
+                    await OptionPositionsModel.deleteOne({ _id: position._id });
+                } else await position.save();
+            } else {
+                if (!wallet || wallet.availableMargin < total) {
+                    return { status: 400, body: { message: 'Insufficient funds', required: total, available: wallet?.availableMargin ?? 0 } };
+                }
+                marginDelta += total;
+                if (position) {
+                    const newQty = position.quantity + qty;
+                    position.avgPremium = ((position.avgPremium * position.quantity) + (prem * qty)) / newQty;
+                    position.lots = newQty / lotSize;
+                    position.quantity = newQty;
+                    position.ltp = prem;
+                } else {
+                    position = new OptionPositionsModel({
+                        symbol, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
+                        lotSize, lots: Number(lots), quantity: qty, avgPremium: prem, ltp: prem,
+                    });
+                }
+                await position.save();
+            }
+        } else {
+            // SELL
+            if (position && position.quantity > 0) {
+                const closeQty = Math.min(qty, position.quantity);
+                const closePnl = (prem - position.avgPremium) * closeQty;
+                realizedPnl += closePnl;
+                marginDelta -= closeQty * position.avgPremium; // release premium margin held for the long
+
+                const remainder = qty - position.quantity;
+                const oldAvgPremium = position.avgPremium;
+                if (remainder > 0) {
+                    await recordClosedOptionPosition({
+                        symbol, productType: 'NRML', quantity: closeQty, lots: closeQty / lotSize,
+                        avgPrice: oldAvgPremium, exitPrice: prem, pnl: closePnl,
+                        underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
+                    });
+                    await OptionPositionsModel.deleteOne({ _id: position._id });
+                    position = new OptionPositionsModel({
+                        symbol, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
+                        lotSize, lots: -remainder / lotSize, quantity: -remainder, avgPremium: prem, ltp: prem,
+                    });
+                    await position.save();
+                    marginDelta += rules.approxOptionWriteMargin(underlyingPrice, remainder, prem);
+                } else {
+                    position.quantity -= qty;
+                    position.lots = position.quantity / lotSize;
+                    position.ltp = prem;
+                    if (position.quantity === 0) {
+                        await recordClosedOptionPosition({
+                            symbol, productType: 'NRML', quantity: closeQty, lots: closeQty / lotSize,
+                            avgPrice: oldAvgPremium, exitPrice: prem, pnl: closePnl,
+                        });
+                        await OptionPositionsModel.deleteOne({ _id: position._id });
+                    } else await position.save();
+                }
+            } else {
+                // Writing (shorting) a fresh or additional option contract
+                const writeMargin = rules.approxOptionWriteMargin(underlyingPrice, qty, prem);
+                if (!wallet || wallet.availableMargin < writeMargin) {
+                    return {
+                        status: 400,
+                        body: { message: 'Insufficient margin to write this option', required: writeMargin, available: wallet?.availableMargin ?? 0 },
+                    };
+                }
+                marginDelta += writeMargin;
+                if (position) {
+                    const newAbsQty = Math.abs(position.quantity) + qty;
+                    position.avgPremium = ((position.avgPremium * Math.abs(position.quantity)) + (prem * qty)) / newAbsQty;
+                    position.quantity -= qty;
+                    position.lots = position.quantity / lotSize;
+                } else {
+                    position = new OptionPositionsModel({
+                        symbol, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
+                        lotSize, lots: -Number(lots), quantity: -qty, avgPremium: prem, ltp: prem,
+                    });
+                }
+                position.ltp = prem;
+                await position.save();
+            }
+        }
+
+        if (wallet) {
+            // Tracked in its own field, not `usedMargin` — `usedMargin` is
+            // recomputed *fresh from CNC holdings* on every equity fill
+            // (orderEngine.js executeOrder()), which would silently wipe
+            // this delta-based option margin the next time the user placed
+            // any unrelated equity trade.
+            wallet.optionMargin = Math.max(0, (wallet.optionMargin || 0) + marginDelta);
+            if (realizedPnl !== 0 || charges.total !== 0) {
+                wallet.balance += Math.round((realizedPnl - charges.total) * 100) / 100;
+            }
+            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
+            await wallet.save();
+        }
+
+        await new TradeModel({ stockSymbol: symbol, quantity: qty, price: prem, side: action, productType: 'NRML', charges: charges.total, totalValue: total }).save();
+        await new OrdersModel({ stockSymbol: symbol, quantity: qty, price: prem, type: 'MARKET', side: action, status: 'EXECUTED', productType: 'NRML' }).save();
+
+        io.emit('optionOrderExecuted', { action, symbol, lots: Number(lots), qty, premium: prem, total, pnl: realizedPnl, wallet: wallet?.toObject() });
+        return {
+            status: action === 'BUY' ? 201 : 200,
+            body: { message: `Option ${action} executed`, position, wallet, pnl: realizedPnl, charges },
+        };
+
+    } catch (err) {
+        return { status: 500, body: { message: 'Error processing option order', error: err.message } };
+    }
+}
 
 app.post('/newOptionOrder', async (req, res) => {
     const { underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action } = req.body;
@@ -1781,89 +2649,49 @@ app.post('/newOptionOrder', async (req, res) => {
     if (!['BUY', 'SELL'].includes(action)) {
         return res.status(400).json({ message: 'action must be BUY or SELL' });
     }
+    // Same class of bug as /newOrder: `!lots`/`!premium` don't catch
+    // negative values, which would invert the margin/premium math downstream.
+    if (!Number.isFinite(Number(lots)) || Number(lots) <= 0 || !Number.isFinite(Number(premium)) || Number(premium) <= 0) {
+        return res.status(400).json({ message: 'lots and premium must be positive numbers' });
+    }
+    if (!isMarketOpen()) {
+        return res.status(400).json({
+            message: 'Market is closed',
+            detail: 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.',
+            marketClosed: true,
+        });
+    }
 
-    const lotSize = OPTION_LOT_SIZES[underlyingSymbol] || 50;
-    const qty     = Number(lots) * lotSize;
-    const prem    = Number(premium);
-    const total   = qty * prem;
-    const symbol  = buildOptionSymbol(underlyingSymbol, expiry, strikePrice, optionType);
-    const charges = Math.round(total * 0.001 * 100) / 100; // 0.1% F&O brokerage
+    const result = await executeOptionOrder({ underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action });
+    res.status(result.status).json(result.body);
+});
 
+// Square off (fully or partially close) an existing option position at the
+// current live chain premium — the long-press "Square off" action in the app.
+app.post('/optionPositions/:id/squareoff', async (req, res) => {
+    if (!isMarketOpen()) {
+        return res.status(400).json({ message: 'Market is closed', marketClosed: true });
+    }
     try {
-        const wallet = await WalletModel.findOne({});
+        const position = await OptionPositionsModel.findById(req.params.id);
+        if (!position) return res.status(404).json({ message: 'Position not found' });
 
-        if (action === 'BUY') {
-            if (!wallet || wallet.availableMargin < total) {
-                return res.status(400).json({
-                    message: 'Insufficient funds',
-                    required: total,
-                    available: wallet?.availableMargin ?? 0,
-                });
-            }
+        const isShort = position.quantity < 0;
+        const action  = isShort ? 'BUY' : 'SELL'; // cover a short, sell a long
+        const requestedLots = req.body?.lots ? Number(req.body.lots) : Math.abs(position.lots);
+        const lots = Math.min(requestedLots, Math.abs(position.lots));
 
-            let position = await OptionPositionsModel.findOne({ underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry });
-            if (position) {
-                const newQty = position.quantity + qty;
-                position.avgPremium = ((position.avgPremium * position.quantity) + (prem * qty)) / newQty;
-                position.lots      += Number(lots);
-                position.quantity   = newQty;
-                position.ltp        = prem;
-            } else {
-                position = new OptionPositionsModel({
-                    symbol,
-                    underlyingSymbol,
-                    strikePrice: Number(strikePrice),
-                    optionType,
-                    expiry,
-                    lotSize,
-                    lots: Number(lots),
-                    quantity: qty,
-                    avgPremium: prem,
-                    ltp: prem,
-                });
-            }
-            await position.save();
+        const liveLtp = await getLiveOptionLTP(position.underlyingSymbol, position.strikePrice, position.optionType, position.expiry);
+        const premium = liveLtp ?? position.ltp;
 
-            wallet.usedMargin      = (wallet.usedMargin || 0) + total;
-            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin);
-            await wallet.save();
-
-            await new TradeModel({ stockSymbol: symbol, quantity: qty, price: prem, side: 'BUY', productType: 'NRML', charges, totalValue: total }).save();
-
-            io.emit('optionOrderExecuted', { action: 'BUY', symbol, lots: Number(lots), qty, premium: prem, total, wallet: wallet.toObject() });
-            return res.status(201).json({ message: 'Option BUY executed', position, wallet });
-        }
-
-        // SELL
-        const position = await OptionPositionsModel.findOne({ underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry });
-        if (!position) return res.status(404).json({ message: 'No open position found for this option' });
-        if (Number(lots) > position.lots) return res.status(400).json({ message: `Cannot sell more than ${position.lots} lots held` });
-
-        const sellQty   = Number(lots) * lotSize;
-        const sellValue = sellQty * prem;
-        const costBasis = sellQty * position.avgPremium;
-        const pnl       = sellValue - costBasis;
-
-        if (Number(lots) >= position.lots) {
-            await OptionPositionsModel.deleteOne({ _id: position._id });
-        } else {
-            position.lots     -= Number(lots);
-            position.quantity -= sellQty;
-            await position.save();
-        }
-
-        wallet.usedMargin      = Math.max(0, (wallet.usedMargin || 0) - costBasis);
-        wallet.balance         = wallet.balance + pnl;
-        wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin);
-        await wallet.save();
-
-        await new TradeModel({ stockSymbol: symbol, quantity: sellQty, price: prem, side: 'SELL', productType: 'NRML', charges: Math.round(sellValue * 0.001 * 100) / 100, totalValue: sellValue }).save();
-
-        io.emit('optionOrderExecuted', { action: 'SELL', symbol, lots: Number(lots), qty: sellQty, premium: prem, pnl, wallet: wallet.toObject() });
-        return res.status(200).json({ message: 'Option SELL executed', pnl, wallet });
-
+        const result = await executeOptionOrder({
+            underlyingSymbol: position.underlyingSymbol, strikePrice: position.strikePrice,
+            optionType: position.optionType, expiry: position.expiry,
+            lots, premium, action,
+        });
+        res.status(result.status).json(result.body);
     } catch (err) {
-        res.status(500).json({ message: 'Error processing option order', error: err.message });
+        res.status(500).json({ message: 'Error squaring off position', error: err.message });
     }
 });
 

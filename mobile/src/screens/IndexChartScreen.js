@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable,
   Dimensions, ActivityIndicator, Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -9,28 +9,22 @@ import { useFocusEffect } from '@react-navigation/native';
 import { colors } from '../theme/colors';
 import { api, getSocket } from '../api/client';
 import CandlestickChart from '../components/CandlestickChart';
+import TimeframeSheet, { ChartToolbar, useTimeframeFavorites } from '../components/TimeframeSheet';
 
 const { width } = Dimensions.get('window');
 
 const INDICES = [
-  { name: 'NIFTY 50',   short: 'NIFTY' },
-  { name: 'BANK NIFTY', short: 'BANKNIFTY' },
-  { name: 'SENSEX',     short: 'SENSEX' },
-  { name: 'FINNIFTY',   short: 'FINNIFTY' },
-  { name: 'NIFTY IT',   short: 'NIFTY IT' },
+  { name: 'NIFTY 50',      short: 'NIFTY' },
+  { name: 'BANK NIFTY',    short: 'BANKNIFTY' },
+  { name: 'SENSEX',        short: 'SENSEX' },
+  { name: 'FINNIFTY',      short: 'FINNIFTY' },
+  { name: 'MIDCPNIFTY',    short: 'MIDCPNIFTY' },
+  { name: 'NIFTY NEXT 50', short: 'NIFTYNXT50' },
+  { name: 'BANKEX',        short: 'BANKEX' },
+  { name: 'NIFTY IT',      short: 'NIFTY IT' },
 ];
 
-const INTERVALS = [
-  { label: '1m',  value: '1m',  days: 1,   apiInterval: '1m'  },
-  { label: '3m',  value: '3m',  days: 1,   apiInterval: '3m'  },
-  { label: '5m',  value: '5m',  days: 1,   apiInterval: '5m'  },
-  { label: '15m', value: '15m', days: 7,   apiInterval: '15m' },
-  { label: '30m', value: '30m', days: 7,   apiInterval: '30m' },
-  { label: '1h',  value: '1h',  days: 30,  apiInterval: '1h'  },
-  { label: '1D',  value: '1d',  days: 90,  apiInterval: '1d'  },
-  { label: '1W',  value: '1d',  days: 180, apiInterval: '1d'  },
-  { label: '1M',  value: '1d',  days: 365, apiInterval: '1d'  },
-];
+const INTRADAY_INTERVALS = ['1m', '2m', '3m', '4m', '5m', '10m', '15m', '30m', '1h', '2h', '3h', '4h'];
 
 // ─── Candlestick Pattern Detector ────────────────────────────────
 function detectPatterns(candles) {
@@ -133,8 +127,9 @@ export default function IndexChartScreen({ route, navigation }) {
   const [selectedIndex, setSelectedIndex] = useState(initIndex);
   const [quote, setQuote] = useState({});
   const [candles, setCandles] = useState([]);
-  const [activeInterval, setActiveInterval] = useState('15m');
   const [apiInterval, setApiInterval] = useState('15m');
+  const [tfSheetOpen, setTfSheetOpen] = useState(false);
+  const { favorites, toggleFavorite } = useTimeframeFavorites();
   const [chartLoading, setChartLoading] = useState(true);
   const [livePrice, setLivePrice] = useState(null);
   const [patterns, setPatterns] = useState([]);
@@ -171,7 +166,7 @@ export default function IndexChartScreen({ route, navigation }) {
 
   // Auto-refresh every 30s for intraday intervals
   useEffect(() => {
-    if (!['1m', '3m', '5m', '15m', '30m', '1h'].includes(apiInterval)) return;
+    if (!INTRADAY_INTERVALS.includes(apiInterval)) return;
     const t = setInterval(() => fetchCandles(selectedIndex, apiInterval), 30000);
     return () => clearInterval(t);
   }, [selectedIndex, apiInterval]);
@@ -218,10 +213,9 @@ export default function IndexChartScreen({ route, navigation }) {
     fetchCandles(name, apiInterval);
   };
 
-  const changeInterval = (item) => {
-    setActiveInterval(item.label);
-    setApiInterval(item.apiInterval);
-    fetchCandles(selectedIndex, item.apiInterval);
+  const changeInterval = (tf) => {
+    setApiInterval(tf.value);
+    fetchCandles(selectedIndex, tf.value);
   };
 
   const ltp    = quote?.ltp ?? livePrice ?? 0;
@@ -249,26 +243,33 @@ export default function IndexChartScreen({ route, navigation }) {
             <Text style={styles.liveHeaderText}>LIVE</Text>
           </View>
         )}
-        <TouchableOpacity
-          style={styles.ocBtn}
-          onPress={() => navigation.navigate('OptionChain', { indexName: selectedIndex })}
-        >
-          <Text style={styles.ocBtnText}>Option Chain</Text>
-        </TouchableOpacity>
+        {/* NIFTY IT has no listed option contract on NSE — hide the entry point */}
+        {selectedIndex !== 'NIFTY IT' && (
+          <TouchableOpacity
+            style={styles.ocBtn}
+            onPress={() => navigation.navigate('OptionChain', { indexName: selectedIndex })}
+          >
+            <Text style={styles.ocBtnText}>Option Chain</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* Index selector tabs */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.indexBar} contentContainerStyle={{ paddingHorizontal: 12, gap: 8 }}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.indexBar} contentContainerStyle={{ paddingHorizontal: 12, gap: 8, alignItems: 'center' }}>
         {INDICES.map(idx => (
-          <TouchableOpacity
+          <Pressable
             key={idx.name}
-            style={[styles.indexPill, selectedIndex === idx.name && styles.indexPillActive]}
+            style={({ pressed }) => [
+              styles.indexPill,
+              selectedIndex === idx.name && styles.indexPillActive,
+              pressed && styles.indexPillPressed,
+            ]}
             onPress={() => switchIndex(idx.name)}
           >
             <Text style={[styles.indexPillText, selectedIndex === idx.name && styles.indexPillTextActive]}>
               {idx.short}
             </Text>
-          </TouchableOpacity>
+          </Pressable>
         ))}
       </ScrollView>
 
@@ -298,6 +299,13 @@ export default function IndexChartScreen({ route, navigation }) {
 
         {/* Chart */}
         <View style={styles.chartWrap}>
+          {/* TradingView-style toolbar: current interval + starred favourites */}
+          <ChartToolbar
+            selected={apiInterval}
+            favorites={favorites}
+            onSelect={changeInterval}
+            onOpenSheet={() => setTfSheetOpen(true)}
+          />
           {chartLoading ? (
             <View style={[styles.chartLoader, { height: 290 }]}>
               <ActivityIndicator size="large" color={colors.primary} />
@@ -314,26 +322,17 @@ export default function IndexChartScreen({ route, navigation }) {
             />
           )}
 
-          {/* Interval selector */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.intervalRow}
-            contentContainerStyle={styles.intervalContent}
-          >
-            {INTERVALS.map((item) => (
-              <TouchableOpacity
-                key={item.label}
-                style={[styles.intervalBtn, activeInterval === item.label && styles.intervalBtnActive]}
-                onPress={() => changeInterval(item)}
-              >
-                <Text style={[styles.intervalTxt, activeInterval === item.label && styles.intervalTxtActive]}>
-                  {item.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
         </View>
+
+        {/* Timeframe picker sheet */}
+        <TimeframeSheet
+          visible={tfSheetOpen}
+          selected={apiInterval}
+          favorites={favorites}
+          onSelect={changeInterval}
+          onToggleFav={toggleFavorite}
+          onClose={() => setTfSheetOpen(false)}
+        />
 
         {/* OHLC card */}
         <View style={styles.ohlcCard}>
@@ -410,7 +409,7 @@ function AllIndicesSummary({ currentIndex, onPress }) {
     return () => socket.off('marketData', h);
   }, []);
 
-  const SHOW = ['NIFTY 50', 'BANK NIFTY', 'SENSEX', 'FINNIFTY', 'NIFTY IT', 'INDIA VIX'];
+  const SHOW = ['NIFTY 50', 'BANK NIFTY', 'SENSEX', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTY NEXT 50', 'BANKEX', 'NIFTY IT', 'INDIA VIX'];
 
   return (
     <View style={styles.allCard}>
@@ -456,10 +455,11 @@ const styles = StyleSheet.create({
   ocBtn: { backgroundColor: colors.primary, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6 },
   ocBtnText: { fontSize: 11, fontWeight: '700', color: '#fff' },
 
-  indexBar: { flexGrow: 0, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
-  indexPill: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  indexBar: { flexGrow: 0, minHeight: 48, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
+  indexPill: { justifyContent: 'center', alignItems: 'center', minHeight: 28, paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   indexPillActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  indexPillText: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
+  indexPillPressed: { opacity: 0.6 },
+  indexPillText: { fontSize: 12, lineHeight: 16, fontWeight: '600', color: colors.textSecondary },
   indexPillTextActive: { color: '#fff' },
 
   priceSection: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 10 },

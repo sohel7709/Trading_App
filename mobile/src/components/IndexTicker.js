@@ -87,6 +87,9 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
             {sensex   && <IndexItem name="SENSEX"   data={sensex}   compact />}
             {niftyIT  && <IndexItem name="NIFTY IT" data={niftyIT}  compact />}
             {finNifty && <IndexItem name="FINNIFTY" data={finNifty} compact />}
+            {merged['MIDCPNIFTY']    && <IndexItem name="MIDCPNIFTY"    data={merged['MIDCPNIFTY']}    compact />}
+            {merged['NIFTY NEXT 50'] && <IndexItem name="NIFTY NEXT 50" data={merged['NIFTY NEXT 50']} compact />}
+            {merged['BANKEX']        && <IndexItem name="BANKEX"        data={merged['BANKEX']}        compact />}
             {merged['INDIA VIX']     && <IndexItem name="INDIA VIX"   data={merged['INDIA VIX']}   compact />}
             {merged['NIFTY MIDCAP'] && <IndexItem name="MIDCAP"      data={merged['NIFTY MIDCAP']} compact />}
           </ScrollView>

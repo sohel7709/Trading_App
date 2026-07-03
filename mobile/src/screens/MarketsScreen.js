@@ -50,15 +50,19 @@ export default function MarketsScreen({ navigation }) {
 
   useEffect(() => {
     const socket = getSocket();
-    socket.on('marketData', (data) => {
+    // Named handler so cleanup removes only *this* listener — see
+    // DashboardScreen.js for why a bare `socket.off('marketData')` is unsafe
+    // on this shared, app-lifetime socket singleton.
+    const onMarketData = (data) => {
       if (data.prices) {
         setPrices(data.prices);
         if (Object.keys(data.prices).length > 0) setPricesLoaded(true);
       }
       if (data.indexes) setIndexes(data.indexes);
       if (data.movers) setMovers(data.movers);
-    });
-    return () => socket.off('marketData');
+    };
+    socket.on('marketData', onMarketData);
+    return () => socket.off('marketData', onMarketData);
   }, []);
 
   const enriched = allStocks.map((s) => {

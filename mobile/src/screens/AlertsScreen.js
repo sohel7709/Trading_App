@@ -7,7 +7,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../theme/colors';
-import { api } from '../api/client';
+import { api, getSocket } from '../api/client';
 import IndexTicker from '../components/IndexTicker';
 
 const TABS       = ['Active', 'Triggered', 'All'];
@@ -85,6 +85,14 @@ export default function AlertsScreen({ navigation }) {
   };
 
   useFocusEffect(useCallback(() => { fetchAlerts(); }, []));
+
+  // Live refresh the moment an alert fires while this screen is open
+  useFocusEffect(useCallback(() => {
+    const socket = getSocket();
+    const onTriggered = () => fetchAlerts();
+    socket.on('alertTriggered', onTriggered);
+    return () => socket.off('alertTriggered', onTriggered);
+  }, []));
 
   // ── Search ─────────────────────────────────────────────────────────────────
   const searchStock = async (q) => {

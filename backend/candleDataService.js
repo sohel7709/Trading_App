@@ -16,12 +16,17 @@ const INDEX_YAHOO_MAP = {
     'INDIA VIX':   '^INDIAVIX',
     'NIFTY 100':   '^CNX100',
     'NIFTY MIDCAP':'NIFTY_MIDCAP_50.NS',
+    // Verified live via yahoo-finance2 .quote() before wiring in
+    'MIDCPNIFTY':    'NIFTY_MID_SELECT.NS',
+    'NIFTY NEXT 50': '^NSMIDCP',
+    'BANKEX':        'BSE-BANK.BO',
 };
 
 const INDEX_BASE_PRICES = {
     'NIFTY 50':   24085, 'BANK NIFTY': 57585,
     'SENSEX':     77155, 'NIFTY IT':   28810,
     'FINNIFTY':   26405, 'INDIA VIX':  13.2,
+    'MIDCPNIFTY': 14564, 'NIFTY NEXT 50': 72363, 'BANKEX': 65494,
 };
 
 const SIMULATED_BASE_PRICES = {
@@ -44,9 +49,23 @@ const SIMULATED_BASE_PRICES = {
     'BAJAJ-AUTO': 5240, 'SHREECEM': 2580,
 };
 
-// How many days of data to request per interval (3m/30m are aggregated from base intervals)
+// How many days of data to request per interval (non-Yahoo intervals are aggregated from base intervals)
 const PERIOD_DAYS = { '1m': 1, '3m': 1, '5m': 2, '15m': 7, '30m': 7, '1h': 30, '1d': 365 };
-const AGGREGATE_MAP = { '3m': { base: '1m', factor: 3 }, '30m': { base: '15m', factor: 2 } };
+// Yahoo only serves 1m/5m/15m/1h/1d natively — everything else is aggregated,
+// which gives the full TradingView-style timeframe menu (2m…4h, 1W).
+const AGGREGATE_MAP = {
+    '2m':  { base: '1m',  factor: 2 },
+    '3m':  { base: '1m',  factor: 3 },
+    '4m':  { base: '1m',  factor: 4 },
+    '10m': { base: '5m',  factor: 2 },
+    '30m': { base: '15m', factor: 2 },
+    '2h':  { base: '1h',  factor: 2 },
+    '3h':  { base: '1h',  factor: 3 },
+    '4h':  { base: '1h',  factor: 4 },
+    '1w':  { base: '1d',  factor: 5 },
+};
+
+const SUPPORTED_INTERVALS = ['1m', '2m', '3m', '4m', '5m', '10m', '15m', '30m', '1h', '2h', '3h', '4h', '1d', '1w'];
 
 // Aggregate OHLCV candles: merge every `factor` candles into one
 function aggregateCandles(candles, factor) {
@@ -180,15 +199,36 @@ async function fetchYahooCandles(yahooSymbol, interval) {
 
 // ─── Public: stock candles ────────────────────────────────────────
 async function generateCandles(symbol, interval) {
-    const cacheKey = `STOCK_${symbol.toUpperCase()}_${interval}`;
+    // Aggregated intervals: fetch the base interval, then merge candles
+    if (AGGREGATE_MAP[interval]) {
+        const { base, factor } = AGGREGATE_MAP[interval];
+        const baseCandles = await generateCandles(symbol, base);
+        return aggregateCandles(baseCandles, factor);
+    }
+
+    const normSymbol = symbol.toUpperCase();
+    const cacheKey = `STOCK_${normSymbol}_${interval}`;
     const now = Date.now();
     const ttl = CACHE_TTL[interval] || CACHE_TTL['1d'];
 
     if (cache[cacheKey] && (now - cache[cacheKey].fetchedAt) < ttl) {
-        return cache[cacheKey].candles;
+        // For intraday intervals, patch the last candle with the latest live
+        // tick so the candle keeps moving between Yahoo TTL refreshes.
+        const candles = [...cache[cacheKey].candles];
+        if (['1m', '5m', '15m'].includes(interval)) {
+            const livePrice = getLastTickPrice(normSymbol);
+            if (livePrice && candles.length > 0) {
+                const last = { ...candles[candles.length - 1] };
+                last.close = livePrice;
+                last.high  = Math.max(last.high, livePrice);
+                last.low   = Math.min(last.low,  livePrice);
+                candles[candles.length - 1] = last;
+            }
+        }
+        return candles;
     }
 
-    const yahooSym = `${symbol.toUpperCase()}.NS`;
+    const yahooSym = `${normSymbol}.NS`;
     const candles = await fetchYahooCandles(yahooSym, interval);
 
     if (candles && candles.length > 5) {
@@ -270,4 +310,5 @@ module.exports = {
     getLiveCandles,
     recordTick,
     INDEX_BASE_PRICES,
+    SUPPORTED_INTERVALS,
 };

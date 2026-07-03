@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, FlatList,
+  View, Text, StyleSheet, TouchableOpacity, Pressable, FlatList,
   ScrollView, ActivityIndicator, RefreshControl,
   Modal, TextInput, Alert, KeyboardAvoidingView, Platform,
 } from 'react-native';
@@ -9,9 +9,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { api, getSocket } from '../api/client';
 
-const LOT_SIZES = { 'NIFTY 50': 75, 'BANK NIFTY': 15, 'SENSEX': 20, 'FINNIFTY': 40 };
+// Keep in sync with backend OPTION_LOT_SIZES (effective Jan 2026 revision)
+const LOT_SIZES = {
+  'NIFTY 50': 75, 'BANK NIFTY': 30, 'SENSEX': 20, 'FINNIFTY': 65,
+  'MIDCPNIFTY': 120, 'NIFTY NEXT 50': 25, 'BANKEX': 30,
+};
 
-const CHAIN_INDICES = ['NIFTY 50', 'BANK NIFTY', 'SENSEX', 'FINNIFTY'];
+// Every NSE/BSE index with a real listed option contract
+const CHAIN_INDICES = ['NIFTY 50', 'BANK NIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTY NEXT 50', 'SENSEX', 'BANKEX'];
 
 function formatOI(val) {
   if (!val) return '-';
@@ -45,10 +50,6 @@ export default function OptionChainScreen({ navigation, route }) {
   selectedIndexRef.current  = selectedIndex;
   selectedExpiryRef.current = selectedExpiry;
 
-  // Trade modal state
-  const [tradeModal, setTradeModal] = useState(null); // { strike, optionType, ltp, expiry }
-  const [tradeLots, setTradeLots] = useState('1');
-  const [tradeLoading, setTradeLoading] = useState(false);
   const [optionPositions, setOptionPositions] = useState([]);
 
   const fetchChain = useCallback(async (forcedExpiry) => {
@@ -120,16 +121,14 @@ export default function OptionChainScreen({ navigation, route }) {
     fetchChain(exp);
   };
 
-  // Fetch open option positions to show SELL button when position exists
+  // Open option positions (SELL availability + position indicators);
+  // refreshed whenever the screen regains focus after placing an order
   useEffect(() => {
-    api.getOptionPositions().then(setOptionPositions).catch(() => {});
-  }, []);
-
-  const openTradeModal = (item, optionType) => {
-    const ltp = optionType === 'CE' ? item.ce.ltp : item.pe.ltp;
-    setTradeModal({ strike: item.strike, optionType, ltp, expiry: selectedExpiryRef.current });
-    setTradeLots('1');
-  };
+    const load = () => api.getOptionPositions().then(setOptionPositions).catch(() => {});
+    load();
+    const unsub = navigation.addListener('focus', load);
+    return unsub;
+  }, [navigation]);
 
   const getOpenPosition = (strike, optionType) => {
     return optionPositions.find(
@@ -138,35 +137,21 @@ export default function OptionChainScreen({ navigation, route }) {
     );
   };
 
-  const executeTrade = async (action) => {
-    if (!tradeModal) return;
-    const lots = parseInt(tradeLots, 10);
-    if (!lots || lots < 1) { Alert.alert('Invalid Lots', 'Enter at least 1 lot'); return; }
-    setTradeLoading(true);
-    try {
-      const result = await api.placeOptionOrder({
-        underlyingSymbol: selectedIndex,
-        strikePrice: tradeModal.strike,
-        optionType: tradeModal.optionType,
-        expiry: tradeModal.expiry,
-        lots,
-        premium: tradeModal.ltp,
-        action,
-      });
-      const lotSize = LOT_SIZES[selectedIndex] || 50;
-      const total = lots * lotSize * tradeModal.ltp;
-      const pnlLine = action === 'SELL' && result.pnl != null
-        ? `\nP&L: ${result.pnl >= 0 ? '+' : ''}₹${Math.abs(result.pnl).toFixed(2)}`
-        : `\nTotal: ₹${total.toFixed(2)}`;
-      Alert.alert(`${action} Executed`, `${tradeModal.strike} ${tradeModal.optionType} × ${lots} lots${pnlLine}`, [{ text: 'OK' }]);
-      setTradeModal(null);
-      // Refresh positions
-      api.getOptionPositions().then(setOptionPositions).catch(() => {});
-    } catch (e) {
-      Alert.alert('Order Failed', e.message);
-    } finally {
-      setTradeLoading(false);
-    }
+  // Dhan-style order screen (swipe to buy/sell) for every option trade
+  const openOrderScreen = (item, optionType) => {
+    const s = optionType === 'CE' ? item.ce : item.pe;
+    const openPos = getOpenPosition(item.strike, optionType);
+    navigation.navigate('OptionOrder', {
+      underlyingSymbol: selectedIndexRef.current,
+      strikePrice: item.strike,
+      optionType,
+      expiry: selectedExpiryRef.current,
+      ltp: s.ltp,
+      change: s.change ?? 0,
+      lotSize: LOT_SIZES[selectedIndexRef.current] || 50,
+      side: 'BUY',
+      openLots: openPos?.lots ?? 0,
+    });
   };
 
   const formatDate = (dateStr) => {
@@ -191,7 +176,7 @@ export default function OptionChainScreen({ navigation, route }) {
     return (
       <View style={[styles.row, isATM && styles.atmRow]}>
         {/* CE side — tappable */}
-        <TouchableOpacity style={styles.ceCell} onPress={() => openTradeModal(item, 'CE')} activeOpacity={0.7}>
+        <TouchableOpacity style={styles.ceCell} onPress={() => openOrderScreen(item, 'CE')} activeOpacity={0.7}>
           <Text style={[styles.cellOI, { color: item.ce.oiChange >= 0 ? colors.gain : colors.loss }]}>
             {formatOIChange(item.ce.oiChange)}
           </Text>
@@ -212,7 +197,7 @@ export default function OptionChainScreen({ navigation, route }) {
         </View>
 
         {/* PE side — tappable */}
-        <TouchableOpacity style={styles.peCell} onPress={() => openTradeModal(item, 'PE')} activeOpacity={0.7}>
+        <TouchableOpacity style={styles.peCell} onPress={() => openOrderScreen(item, 'PE')} activeOpacity={0.7}>
           <Text style={[styles.cellChange, { color: peIsGain ? colors.gain : colors.loss }]}>
             {peIsGain ? '+' : ''}{item.pe.change.toFixed(1)}
           </Text>
@@ -245,15 +230,19 @@ export default function OptionChainScreen({ navigation, route }) {
       </View>
 
       {/* Index selector */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.indexSelector} contentContainerStyle={{ paddingHorizontal: 12, gap: 8 }}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.indexSelector} contentContainerStyle={{ paddingHorizontal: 12, gap: 8, alignItems: 'center' }}>
         {CHAIN_INDICES.map(idx => (
-          <TouchableOpacity
+          <Pressable
             key={idx}
-            style={[styles.indexPill, selectedIndex === idx && styles.indexPillActive]}
+            style={({ pressed }) => [
+              styles.indexPill,
+              selectedIndex === idx && styles.indexPillActive,
+              pressed && styles.indexPillPressed,
+            ]}
             onPress={() => setSelectedIndex(idx)}
           >
             <Text style={[styles.indexPillText, selectedIndex === idx && styles.indexPillTextActive]}>{idx}</Text>
-          </TouchableOpacity>
+          </Pressable>
         ))}
       </ScrollView>
 
@@ -359,7 +348,7 @@ export default function OptionChainScreen({ navigation, route }) {
       {/* Live indicator */}
       <View style={styles.liveBar}>
         <View style={styles.liveDot} />
-        <Text style={styles.liveText}>Live · Auto-updates every 5s · Tap CE/PE to trade</Text>
+        <Text style={styles.liveText}>Live · Auto-updates every 5s · Tap CE/PE to open order screen</Text>
         {chain?.lastUpdated && (
           <Text style={styles.liveTime}>
             {new Date(chain.lastUpdated).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -367,73 +356,6 @@ export default function OptionChainScreen({ navigation, route }) {
         )}
       </View>
 
-      {/* Trade Modal */}
-      <Modal visible={!!tradeModal} transparent animationType="slide" onRequestClose={() => setTradeModal(null)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-          <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setTradeModal(null)} />
-          {tradeModal && (() => {
-            const lotSize = LOT_SIZES[selectedIndex] || 50;
-            const lots    = parseInt(tradeLots, 10) || 0;
-            const qty     = lots * lotSize;
-            const total   = qty * tradeModal.ltp;
-            const openPos = getOpenPosition(tradeModal.strike, tradeModal.optionType);
-            return (
-              <View style={styles.modalSheet}>
-                <View style={styles.modalHandle} />
-                <Text style={styles.modalTitle}>
-                  {selectedIndex} {tradeModal.strike} {tradeModal.optionType}
-                </Text>
-                <Text style={styles.modalSubtitle}>
-                  {tradeModal.expiry} · LTP: <Text style={{ fontWeight: '700', color: colors.text }}>₹{tradeModal.ltp.toFixed(2)}</Text>
-                </Text>
-                {openPos && (
-                  <View style={styles.posInfoBanner}>
-                    <Text style={styles.posInfoText}>
-                      Open position: {openPos.lots} lots · Avg ₹{openPos.avgPremium.toFixed(2)} · P&L {openPos.pnl >= 0 ? '+' : ''}₹{(openPos.pnl ?? 0).toFixed(2)}
-                    </Text>
-                  </View>
-                )}
-
-                <View style={styles.modalRow}>
-                  <Text style={styles.modalLabel}>Lots</Text>
-                  <TextInput
-                    style={styles.lotsInput}
-                    value={tradeLots}
-                    onChangeText={setTradeLots}
-                    keyboardType="number-pad"
-                    selectTextOnFocus
-                  />
-                  <Text style={styles.modalLabel}>= {qty} qty</Text>
-                </View>
-
-                <View style={styles.modalRow}>
-                  <Text style={styles.modalLabel}>Total Premium</Text>
-                  <Text style={styles.totalText}>₹{total.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</Text>
-                </View>
-
-                <View style={styles.modalActions}>
-                  <TouchableOpacity
-                    style={styles.buyBtn}
-                    onPress={() => executeTrade('BUY')}
-                    disabled={tradeLoading}
-                  >
-                    <Text style={styles.buyBtnTxt}>{tradeLoading ? '...' : 'BUY'}</Text>
-                  </TouchableOpacity>
-                  {openPos && (
-                    <TouchableOpacity
-                      style={styles.sellBtn}
-                      onPress={() => executeTrade('SELL')}
-                      disabled={tradeLoading}
-                    >
-                      <Text style={styles.sellBtnTxt}>{tradeLoading ? '...' : 'SELL'}</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              </View>
-            );
-          })()}
-        </KeyboardAvoidingView>
-      </Modal>
     </View>
   );
 }
@@ -453,17 +375,20 @@ const styles = StyleSheet.create({
 
   indexSelector: {
     flexGrow: 0,
+    minHeight: 48,
     paddingVertical: 10,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
   indexPill: {
+    justifyContent: 'center', alignItems: 'center', minHeight: 28,
     paddingHorizontal: 14, paddingVertical: 6,
     borderRadius: 20, borderWidth: 1, borderColor: colors.border,
     backgroundColor: colors.surface,
   },
   indexPillActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  indexPillText: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
+  indexPillPressed: { opacity: 0.6 },
+  indexPillText: { fontSize: 12, lineHeight: 16, fontWeight: '600', color: colors.textSecondary },
   indexPillTextActive: { color: '#fff' },
 
   priceBanner: {

@@ -88,6 +88,18 @@ const CandlestickChart = forwardRef(function CandlestickChart(
   (function(){
     var candleSeries, chart;
     try {
+      // NSE data timestamps are UTC epoch seconds; lightweight-charts formats
+      // them using the WebView's default (UTC) locale, not the exchange's IST
+      // timezone. Force IST everywhere so axis/tooltip times match market hours.
+      var IST_TZ = 'Asia/Kolkata';
+      function istParts(time) {
+        var d = new Date(time * 1000);
+        return new Intl.DateTimeFormat('en-GB', {
+          timeZone: IST_TZ, hour:'2-digit', minute:'2-digit', hour12:false,
+          day:'2-digit', month:'short', year:'numeric',
+        }).formatToParts(d).reduce(function(acc,p){acc[p.type]=p.value;return acc;},{});
+      }
+
       chart = LightweightCharts.createChart(document.getElementById('chart'), {
         layout:{
           background:{type:'solid',color:'#ffffff'},
@@ -109,12 +121,22 @@ const CandlestickChart = forwardRef(function CandlestickChart(
           autoScale:true,
           scaleMargins:{top:0.06,bottom:0.16},
         },
+        localization:{
+          timeFormatter: function(time){
+            var p = istParts(time);
+            return p.day+' '+p.month+' '+p.year+'  '+p.hour+':'+p.minute;
+          },
+        },
         timeScale:{
           borderColor:'#E8EAED',
           timeVisible:true,
           secondsVisible:false,
           rightOffset:5,
           minBarSpacing:2,
+          tickMarkFormatter: function(time){
+            var p = istParts(time);
+            return p.hour+':'+p.minute;
+          },
         },
         handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:false},
         handleScale:{axisPressedMouseMove:true,mouseWheel:true,pinch:true},

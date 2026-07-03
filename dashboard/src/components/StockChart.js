@@ -2,8 +2,11 @@ import React, { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { createChart, CandlestickSeries, LineSeries, AreaSeries, HistogramSeries } from "lightweight-charts";
 import axios from "axios";
+import { io } from "socket.io-client";
 
 const API_URL = "http://localhost:8080";
+const SOCKET_URL = "http://localhost:8080";
+const INTRADAY_INTERVALS = ["1m", "5m", "15m"];
 
 const StockChart = () => {
   const [searchParams] = useSearchParams();
@@ -14,6 +17,8 @@ const StockChart = () => {
   const volumeSeriesRef = useRef(null);
   const smaSeriesRef = useRef(null);
   const emaSeriesRef = useRef(null);
+  const lastCandleRef = useRef(null);
+  const socketRef = useRef(null);
   const [interval, setInterval_] = useState("15m");
   const [chartType, setChartType] = useState("candlestick");
   const [indicators, setIndicators] = useState({ sma: true, ema: false, bollinger: false });
@@ -33,6 +38,51 @@ const StockChart = () => {
       }
     };
   }, []);
+
+  // Live tick stream: patch LTP + the last candle on every broadcast so the
+  // chart keeps moving between REST refreshes instead of sitting static.
+  useEffect(() => {
+    const socket = io(SOCKET_URL);
+    socketRef.current = socket;
+    return () => socket.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    const handler = (data) => {
+      const live = data.prices && data.prices[symbol];
+      if (!live || !live.ltp) return;
+      setQuote((prev) => ({ ...(prev || {}), ...live }));
+
+      const last = lastCandleRef.current;
+      if (!candleSeriesRef.current || !last) return;
+      if (chartType === "candlestick") {
+        const updated = {
+          time: last.time,
+          open: last.open,
+          high: Math.max(last.high, live.ltp),
+          low: Math.min(last.low, live.ltp),
+          close: live.ltp,
+        };
+        lastCandleRef.current = updated;
+        candleSeriesRef.current.update(updated);
+      } else {
+        lastCandleRef.current = { ...last, close: live.ltp };
+        candleSeriesRef.current.update({ time: last.time, value: live.ltp });
+      }
+    };
+    socket.on("marketData", handler);
+    return () => socket.off("marketData", handler);
+  }, [symbol, chartType]);
+
+  // Re-fetch full candle set periodically for intraday intervals so new
+  // candle buckets roll in (tick patching above only moves the last one).
+  useEffect(() => {
+    if (!INTRADAY_INTERVALS.includes(interval)) return;
+    const t = setInterval(fetchCandles, 30000);
+    return () => clearInterval(t);
+  }, [symbol, interval]);
 
   const fetchQuote = async () => {
     try {
@@ -193,6 +243,7 @@ const StockChart = () => {
       mainSeries.setData(data.map((d) => ({ time: d.time, value: d.close })));
     }
     candleSeriesRef.current = mainSeries;
+    lastCandleRef.current = data.length > 0 ? { ...data[data.length - 1] } : null;
 
     // Indicators
     if (indicators.sma) {

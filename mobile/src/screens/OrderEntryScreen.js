@@ -1,24 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ScrollView, Alert, ActivityIndicator,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { api } from '../api/client';
+import { isMarketOpen as checkMarketOpen } from '../utils/marketHours';
 
 const ORDER_TYPES = ['Regular', 'MTF', 'Iceberg', 'Cover'];
 const PRODUCT_TYPES = ['CNC', 'MIS', 'NRML'];
 const PRICE_MODES = ['Market', 'Limit', 'SL', 'SL-M'];
-
-function checkMarketOpen() {
-  const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;
-  const mins = ist.getHours() * 60 + ist.getMinutes();
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
-}
 
 export default function OrderEntryScreen({ route, navigation }) {
   const { symbol, ltp = 0, defaultSide = 'BUY' } = route.params || {};
@@ -30,18 +24,25 @@ export default function OrderEntryScreen({ route, navigation }) {
   const [quantity, setQuantity] = useState('1');
   const [price, setPrice] = useState(Number(ltp).toFixed(2));
   const [triggerPrice, setTriggerPrice] = useState('');
+  const [coverStopLoss, setCoverStopLoss] = useState('');
   const [priceMode, setPriceMode] = useState('Limit');
   const [productType, setProductType] = useState('CNC');
   const [loading, setLoading] = useState(false);
   const [wallet, setWallet] = useState(null);
   const [marketOpen, setMarketOpen] = useState(checkMarketOpen());
+  const [bseQuote, setBseQuote] = useState(null);
 
   const nsePrice = Number(ltp);
-  const bsePrice = Math.round((nsePrice - (nsePrice * 0.0001 + 0.50)) * 100) / 100;
-  const currentExchangePrice = exchange === 'NSE' ? nsePrice : bsePrice;
+  // Real BSE_EQ quote from Dhan — fetched on demand, not derived from a formula
+  const currentExchangePrice = exchange === 'NSE' ? nsePrice : (bseQuote?.ltp ?? nsePrice);
+
+  // Refresh available margin every time this screen is focused, so the
+  // balance shown is never a stale snapshot from an earlier visit.
+  useFocusEffect(useCallback(() => {
+    api.getWallet().then(setWallet).catch(() => {});
+  }, []));
 
   useEffect(() => {
-    api.getWallet().then(setWallet).catch(() => {});
     // Re-check market status every minute so the button enables/disables live
     const timer = setInterval(() => setMarketOpen(checkMarketOpen()), 60000);
     return () => clearInterval(timer);
@@ -51,29 +52,64 @@ export default function OrderEntryScreen({ route, navigation }) {
     if (ltp > 0) setPrice(Number(ltp).toFixed(2));
   }, [ltp]);
 
+  // Pull a real BSE quote the moment the user switches to the BSE pill
+  useEffect(() => {
+    if (exchange !== 'BSE') { setBseQuote(null); return; }
+    let cancelled = false;
+    api.getQuote(symbol, 'BSE').then(q => { if (!cancelled) setBseQuote(q); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [exchange, symbol]);
+
+  const isCover = orderType === 'Cover';
+
   const handlePlaceOrder = async () => {
     const qty = Number(quantity);
-    const isMarket = priceMode === 'Market';
+    const isMarket = priceMode === 'Market' || isCover; // Cover orders are always market entries
     const p = isMarket ? currentExchangePrice : Number(price);
 
     if (!qty || qty <= 0) { Alert.alert('Invalid quantity'); return; }
     if (!isMarket && (!p || p <= 0)) { Alert.alert('Invalid price'); return; }
+    if (isCover && (!coverStopLoss || Number(coverStopLoss) <= 0)) {
+      Alert.alert('Stop-loss required', 'Cover orders need a compulsory stop-loss trigger price.');
+      return;
+    }
+    if (!isCover && isSLMode && (!triggerPrice || Number(triggerPrice) <= 0)) {
+      Alert.alert('Trigger price required', 'SL and SL-M orders need a trigger price.');
+      return;
+    }
 
     setLoading(true);
     try {
-      await api.placeOrder({
+      if (isCover) {
+        const result = await api.placeCoverOrder({
+          stockSymbol: symbol, quantity: qty, price: p,
+          stopLossTriggerPrice: Number(coverStopLoss), side, exchange,
+        });
+        Alert.alert(
+          'Cover order placed',
+          `${side} ${qty} × ${symbol} @ market\nStop-loss set at ₹${Number(coverStopLoss).toFixed(2)}`,
+          [{ text: 'OK', onPress: () => navigation.goBack() }]
+        );
+        return;
+      }
+
+      const modeMap = { Market: 'MARKET', Limit: 'LIMIT', SL: 'SL', 'SL-M': 'SLM' };
+      const result = await api.placeOrder({
         stockSymbol: symbol,
         qty,
         price: p,
-        mode: priceMode === 'Market' ? 'MARKET' : 'LIMIT',
-        side,
-        productType,
+        triggerPrice: isSLMode ? Number(triggerPrice) : undefined,
+        mode: modeMap[priceMode] || 'MARKET',
+        side, productType, exchange,
       });
 
+      const resting = result?.order?.status === 'PENDING';
       Alert.alert(
-        side === 'BUY' ? 'Order placed' : 'Sell order placed',
-        `${side} ${qty} × ${symbol} @ ₹${p.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` +
-        (productType === 'MIS' ? '\nWill appear in Positions.' : '\nWill appear in Holdings.'),
+        resting ? `${priceMode} order placed` : (side === 'BUY' ? 'Order executed' : 'Sell order executed'),
+        resting
+          ? `${side} ${qty} × ${symbol} will fill when the market touches your ${isSLMode ? 'trigger' : 'limit'} price.\nFind it under Orders → Open.`
+          : `${side} ${qty} × ${symbol} @ ₹${p.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` +
+            (productType === 'MIS' ? '\nWill appear in Positions.' : '\nWill appear in Holdings.'),
         [{ text: 'OK', onPress: () => navigation.goBack() }]
       );
     } catch (e) {
@@ -157,7 +193,10 @@ export default function OrderEntryScreen({ route, navigation }) {
             <TouchableOpacity
               key={t}
               style={styles.tabItem}
-              onPress={() => setOrderType(t)}
+              onPress={() => {
+                setOrderType(t);
+                if (t === 'Cover') setProductType('MIS'); // Cover orders are intraday-only
+              }}
               activeOpacity={0.7}
             >
               <Text style={[styles.tabText, orderType === t && styles.tabTextActive]}>{t}</Text>
@@ -166,43 +205,55 @@ export default function OrderEntryScreen({ route, navigation }) {
           ))}
         </View>
 
-        {/* ── Product type: CNC / MIS / NRML ── */}
-        <View style={styles.sectionRow}>
-          <Text style={styles.sectionLabel}>Product</Text>
-          <View style={styles.segmentControl}>
-            {PRODUCT_TYPES.map(pt => (
-              <TouchableOpacity
-                key={pt}
-                style={[styles.segmentItem, productType === pt && styles.segmentItemActive]}
-                onPress={() => setProductType(pt)}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.segmentText, productType === pt && styles.segmentTextActive]}>
-                  {pt}
-                </Text>
-              </TouchableOpacity>
-            ))}
+        {/* ── Product type: CNC / MIS / NRML — Cover orders are forced MIS ── */}
+        {!isCover && (
+          <View style={styles.sectionRow}>
+            <Text style={styles.sectionLabel}>Product</Text>
+            <View style={styles.segmentControl}>
+              {PRODUCT_TYPES.map(pt => (
+                <TouchableOpacity
+                  key={pt}
+                  style={[styles.segmentItem, productType === pt && styles.segmentItemActive]}
+                  onPress={() => setProductType(pt)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.segmentText, productType === pt && styles.segmentTextActive]}>
+                    {pt}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
-        </View>
+        )}
 
-        {/* ── Price mode: Market / Limit / SL / SL-M ── */}
-        <View style={styles.sectionRow}>
-          <Text style={styles.sectionLabel}>Order</Text>
-          <View style={styles.segmentControl}>
-            {PRICE_MODES.map(pm => (
-              <TouchableOpacity
-                key={pm}
-                style={[styles.segmentItem, priceMode === pm && styles.segmentItemActive]}
-                onPress={() => setPriceMode(pm)}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.segmentText, priceMode === pm && styles.segmentTextActive]}>
-                  {pm}
-                </Text>
-              </TouchableOpacity>
-            ))}
+        {/* ── Price mode: Market / Limit / SL / SL-M — Cover orders are always Market ── */}
+        {!isCover && (
+          <View style={styles.sectionRow}>
+            <Text style={styles.sectionLabel}>Order</Text>
+            <View style={styles.segmentControl}>
+              {PRICE_MODES.map(pm => (
+                <TouchableOpacity
+                  key={pm}
+                  style={[styles.segmentItem, priceMode === pm && styles.segmentItemActive]}
+                  onPress={() => setPriceMode(pm)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.segmentText, priceMode === pm && styles.segmentTextActive]}>
+                    {pm}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
-        </View>
+        )}
+        {isCover && (
+          <View style={styles.coverNotice}>
+            <Ionicons name="shield-checkmark-outline" size={14} color="#B45309" />
+            <Text style={styles.coverNoticeText}>
+              Cover orders are always Market entries (MIS) with a compulsory stop-loss — higher leverage in exchange for a guaranteed exit.
+            </Text>
+          </View>
+        )}
 
         {/* ── Quantity field ── */}
         <View style={styles.fieldBlock}>
@@ -252,7 +303,7 @@ export default function OrderEntryScreen({ route, navigation }) {
         </View>
 
         {/* ── Trigger price (SL / SL-M only) ── */}
-        {isSLMode && (
+        {!isCover && isSLMode && (
           <View style={styles.fieldBlock}>
             <Text style={styles.fieldLabel}>Trigger Price</Text>
             <TextInput
@@ -262,6 +313,22 @@ export default function OrderEntryScreen({ route, navigation }) {
               keyboardType="decimal-pad"
               selectTextOnFocus
               placeholder="0.00"
+              placeholderTextColor="#B3BBBF"
+            />
+          </View>
+        )}
+
+        {/* ── Compulsory stop-loss (Cover orders only) ── */}
+        {isCover && (
+          <View style={styles.fieldBlock}>
+            <Text style={styles.fieldLabel}>Stop-loss trigger price</Text>
+            <TextInput
+              style={styles.priceInput}
+              value={coverStopLoss}
+              onChangeText={setCoverStopLoss}
+              keyboardType="decimal-pad"
+              selectTextOnFocus
+              placeholder={side === 'BUY' ? 'Below entry price' : 'Above entry price'}
               placeholderTextColor="#B3BBBF"
             />
           </View>
@@ -405,6 +472,13 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 2,
     borderTopRightRadius: 2,
   },
+
+  coverNotice: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 8,
+    backgroundColor: '#FEF3C7', paddingHorizontal: 16, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: '#E8E8E8',
+  },
+  coverNoticeText: { flex: 1, fontSize: 12, color: '#92400E', lineHeight: 17 },
 
   // ── Segmented controls ──
   sectionRow: {

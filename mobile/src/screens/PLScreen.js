@@ -1,9 +1,10 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   Modal, ActivityIndicator, FlatList, Platform,
   StatusBar, Alert, Share, Image,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system';
@@ -756,6 +757,19 @@ export default function PLScreen({ navigation }) {
     fetchPnl('combined', fromStr, today());
     fetchMonthlyBreakdown('combined', fromStr, today());
   }, []);
+
+  // Refresh with the current filters whenever this screen regains focus
+  // (e.g. after placing a trade elsewhere) — skips the very first focus,
+  // which coincides with the mount effect above and would double-fetch.
+  const filtersRef = useRef({ fromDate, toDate, segment });
+  filtersRef.current = { fromDate, toDate, segment };
+  const isFirstFocus = useRef(true);
+  useFocusEffect(useCallback(() => {
+    if (isFirstFocus.current) { isFirstFocus.current = false; return; }
+    const { fromDate: f, toDate: t, segment: s } = filtersRef.current;
+    fetchPnl(s, f, t);
+    fetchMonthlyBreakdown(s, f, t);
+  }, [fetchPnl, fetchMonthlyBreakdown]));
 
   const handleApplyDate = (from, to) => {
     setFromDate(from); setToDate(to); setShowDatePicker(false);

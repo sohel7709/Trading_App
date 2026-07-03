@@ -242,8 +242,30 @@ function CorpActionCard({ item }) {
         <Text style={styles.corpDate}>Ex-date: <Text style={{ color: colors.text, fontWeight: '600' }}>{item.exDate}</Text></Text>
         <Text style={styles.corpDate}>Record date: <Text style={{ color: colors.text, fontWeight: '600' }}>{item.recordDate}</Text></Text>
       </View>
+      {item.applied != null && (
+        <View style={[styles.appliedChip, { backgroundColor: item.applied ? colors.gainLight : '#FEF3C7' }]}>
+          <Text style={[styles.appliedChipTxt, { color: item.applied ? colors.gain : '#B45309' }]}>
+            {item.applied ? 'Applied to your holdings' : 'Pending'}
+          </Text>
+        </View>
+      )}
     </View>
   );
+}
+
+// Real corporate-action docs → the shape CorpActionCard expects
+function mapCorporateAction(a) {
+  const actionLabel = a.type === 'DIVIDEND' ? 'Dividend' : a.type === 'BONUS' ? 'Bonus' : 'Split';
+  const detail = a.type === 'DIVIDEND'
+    ? `₹${Number(a.dividendPerShare).toFixed(2)} per share`
+    : `${a.ratio}:1 ${actionLabel.toLowerCase()} issue`;
+  const exDate = new Date(a.exDate);
+  const recordDate = new Date(exDate.getTime() + 86400000); // T+1, not separately tracked
+  const fmt = (d) => d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  return {
+    id: a._id, symbol: a.stockSymbol, action: actionLabel, detail,
+    exDate: fmt(exDate), recordDate: fmt(recordDate), applied: a.applied,
+  };
 }
 
 export default function BidsScreen({ navigation }) {
@@ -252,6 +274,7 @@ export default function BidsScreen({ navigation }) {
   const [govtSubTab, setGovtSubTab] = useState(0);
   const [ipos, setIpos] = useState(IPO_DATA);   // seed with fallback, replaced by live data
   const [ipoSource, setIpoSource] = useState('');
+  const [corpActions, setCorpActions] = useState(CORP_ACTIONS); // seed with fallback
   const insets = useSafeAreaInsets();
 
   // Fetch live IPOs from NSE (via backend) on focus
@@ -262,6 +285,19 @@ export default function BidsScreen({ navigation }) {
         if (active && Array.isArray(res?.ipos) && res.ipos.length > 0) {
           setIpos(res.ipos);
           setIpoSource(res.source || '');
+        }
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []));
+
+  // Fetch the real corporate-action calendar (dividend/split/bonus) applied to holdings
+  useFocusEffect(useCallback(() => {
+    let active = true;
+    api.getCorporateActions()
+      .then(res => {
+        if (active && Array.isArray(res) && res.length > 0) {
+          setCorpActions(res.map(mapCorporateAction));
         }
       })
       .catch(() => {});
@@ -360,7 +396,7 @@ export default function BidsScreen({ navigation }) {
       {/* ── Corp Actions Tab ── */}
       {topTab === 3 && (
         <FlatList
-          data={CORP_ACTIONS}
+          data={corpActions}
           keyExtractor={item => item.id}
           renderItem={({ item }) => <CorpActionCard item={item} />}
           contentContainerStyle={styles.listContent}
@@ -461,6 +497,8 @@ const styles = StyleSheet.create({
   corpActionText: { fontSize: 12, fontWeight: '700' },
   corpDates: { flexDirection: 'row', gap: 16 },
   corpDate: { fontSize: 12, color: colors.textSecondary },
+  appliedChip: { alignSelf: 'flex-start', marginTop: 8, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4 },
+  appliedChipTxt: { fontSize: 10, fontWeight: '700' },
 
   // Empty state
   emptyState: { flex: 1, alignItems: 'center', paddingTop: 80, gap: 8 },

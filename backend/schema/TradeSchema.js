@@ -9,6 +9,10 @@ const TradeSchema = new Schema({
     orderId: { type: Schema.Types.ObjectId, ref: 'Order' },
     charges: { type: Number, default: 0 },
     totalValue: { type: Number, required: true },
+    // Set once this trade's realised P&L has been rolled up into a
+    // permanent PLRecord at day-prep — keeps the day-prep archive step
+    // idempotent (never re-summed / never double-counted) across restarts.
+    archived: { type: Boolean, default: false },
 }, { timestamps: true });
 
 module.exports = { TradeSchema };

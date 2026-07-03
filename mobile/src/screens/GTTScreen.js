@@ -4,6 +4,7 @@ import {
   TextInput, Alert, RefreshControl, ActivityIndicator, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../theme/colors';
 import { api } from '../api/client';
@@ -17,7 +18,7 @@ function StatusBadge({ status }) {
   const map = {
     ACTIVE:    { bg: colors.gainLight,    text: colors.gain },
     TRIGGERED: { bg: colors.warningLight, text: colors.warning },
-    CANCELLED: { bg: '#F1F3F4',           text: colors.textMuted },
+    INACTIVE:  { bg: '#F1F3F4',           text: colors.textMuted },
   };
   const s = map[status] ?? map.ACTIVE;
   return (
@@ -29,8 +30,9 @@ function StatusBadge({ status }) {
 
 // ─── GTT order row ────────────────────────────────────────────────────────────
 function GTTRow({ item, onDelete }) {
-  const isBuy = item.gttMeta?.side !== 'SELL';
+  const isBuy = item.side !== 'SELL';
   const sideColor = isBuy ? colors.gain : colors.loss;
+  const status = item.triggered ? 'TRIGGERED' : (item.active ? 'ACTIVE' : 'INACTIVE');
 
   return (
     <View style={styles.gttRow}>
@@ -43,7 +45,7 @@ function GTTRow({ item, onDelete }) {
         </View>
         <Text style={styles.gttSymbol}>{item.stockSymbol}</Text>
         <View style={{ flex: 1 }} />
-        <StatusBadge status="ACTIVE" />
+        <StatusBadge status={status} />
         <TouchableOpacity
           style={styles.deleteBtn}
           onPress={() => onDelete(item._id, item.stockSymbol)}
@@ -56,7 +58,7 @@ function GTTRow({ item, onDelete }) {
       {/* Bottom: trigger / limit / qty data pills */}
       <View style={styles.gttRowBottom}>
         <View style={styles.gttDataCell}>
-          <Text style={styles.gttDataLabel}>Trigger</Text>
+          <Text style={styles.gttDataLabel}>{item.triggerType === 'oco' ? `Trigger (${item.condition})` : 'Trigger'}</Text>
           <Text style={styles.gttDataValue}>
             ₹{Number(item.targetPrice ?? 0).toFixed(2)}
           </Text>
@@ -65,15 +67,25 @@ function GTTRow({ item, onDelete }) {
         <View style={styles.gttDataCell}>
           <Text style={styles.gttDataLabel}>Limit</Text>
           <Text style={styles.gttDataValue}>
-            ₹{Number(item.gttMeta?.limitPrice ?? item.targetPrice ?? 0).toFixed(2)}
+            ₹{Number(item.limitPrice ?? item.targetPrice ?? 0).toFixed(2)}
           </Text>
         </View>
         <View style={styles.gttCellDivider} />
         <View style={styles.gttDataCell}>
           <Text style={styles.gttDataLabel}>Qty</Text>
-          <Text style={styles.gttDataValue}>{item.gttMeta?.qty ?? 1}</Text>
+          <Text style={styles.gttDataValue}>{item.quantity ?? 1}</Text>
         </View>
       </View>
+
+      {/* OCO second leg */}
+      {item.triggerType === 'oco' && (
+        <View style={styles.ocoRow}>
+          <Ionicons name="git-branch-outline" size={12} color={colors.textMuted} />
+          <Text style={styles.ocoTxt}>
+            OCO leg: {item.ocoCondition} ₹{Number(item.ocoTargetPrice ?? 0).toFixed(2)}
+          </Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -90,6 +102,7 @@ export default function GTTScreen({ navigation }) {
   const [triggerPrice, setTriggerPrice] = useState('');
   const [limitPrice,   setLimitPrice]   = useState('');
   const [qty,          setQty]          = useState('1');
+  const [ocoTargetPrice, setOcoTargetPrice] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [loading,      setLoading]      = useState(false);
   const insets = useSafeAreaInsets();
@@ -102,6 +115,10 @@ export default function GTTScreen({ navigation }) {
     } catch {}
     finally { setRefreshing(false); }
   }, []);
+
+  // Refresh every time this tab/screen comes into focus, not just on mount —
+  // so GTT orders created/triggered elsewhere show up without a manual pull.
+  useFocusEffect(useCallback(() => { fetchGTT(); }, [fetchGTT]));
 
   const searchStock = async (q) => {
     setSymbol(q);
@@ -116,19 +133,31 @@ export default function GTTScreen({ navigation }) {
     if (!symbol || !triggerPrice || !qty) {
       return Alert.alert('Required', 'Fill symbol, trigger price and quantity');
     }
+    if (triggerType === 'OCO' && !ocoTargetPrice) {
+      return Alert.alert('Required', 'OCO needs a second trigger price');
+    }
     setLoading(true);
+    const primaryCondition = side === 'BUY' ? 'BELOW' : 'ABOVE';
     try {
       await api.createAlert({
         stockSymbol: symbol,
         targetPrice: Number(triggerPrice),
-        condition: side === 'BUY' ? 'BELOW' : 'ABOVE',
+        condition: primaryCondition,
         gtt: true,
-        gttMeta: { side, qty: Number(qty), limitPrice: Number(limitPrice || triggerPrice) },
+        side,
+        quantity: Number(qty),
+        limitPrice: Number(limitPrice || triggerPrice),
+        productType: 'CNC',
+        triggerType: triggerType === 'OCO' ? 'oco' : 'single',
+        // OCO's second leg fires on the opposite condition — e.g. BUY-the-dip
+        // (BELOW) paired with a target sell-the-rally (ABOVE)
+        ocoTargetPrice: triggerType === 'OCO' ? Number(ocoTargetPrice) : undefined,
+        ocoCondition: triggerType === 'OCO' ? (primaryCondition === 'BELOW' ? 'ABOVE' : 'BELOW') : undefined,
       });
       setSheetVisible(false);
       resetForm();
       fetchGTT();
-      Alert.alert('GTT Created', `GTT order set for ${symbol}`);
+      Alert.alert('GTT Created', `GTT order set for ${symbol}. It will place a real ${side} order the moment the market touches your trigger.`);
     } catch (e) {
       Alert.alert('Error', e.message);
     } finally { setLoading(false); }
@@ -146,12 +175,12 @@ export default function GTTScreen({ navigation }) {
 
   const resetForm = () => {
     setSymbol(''); setTriggerPrice(''); setLimitPrice(''); setQty('1');
-    setSearchResults([]); setSide('BUY'); setTriggerType('Single');
+    setOcoTargetPrice(''); setSearchResults([]); setSide('BUY'); setTriggerType('Single');
   };
 
   // Filter displayed orders by tab
   const displayed = gttOrders.filter(o =>
-    filterTab === 'OCO' ? o.gttMeta?.type === 'OCO' : o.gttMeta?.type !== 'OCO',
+    filterTab === 'OCO' ? o.triggerType === 'oco' : o.triggerType !== 'oco',
   );
 
   return (
@@ -314,6 +343,23 @@ export default function GTTScreen({ navigation }) {
                 onChangeText={setLimitPrice}
               />
 
+              {/* OCO second trigger */}
+              {triggerType === 'OCO' && (
+                <>
+                  <Text style={[styles.fieldLabel, { marginTop: 16 }]}>
+                    OCO second trigger (₹) — fires {side === 'BUY' ? 'ABOVE' : 'BELOW'}
+                  </Text>
+                  <TextInput
+                    style={styles.input}
+                    keyboardType="decimal-pad"
+                    placeholder="0.00"
+                    placeholderTextColor={colors.textMuted}
+                    value={ocoTargetPrice}
+                    onChangeText={setOcoTargetPrice}
+                  />
+                </>
+              )}
+
               {/* Quantity */}
               <Text style={[styles.fieldLabel, { marginTop: 16 }]}>Quantity</Text>
               <View style={styles.qtyRow}>
@@ -436,6 +482,12 @@ const styles = StyleSheet.create({
   gttCellDivider: { width: 1, backgroundColor: colors.border, marginVertical: 6 },
   gttDataLabel:   { fontSize: 11, color: colors.textMuted, marginBottom: 3 },
   gttDataValue:   { fontSize: 13, fontWeight: '600', color: colors.text },
+  ocoRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 16, paddingVertical: 8,
+    borderTopWidth: 1, borderTopColor: colors.borderLight,
+  },
+  ocoTxt: { fontSize: 11, color: colors.textMuted },
 
   // Empty state
   empty: {

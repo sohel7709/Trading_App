@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Switch, RefreshControl,
+  Switch, RefreshControl, Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../theme/colors';
 import IndexTicker from '../components/IndexTicker';
+import AppCodeSheet from '../components/AppCodeSheet';
+import { useAuth } from '../context/AuthContext';
 
 export const USER = {
   name:      'Ashok Shrikisan Waghmode',
@@ -35,9 +37,18 @@ const MenuRow = ({ icon, label, onPress, danger, last }) => (
 
 export default function AccountScreen({ navigation }) {
   const insets = useSafeAreaInsets();
+  const { logout } = useAuth();
   const [privacyMode, setPrivacyMode] = useState(false);
   const [consoleOn, setConsoleOn]     = useState(true);
   const [refreshing, setRefreshing]   = useState(false);
+  const [appCodeVisible, setAppCodeVisible] = useState(false);
+
+  const handleLogout = () => {
+    Alert.alert('Logout', 'Are you sure you want to logout?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Logout', style: 'destructive', onPress: logout },
+    ]);
+  };
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -105,11 +116,11 @@ export default function AccountScreen({ navigation }) {
         <Text style={styles.sectionTitle}>Account</Text>
         <View style={styles.group}>
           <MenuRow icon="cash-outline"      label="Funds"          onPress={() => navigation.navigate('Funds')} />
-          <MenuRow icon="lock-open-outline" label="App Code"       onPress={() => {}} />
+          <MenuRow icon="lock-open-outline" label="App Code"       onPress={() => setAppCodeVisible(true)} />
           <MenuRow icon="person-outline"    label="Profile"        onPress={() => navigation.navigate('Profile')} />
-          <MenuRow icon="settings-outline"  label="Settings"       onPress={() => {}} />
-          <MenuRow icon="cube-outline"      label="Connected apps" onPress={() => {}} />
-          <MenuRow icon="log-out-outline"   label="Logout"         onPress={() => {}} danger last />
+          <MenuRow icon="settings-outline"  label="Settings"       onPress={() => navigation.navigate('Settings')} />
+          <MenuRow icon="cube-outline"      label="Connected apps" onPress={() => navigation.navigate('ConnectedApps')} />
+          <MenuRow icon="log-out-outline"   label="Logout"         onPress={handleLogout} danger last />
         </View>
 
         {/* ── Console ── */}
@@ -160,6 +171,8 @@ export default function AccountScreen({ navigation }) {
           </View>
         </View>
       </ScrollView>
+
+      <AppCodeSheet visible={appCodeVisible} onClose={() => setAppCodeVisible(false)} />
     </View>
   );
 }

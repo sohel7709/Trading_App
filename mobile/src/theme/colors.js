@@ -18,13 +18,17 @@ export const colors = {
   textSecondary: '#738390',    // secondary / labels
   textMuted: '#B3BBBF',        // muted / placeholders
 
-  // Semantic
-  gain: '#25B87E',
+  // Semantic — matched to Zerodha Kite's real up/down colors
+  gain: '#4CAF50',
   gainLight: '#E8F8F2',
-  loss: '#E64D3D',
+  loss: '#DF514C',
   lossLight: '#FDECEA',
   warning: '#F59E0B',
   warningLight: '#FEF3C7',
+
+  // Kite watchlist quick Buy/Sell action buttons (distinct from gain/loss)
+  buyAction: '#4184F3',
+  sellAction: '#FF5722',
 
   // Aliases kept for backward compat
   neutral: '#738390',
@@ -36,9 +40,9 @@ export const colors = {
   inputBg: '#F8F9FA',
   divider: '#E8E8E8',
   overlay: 'rgba(0,0,0,0.5)',
-  buyGreen: '#25B87E',
-  sellRed: '#E64D3D',
-  niftyGreen: '#25B87E',
+  buyGreen: '#4CAF50',
+  sellRed: '#DF514C',
+  niftyGreen: '#4CAF50',
 
   // surfaceElevated kept for any existing refs
   surfaceElevated: '#FFFFFF',

@@ -14,8 +14,8 @@ const WITHDRAW_TYPES = [
   { id: 'instant', label: 'Instant', timing: 'Max ₹2,00,000' },
 ];
 
-// Withdrawals are temporarily disabled due to a technical issue.
-const WITHDRAW_SUSPENDED = true;
+// Withdrawals are enabled; flip this only for maintenance windows.
+const WITHDRAW_SUSPENDED = false;
 const SUSPENDED_MESSAGE =
   'Withdrawals are temporarily suspended due to a technical issue. Our team is working on it — please try again later.';
 

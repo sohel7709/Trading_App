@@ -36,9 +36,12 @@ const WithdrawScreen    = lazyScreen(() => import('../screens/WithdrawScreen'));
 const AddFundsScreen    = lazyScreen(() => import('../screens/AddFundsScreen'));
 const OrderEntryScreen  = lazyScreen(() => import('../screens/OrderEntryScreen'));
 const OptionChainScreen = lazyScreen(() => import('../screens/OptionChainScreen'));
+const OptionOrderScreen = lazyScreen(() => import('../screens/OptionOrderScreen'));
 const IndexChartScreen  = lazyScreen(() => import('../screens/IndexChartScreen'));
 const PLScreen          = lazyScreen(() => import('../screens/PLScreen'));
 const ProfileScreen     = lazyScreen(() => import('../screens/ProfileScreen'));
+const SettingsScreen       = lazyScreen(() => import('../screens/SettingsScreen'));
+const ConnectedAppsScreen  = lazyScreen(() => import('../screens/ConnectedAppsScreen'));
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -92,6 +95,7 @@ function WatchlistStack() {
       <Stack.Screen name="StockDetail" component={StockDetailScreen} />
       <Stack.Screen name="OrderEntry" component={OrderEntryScreen} />
       <Stack.Screen name="OptionChain" component={OptionChainScreen} />
+      <Stack.Screen name="OptionOrder" component={OptionOrderScreen} />
       <Stack.Screen name="IndexChart" component={IndexChartScreen} />
       <Stack.Screen name="Alerts" component={AlertsScreen} />
       <Stack.Screen name="Funds" component={FundsScreen} />
@@ -109,6 +113,7 @@ function MarketsStack() {
       <Stack.Screen name="StockDetail" component={StockDetailScreen} />
       <Stack.Screen name="OrderEntry" component={OrderEntryScreen} />
       <Stack.Screen name="OptionChain" component={OptionChainScreen} />
+      <Stack.Screen name="OptionOrder" component={OptionOrderScreen} />
       <Stack.Screen name="IndexChart" component={IndexChartScreen} />
       <Stack.Screen name="Alerts" component={AlertsScreen} />
       <Stack.Screen name="Funds" component={FundsScreen} />
@@ -127,6 +132,7 @@ function OrdersStack() {
       <Stack.Screen name="StockDetail" component={StockDetailScreen} />
       <Stack.Screen name="OrderEntry" component={OrderEntryScreen} />
       <Stack.Screen name="OptionChain" component={OptionChainScreen} />
+      <Stack.Screen name="OptionOrder" component={OptionOrderScreen} />
       <Stack.Screen name="IndexChart" component={IndexChartScreen} />
     </Stack.Navigator>
   );
@@ -140,6 +146,7 @@ function PortfolioStack() {
       <Stack.Screen name="StockDetail" component={StockDetailScreen} />
       <Stack.Screen name="OrderEntry" component={OrderEntryScreen} />
       <Stack.Screen name="OptionChain" component={OptionChainScreen} />
+      <Stack.Screen name="OptionOrder" component={OptionOrderScreen} />
       <Stack.Screen name="IndexChart" component={IndexChartScreen} />
       <Stack.Screen name="PL" component={PLScreen} />
     </Stack.Navigator>
@@ -161,6 +168,8 @@ function AccountStack() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="AccountHome" component={AccountScreen} />
       <Stack.Screen name="Profile" component={ProfileScreen} />
+      <Stack.Screen name="Settings" component={SettingsScreen} />
+      <Stack.Screen name="ConnectedApps" component={ConnectedAppsScreen} />
       <Stack.Screen name="Funds" component={FundsScreen} />
       <Stack.Screen name="Withdraw" component={WithdrawScreen} />
       <Stack.Screen name="AddFunds" component={AddFundsScreen} />
@@ -199,6 +208,15 @@ export default function AppNavigator() {
         options={{
           tabBarIcon: ({ focused }) => (
             <TabLabel icon="bookmark" iconOutline="bookmark-outline" focused={focused} label="Watchlist" />
+          ),
+        }}
+      />
+      <Tab.Screen
+        name="Markets"
+        component={MarketsStack}
+        options={{
+          tabBarIcon: ({ focused }) => (
+            <TabLabel icon="stats-chart" iconOutline="stats-chart-outline" focused={focused} label="Markets" />
           ),
         }}
       />

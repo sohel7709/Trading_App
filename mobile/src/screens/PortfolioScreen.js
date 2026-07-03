@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, Animated,
+  RefreshControl, Animated, Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -33,39 +33,101 @@ const BADGE = {
   CNC:  { bg: '#F3F4F6', text: '#6B7280' },   // gray
 };
 
+// The server sends realised/unrealised/pnl already computed (from today's
+// trade log + live mark-to-market) on /allPositions and positionsTick. A
+// couple of transitional socket events (initialData, orderExecuted) still
+// push raw position docs without those fields — this fills them in
+// client-side so the row never shows "undefined" for the second before the
+// next positionsTick self-heals it. (ltp - avgPrice) * quantity is
+// sign-correct for shorts too: a short's quantity is negative, so a falling
+// ltp (profit) naturally flips the product positive.
+const withPositionPnl = (p) => {
+  if (p.pnl != null && p.unrealizedPnl != null) return p; // already enriched by the server
+  const unrealizedPnl = (p.ltp - p.avgPrice) * p.quantity;
+  const realizedPnl = p.realizedPnl ?? 0;
+  return { ...p, unrealizedPnl, realizedPnl, pnl: realizedPnl + unrealizedPnl };
+};
+
 export default function PortfolioScreen({ navigation }) {
   const [tab, setTab]               = useState(0);
   const [holdings, setHoldings]     = useState([]);
-  const [positions, setPositions]   = useState([]);   // open net positions
-  const [dayPositions, setDayPos]   = useState([]);   // today's traded contracts
-  const [dayPnl, setDayPnl]         = useState(0);
+  const [positions, setPositions]   = useState([]);   // open equity MIS/NRML positions — live, real
   const [optionPositions, setOptPos] = useState([]);  // open F&O positions
+  const [closedPositions, setClosedPositions] = useState([]);  // today's squared-off — frozen P&L
   const [refreshing, setRefreshing] = useState(false);
   const [indexes, setIndexes]       = useState({});
   const [analyticsOn, setAnalyticsOn] = useState(false);
   const flashAnim = useRef(new Animated.Value(0)).current;
   const [flashMsg, setFlashMsg]     = useState(null);
+  // Day's Total P&L — realised P&L from EVERY symbol traded today (including
+  // ones already squared off, whose docs are gone from positions/
+  // optionPositions) + unrealised on whatever is still open. Comes from the
+  // server (dayPnl REST call + positionsTick) since the client only ever
+  // sees currently-open positions, not the full closed trade log.
+  const [totalDayPnl, setTotalDayPnl] = useState(0);
   const insets = useSafeAreaInsets();
 
   // ── Data fetch ──────────────────────────────────────────────────
   const fetchData = async () => {
     try {
-      const [h, p, dp, op] = await Promise.all([
+      const [h, p, op, dayPnl, closed] = await Promise.all([
         api.getHoldings(),
         api.getPositions(),
-        api.getDayPositions(),
         api.getOptionPositions(),
+        api.getDayPnl().catch(() => null),
+        api.getClosedPositions().catch(() => []),
       ]);
       setHoldings(h);
-      setPositions(p);
-      setDayPos(dp.positions || []);
-      setDayPnl(dp.totalPnl || 0);
+      setPositions(p.map(withPositionPnl));
       setOptPos(op || []);
+      if (dayPnl) setTotalDayPnl(dayPnl.totalPnl);
+      setClosedPositions(closed || []);
     } catch (e) { console.warn(e.message); }
     finally { setRefreshing(false); }
   };
 
   useFocusEffect(useCallback(() => { fetchData(); }, []));
+
+  // ── Square off (long-press on a position) ────────────────────────
+  const squareOffEquity = (pos) => {
+    Alert.alert(
+      'Square off position',
+      `Close ${pos.quantity} × ${pos.stockSymbol} at market price?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Square off', style: 'destructive',
+          onPress: async () => {
+            try {
+              await api.squareOffPosition(pos._id);
+              fetchData();
+            } catch (e) { Alert.alert('Failed', e.message); }
+          },
+        },
+      ]
+    );
+  };
+
+  const squareOffOption = (pos) => {
+    Alert.alert(
+      'Square off position',
+      `Close ${pos.lots} lot${Math.abs(pos.lots) > 1 ? 's' : ''} of ${pos.symbol} at market premium?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Square off', style: 'destructive',
+          onPress: async () => {
+            try {
+              await api.squareOffOptionPosition(pos._id);
+              api.getOptionPositions().then(setOptPos).catch(() => {});
+              api.getDayPnl().then(d => setTotalDayPnl(d.totalPnl)).catch(() => {});
+              api.getClosedPositions().then(setClosedPositions).catch(() => {});
+            } catch (e) { Alert.alert('Failed', e.message); }
+          },
+        },
+      ]
+    );
+  };
 
   // ── Live socket updates ─────────────────────────────────────────
   useEffect(() => {
@@ -75,12 +137,12 @@ export default function PortfolioScreen({ navigation }) {
     // immediately without waiting for the first API call to complete.
     const onInitialData = (data) => {
       if (data.holdings)  setHoldings(data.holdings);
-      if (data.positions) setPositions(data.positions);
+      if (data.positions) setPositions(data.positions.map(withPositionPnl));
     };
     socket.on('initialData', onInitialData);
 
     const onOrderExecuted = (data) => {
-      if (data.positions) setPositions(data.positions);
+      if (data.positions) setPositions(data.positions.map(withPositionPnl));
       if (data.holdings) {
         // Merge incoming DB holdings with current live ltps so current value
         // updates instantly without waiting for the next marketData tick.
@@ -108,31 +170,30 @@ export default function PortfolioScreen({ navigation }) {
         const p = data.prices[h.stockSymbol];
         return p ? { ...h, ltp: p.ltp ?? h.ltp } : h;
       }));
-      // Live mark-to-market for open day positions: re-price the net open
-      // quantity and recompute total P&L = realized + unrealized.
-      setDayPos(prev => prev.map(pos => {
-        const p = data.prices[pos.stockSymbol];
-        if (!p || p.ltp == null || pos.isSquaredOff) return pos;
-        const ltp   = p.ltp;
-        const netQty = pos.netQty ?? 0;
-        let unrealized = 0;
-        if (netQty > 0)      unrealized = (ltp - pos.avgPrice) * netQty;
-        else if (netQty < 0) unrealized = (pos.sellAvg - ltp) * (-netQty);
-        const realized = pos.realizedPnl ?? 0;
-        return { ...pos, ltp, unrealizedPnl: unrealized, pnl: realized + unrealized };
-      }));
     };
     const onOptionOrderExecuted = () => {
       api.getOptionPositions().then(setOptPos).catch(() => {});
     };
+    // Server streams BOTH open equity positions and option positions,
+    // re-priced from live cached ticks, every 1s during market hours — real
+    // P&L movement with zero client polling, and no stale duplicate list.
+    const onPositionsTick = (data) => {
+      if (Array.isArray(data?.positions)) setPositions(data.positions.map(withPositionPnl));
+      if (Array.isArray(data?.optionPositions)) setOptPos(data.optionPositions);
+      // Squared-off rows keep their booked pnl frozen — only ltp moves here.
+      if (Array.isArray(data?.closedPositions)) setClosedPositions(data.closedPositions);
+      if (typeof data?.totalPnl === 'number') setTotalDayPnl(data.totalPnl);
+    };
     socket.on('orderExecuted', onOrderExecuted);
     socket.on('marketData', onMarketData);
     socket.on('optionOrderExecuted', onOptionOrderExecuted);
+    socket.on('positionsTick', onPositionsTick);
     return () => {
       socket.off('initialData', onInitialData);
       socket.off('orderExecuted', onOrderExecuted);
       socket.off('marketData', onMarketData);
       socket.off('optionOrderExecuted', onOptionOrderExecuted);
+      socket.off('positionsTick', onPositionsTick);
     };
   }, []);
 
@@ -142,11 +203,6 @@ export default function PortfolioScreen({ navigation }) {
   const hPnl      = current - invested;
   const hPnlGain  = hPnl >= 0;
   const hPnlPct   = invested > 0 ? (hPnl / invested) * 100 : 0;
-
-  // Positions Total P&L — derived so live (socket) re-pricing keeps it fresh.
-  const totalDayPnl = dayPositions.length
-    ? dayPositions.reduce((s, p) => s + (p.pnl ?? 0), 0)
-    : dayPnl;
 
   // Split number into whole + decimal for kite-pnl.png style
   const splitNum = (n) => {
@@ -216,21 +272,29 @@ export default function PortfolioScreen({ navigation }) {
     );
   };
 
-  // ── Render: Day position row (today's F&O trades) ───────────────
-  const renderDayPosition = ({ item }) => {
+  // ── Render: open equity position row (live PositionsModel, MIS/NRML) ────
+  // Long-press → square off at market. Data comes straight from the live
+  // position collection (via positionsTick), not a static day-trade recap.
+  const renderPosition = ({ item }) => {
     const isGain   = item.pnl >= 0;
-    const pType    = item.productType ?? 'NRML';
+    const pType    = item.productType ?? 'MIS';
     const badge    = BADGE[pType] ?? BADGE.NRML;
     const exchange = getExchange(item.stockSymbol);
-    const isClosed = item.isSquaredOff;
+    const isShort  = item.quantity < 0;
 
     return (
-      <TouchableOpacity style={[styles.row, isClosed && styles.rowClosed]} activeOpacity={0.75}>
+      <TouchableOpacity
+        style={styles.row}
+        activeOpacity={0.75}
+        onLongPress={() => squareOffEquity(item)}
+        delayLongPress={350}
+      >
         {/* Line 1: Qty (blue) + Avg   |   badge */}
         <View style={styles.rowLine1}>
           <Text style={styles.rowMeta}>
             <Text style={styles.metaLabel}>Qty. </Text>
             <Text style={styles.metaQty}>{item.quantity}</Text>
+            {isShort && <Text style={styles.shortTag}> SHORT</Text>}
             {'   '}
             <Text style={styles.metaLabel}>Avg. </Text>
             <Text style={styles.metaVal}>{fmt2(item.avgPrice)}</Text>
@@ -257,28 +321,96 @@ export default function PortfolioScreen({ navigation }) {
           </Text>
         </View>
 
-        {/* Realized vs unrealized breakdown for open positions */}
-        {!isClosed && (item.unrealizedPnl != null) && (
-          <View style={styles.pnlBreakdown}>
-            <Text style={styles.breakdownTxt}>
-              Realised <Text style={styles.breakdownVal}>{fmt2(item.realizedPnl ?? 0)}</Text>
-            </Text>
-            <Text style={styles.breakdownTxt}>
-              Unrealised{' '}
-              <Text style={[styles.breakdownVal, { color: (item.unrealizedPnl ?? 0) >= 0 ? colors.gain : colors.loss }]}>
-                {(item.unrealizedPnl ?? 0) >= 0 ? '+' : ''}{fmt2(item.unrealizedPnl ?? 0)}
-              </Text>
-            </Text>
-          </View>
-        )}
-
-        {/* Squared-off chip */}
-        {item.isSquaredOff && (
-          <View style={styles.squaredOffChip}>
-            <Text style={styles.squaredOffTxt}>Squared off</Text>
-          </View>
-        )}
+        <Text style={styles.longPressHint}>Hold to square off</Text>
       </TouchableOpacity>
+    );
+  };
+
+  // ── Render: open F&O position row (merged into the same Positions list) ──
+  const renderOptionPosition = ({ item: pos }) => {
+    const pnl     = pos.pnl ?? 0;
+    const isGain  = pnl >= 0;
+    const isShort = pos.quantity < 0;
+    return (
+      <TouchableOpacity
+        style={styles.row}
+        activeOpacity={0.7}
+        onLongPress={() => squareOffOption(pos)}
+        delayLongPress={350}
+      >
+        <View style={styles.rowLine1}>
+          <Text style={styles.rowMeta}>
+            <Text style={styles.metaLabel}>Lots. </Text>
+            <Text style={styles.metaQty}>{pos.lots}</Text>
+            {isShort && <Text style={styles.shortTag}> SHORT</Text>}
+            {'   '}
+            <Text style={styles.metaLabel}>Avg. </Text>
+            <Text style={styles.metaVal}>{fmt2(pos.avgPremium)}</Text>
+          </Text>
+          <View style={[styles.badge, { backgroundColor: BADGE.NRML.bg }]}>
+            <Text style={[styles.badgeTxt, { color: BADGE.NRML.text }]}>F&O</Text>
+          </View>
+        </View>
+
+        <View style={styles.rowLine2}>
+          <Text style={styles.rowSymbol} numberOfLines={1}>{pos.symbol}</Text>
+          <Text style={[styles.rowPnl, { color: isGain ? colors.gain : colors.loss }]}>
+            {isGain ? '+' : ''}{pnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </Text>
+        </View>
+
+        <View style={styles.rowLine3}>
+          <Text style={styles.rowExchange}>{getExchange(pos.symbol)}</Text>
+          <Text style={styles.rowLtp}>
+            <Text style={styles.ltpLabel}>LTP </Text>
+            {fmt2(pos.ltp)}
+          </Text>
+        </View>
+
+        <Text style={styles.longPressHint}>Hold to square off</Text>
+      </TouchableOpacity>
+    );
+  };
+
+  // ── Render: squared-off position — frozen booked P&L, grey/shadow styling.
+  // No long-press (nothing left to close); LTP still shown live for
+  // reference but never feeds back into the pnl figure, which is exactly
+  // what was booked at the moment it closed.
+  const renderClosedPosition = ({ item: c }) => {
+    const isGain = c.pnl >= 0;
+    const isOption = c.kind === 'option';
+    return (
+      <View style={[styles.row, styles.closedRow]}>
+        <View style={styles.rowLine1}>
+          <Text style={styles.rowMeta}>
+            <Text style={styles.metaLabel}>{isOption ? 'Lots. ' : 'Qty. '}</Text>
+            <Text style={styles.metaQtyClosed}>{isOption ? c.lots : c.quantity}</Text>
+            {'   '}
+            <Text style={styles.metaLabel}>Avg. </Text>
+            <Text style={styles.metaVal}>{fmt2(c.avgPrice)}</Text>
+          </Text>
+          <View style={styles.closedBadge}>
+            <Text style={styles.closedBadgeTxt}>SQUARED OFF</Text>
+          </View>
+        </View>
+
+        <View style={styles.rowLine2}>
+          <Text style={[styles.rowSymbol, styles.closedTxt]} numberOfLines={1}>{c.symbol}</Text>
+          <Text style={[styles.rowPnl, { color: isGain ? colors.gain : colors.loss }]}>
+            {isGain ? '+' : ''}{c.pnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </Text>
+        </View>
+
+        <View style={styles.rowLine3}>
+          <Text style={styles.rowExchange}>{getExchange(c.symbol)}</Text>
+          <Text style={styles.rowLtp}>
+            <Text style={styles.ltpLabel}>LTP </Text>
+            {fmt2(c.ltp)}
+          </Text>
+        </View>
+
+        <Text style={styles.closedHint}>Booked · exited at {fmt2(c.exitPrice)}</Text>
+      </View>
     );
   };
 
@@ -317,9 +449,24 @@ export default function PortfolioScreen({ navigation }) {
 
   // ── Render ───────────────────────────────────────────────────────
   const isHoldings = tab === 0;
-  const listData   = isHoldings ? holdings : dayPositions;
-  const renderItem = isHoldings ? renderHolding : renderDayPosition;
-  const posCount   = dayPositions.length;
+  // Positions tab merges live equity + F&O positions AND today's squared-off
+  // positions into one scrollable list (tagged by _kind). Active positions
+  // stay on top and keep moving live; closed rows sit below, visually set
+  // apart by their own grey/shadow row styling (no separate section label).
+  const listData = isHoldings
+    ? holdings
+    : [
+        ...positions.map(p => ({ ...p, _kind: 'equity' })),
+        ...optionPositions.map(p => ({ ...p, _kind: 'option' })),
+        ...closedPositions.map(c => ({ ...c, _kind: 'closed' })),
+      ];
+  const renderItem = isHoldings
+    ? renderHolding
+    : ({ item }) => {
+        if (item._kind === 'closed') return renderClosedPosition({ item });
+        return item._kind === 'option' ? renderOptionPosition({ item }) : renderPosition({ item });
+      };
+  const posCount = positions.length + optionPositions.length;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -359,6 +506,7 @@ export default function PortfolioScreen({ navigation }) {
       </View>
 
       <FlatList
+        style={{ flex: 1 }}
         data={listData}
         keyExtractor={(item, i) => item._id ?? item.stockSymbol ?? String(i)}
         renderItem={renderItem}
@@ -430,38 +578,6 @@ export default function PortfolioScreen({ navigation }) {
           </View>
         }
       />
-
-      {/* ── Open F&O Positions (always visible if any) ── */}
-      {optionPositions.length > 0 && (
-        <View style={styles.optSection}>
-          <View style={styles.optHeader}>
-            <Text style={styles.optHeaderTxt}>F&O Positions ({optionPositions.length})</Text>
-            <TouchableOpacity onPress={() => navigation.navigate('OptionChain')}>
-              <Text style={styles.optTrade}>+ Trade</Text>
-            </TouchableOpacity>
-          </View>
-          {optionPositions.map(pos => {
-            const pnl    = pos.pnl ?? 0;
-            const isGain = pnl >= 0;
-            return (
-              <View key={pos._id} style={styles.optRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.optSymbol}>{pos.symbol}</Text>
-                  <Text style={styles.optMeta}>
-                    {pos.lots} lots × {pos.lotSize} = {pos.quantity} qty · Avg ₹{pos.avgPremium.toFixed(2)}
-                  </Text>
-                </View>
-                <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={[styles.optPnl, { color: isGain ? colors.gain : colors.loss }]}>
-                    {isGain ? '+' : ''}₹{Math.abs(pnl).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                  </Text>
-                  <Text style={styles.optLtp}>LTP ₹{(pos.ltp ?? 0).toFixed(2)}</Text>
-                </View>
-              </View>
-            );
-          })}
-        </View>
-      )}
 
       {/* Index FAB */}
       <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('IndexChart', { indexName: 'NIFTY 50' })}>
@@ -568,10 +684,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16, paddingTop: 13, paddingBottom: 10,
     borderBottomWidth: 1, borderBottomColor: '#F0F0F0',
   },
-  rowClosed: {
-    backgroundColor: '#F5F5F5',
-    opacity: 0.7,
+  shortTag: { color: colors.loss, fontWeight: '700', fontSize: 11 },
+
+  // ── Squared-off (closed) position row — frozen P&L, grey/shadow look ──
+  closedRow: {
+    backgroundColor: '#FAFAFA',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03, shadowRadius: 2, elevation: 0,
   },
+  closedTxt: { color: '#9CA3AF' },
+  metaQtyClosed: { color: '#9CA3AF', fontWeight: '400' },
+  closedBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, backgroundColor: '#EEEEEE' },
+  closedBadgeTxt: { fontSize: 9, fontWeight: '700', letterSpacing: 0.3, color: '#9CA3AF' },
+  closedHint: { fontSize: 10, color: '#B3BBBF', marginTop: 6, textAlign: 'center' },
+  longPressHint: { fontSize: 10, color: '#B3BBBF', marginTop: 6, textAlign: 'center' },
 
   rowLine1: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
@@ -612,21 +738,6 @@ const styles = StyleSheet.create({
   },
   btnExitTxt: { fontSize: 13, color: '#1E1E1E', fontWeight: '600' },
 
-  // Realized / unrealized breakdown (open day positions)
-  pnlBreakdown: {
-    flexDirection: 'row', justifyContent: 'flex-end', gap: 16, marginTop: 6,
-  },
-  breakdownTxt: { fontSize: 11, color: '#9CA3AF' },
-  breakdownVal: { color: '#1E1E1E', fontWeight: '500' },
-
-  // Squared-off chip (shown on day positions that are closed)
-  squaredOffChip: {
-    alignSelf: 'flex-end', marginTop: 6,
-    backgroundColor: '#F3F4F6', borderRadius: 4,
-    paddingHorizontal: 8, paddingVertical: 2,
-  },
-  squaredOffTxt: { fontSize: 11, color: '#6B7280', fontWeight: '500' },
-
   // Empty state
   empty: { alignItems: 'center', paddingTop: 80, gap: 8 },
   emptyTitle:    { fontSize: 15, fontWeight: '700', color: '#1E1E1E' },
@@ -643,28 +754,4 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08, shadowRadius: 4, elevation: 3,
   },
   fabTxt: { fontSize: 13, fontWeight: '700', color: colors.primary },
-
-  // ── F&O open positions panel ──
-  optSection: {
-    backgroundColor: '#fff',
-    marginHorizontal: 0,
-    borderTopWidth: 1, borderTopColor: '#E8E8E8',
-  },
-  optHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: 16, paddingVertical: 10,
-    borderBottomWidth: 1, borderBottomColor: '#F0F0F0',
-    backgroundColor: '#F8F9FF',
-  },
-  optHeaderTxt: { fontSize: 12, fontWeight: '700', color: '#4338CA', letterSpacing: 0.3 },
-  optTrade:     { fontSize: 12, fontWeight: '700', color: colors.primary },
-  optRow: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 16, paddingVertical: 10,
-    borderBottomWidth: 1, borderBottomColor: '#F0F0F0',
-  },
-  optSymbol: { fontSize: 13, fontWeight: '700', color: '#1E1E1E', marginBottom: 2 },
-  optMeta:   { fontSize: 11, color: '#738390' },
-  optPnl:    { fontSize: 14, fontWeight: '700', marginBottom: 2 },
-  optLtp:    { fontSize: 11, color: '#738390' },
 });

@@ -21,11 +21,14 @@ export default function ChatScreen({ navigation }) {
 
   useEffect(() => {
     const socket = getSocket();
-    socket.on('chatMessage', (msg) => {
+    // Named handler so cleanup removes only *this* listener, not every
+    // 'chatMessage' listener on the shared app-lifetime socket singleton.
+    const onChatMessage = (msg) => {
       setMessages(prev => [...prev, msg]);
       setTimeout(() => flatRef.current?.scrollToEnd({ animated: true }), 100);
-    });
-    return () => socket.off('chatMessage');
+    };
+    socket.on('chatMessage', onChatMessage);
+    return () => socket.off('chatMessage', onChatMessage);
   }, []);
 
   const sendMessage = () => {

@@ -15,7 +15,7 @@ import StockActionSheet from '../components/StockActionSheet';
 // changes (not when any other row in the list ticks). Keeps the list smooth
 // under the live websocket price stream.
 const StockRow = React.memo(function StockRow({
-  symbol, ltp, change, changePercent, onOpen, onLongPress, onBuy, onSell,
+  symbol, exchange, ltp, change, changePercent, onOpen, onLongPress,
 }) {
   const isGain = change >= 0;
   const hasPrice = ltp > 0;
@@ -24,7 +24,7 @@ const StockRow = React.memo(function StockRow({
     ? Number(ltp).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     : '—';
   const changeLine = hasPrice
-    ? `${isGain ? '+' : ''}${Number(change).toFixed(2)}  ${isGain ? '+' : ''}${Number(changePercent).toFixed(2)}%`
+    ? `${isGain ? '+' : ''}${Number(change).toFixed(2)} (${isGain ? '+' : ''}${Number(changePercent).toFixed(2)}%)`
     : '—';
 
   return (
@@ -37,25 +37,12 @@ const StockRow = React.memo(function StockRow({
     >
       <View style={styles.stockLeft}>
         <Text style={styles.stockSymbol} numberOfLines={1}>{symbol}</Text>
-        <View style={styles.stockMeta}>
-          <View style={styles.exchangeBadge}>
-            <Text style={styles.exchangeBadgeText}>NSE</Text>
-          </View>
-        </View>
+        <Text style={styles.exchangeBadgeText}>{exchange}</Text>
       </View>
 
       <View style={styles.stockRight}>
         <Text style={[styles.stockLtp, { color: changeColor }]}>{ltpFormatted}</Text>
-        <Text style={[styles.stockChange, { color: changeColor }]}>{changeLine}</Text>
-      </View>
-
-      <View style={styles.bsWrap}>
-        <TouchableOpacity style={styles.buyBtn} onPress={() => onBuy(symbol, ltp)} activeOpacity={0.8}>
-          <Text style={styles.bsBtnText}>B</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.sellBtn} onPress={() => onSell(symbol, ltp)} activeOpacity={0.8}>
-          <Text style={styles.bsBtnText}>S</Text>
-        </TouchableOpacity>
+        <Text style={styles.stockChange}>{changeLine}</Text>
       </View>
     </TouchableOpacity>
   );
@@ -95,11 +82,17 @@ export default function DashboardScreen({ navigation }) {
 
   useEffect(() => {
     const socket = getSocket();
-    socket.on('marketData', (data) => {
+    // Named handler so cleanup removes only *this* listener — `getSocket()`
+    // returns one app-lifetime singleton shared by every screen, so a bare
+    // `socket.off('marketData')` here would strip every other screen's
+    // 'marketData' listener too (IndexTicker, StockDetailScreen, etc.),
+    // silently freezing their live prices whenever this screen unmounts.
+    const onMarketData = (data) => {
       if (data.prices) setPrices(p => ({ ...p, ...data.prices }));
       if (data.indexes) setIndexes(data.indexes);
-    });
-    return () => socket.off('marketData');
+    };
+    socket.on('marketData', onMarketData);
+    return () => socket.off('marketData', onMarketData);
   }, []);
 
   useEffect(() => {
@@ -137,7 +130,7 @@ export default function DashboardScreen({ navigation }) {
           try {
             await api.removeStock(currentWL._id, symbol);
             setWatchlists(prev => prev.map(w =>
-              w._id === currentWL._id ? { ...w, stocks: w.stocks.filter(s => s !== symbol) } : w
+              w._id === currentWL._id ? { ...w, stocks: (w.stocks || []).filter(s => s !== symbol) } : w
             ));
           } catch {}
         }
@@ -207,14 +200,6 @@ export default function DashboardScreen({ navigation }) {
       navigation.navigate('StockDetail', { symbol, ltp, change, changePercent }),
     [navigation]
   );
-  const handleBuy = useCallback(
-    (symbol, ltp) => navigation.navigate('OrderEntry', { symbol, ltp, defaultSide: 'BUY' }),
-    [navigation]
-  );
-  const handleSell = useCallback(
-    (symbol, ltp) => navigation.navigate('OrderEntry', { symbol, ltp, defaultSide: 'SELL' }),
-    [navigation]
-  );
   const handleLongPress = useCallback((symbol) => openActionSheet(symbol), [prices]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const renderStockRow = useCallback(({ item: symbol }) => {
@@ -222,16 +207,15 @@ export default function DashboardScreen({ navigation }) {
     return (
       <StockRow
         symbol={symbol}
+        exchange="NSE"
         ltp={p.ltp ?? p.price ?? 0}
         change={p.change ?? 0}
         changePercent={p.changePercent ?? 0}
         onOpen={handleOpen}
         onLongPress={handleLongPress}
-        onBuy={handleBuy}
-        onSell={handleSell}
       />
     );
-  }, [prices, handleOpen, handleLongPress, handleBuy, handleSell]);
+  }, [prices, handleOpen, handleLongPress]);
 
   // ─── Empty state ──────────────────────────────────────────────────────────────
   const EmptyState = () => (
@@ -294,7 +278,7 @@ export default function DashboardScreen({ navigation }) {
       <View style={styles.searchBarWrap}>
         <TouchableOpacity style={styles.searchBox} onPress={openSearch} activeOpacity={0.8}>
           <Ionicons name="search-outline" size={18} color={colors.textMuted} />
-          <Text style={styles.searchPlaceholder}>Search & add</Text>
+          <Text style={styles.searchPlaceholder}>Search (eg: infy, bse, nifty fut)</Text>
           <Text style={styles.searchCount}>{stocks.length}/250</Text>
           <Ionicons name="options-outline" size={18} color={colors.textSecondary} style={{ marginLeft: 10 }} />
         </TouchableOpacity>
@@ -505,7 +489,7 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
   },
   tabTextActive: {
-    color: colors.text,
+    color: colors.primary,
     fontWeight: '700',
   },
   tabUnderline: {
@@ -519,15 +503,18 @@ const styles = StyleSheet.create({
   },
   // Manage groups (layers +) button
   layersBtn: {
-    width: 44, height: 44,
+    width: 36, height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.primaryLight, // #EFF6FF light-blue circle
     justifyContent: 'center', alignItems: 'center',
+    marginRight: 8,
   },
   layersPlus: {
-    position: 'absolute', top: 9, right: 6,
+    position: 'absolute', top: 3, right: 1,
     width: 13, height: 13, borderRadius: 7,
     backgroundColor: colors.primary,
     justifyContent: 'center', alignItems: 'center',
-    borderWidth: 1.5, borderColor: '#fff',
+    borderWidth: 1.5, borderColor: colors.primaryLight,
   },
 
   // ── Inline search & add box ───────────────────────────────────────────────
@@ -560,12 +547,16 @@ const styles = StyleSheet.create({
   },
 
   // ── Stock row ─────────────────────────────────────────────────────────────
+  // Matches the real Kite mobile app: plain symbol name + exchange tag on the
+  // left, colored LTP with a plain (uncolored) change line stacked on the
+  // right. No persistent buy/sell buttons — those live in the long-press
+  // action sheet, same as the real app.
   stockRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    minHeight: 54,
-    paddingLeft: 14,
-    paddingRight: 10,
+    justifyContent: 'space-between',
+    minHeight: 52,
+    paddingHorizontal: 14,
     paddingVertical: 10,
     backgroundColor: colors.surface,
     borderBottomWidth: 1,
@@ -576,73 +567,31 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   stockSymbol: {
-    fontSize: 14,
+    fontSize: 14.5,
     fontWeight: '400',
-    color: colors.text,              // #1E1E1E
+    color: colors.text,              // #1E1E1E — plain, not gain/loss colored
     letterSpacing: -0.2,
   },
-  stockMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 3,
-  },
-  exchangeBadge: {
-    borderRadius: 3,
-    borderWidth: 1,
-    borderColor: '#BFDBFE',
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    backgroundColor: '#EFF6FF',
-  },
   exchangeBadgeText: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: colors.primary,
-    letterSpacing: 0.2,
+    fontSize: 11,
+    fontWeight: '400',
+    color: colors.textSecondary,
+    marginTop: 2,
   },
   stockRight: {
     alignItems: 'flex-end',
-    marginRight: 10,
     minWidth: 96,
   },
   stockLtp: {
     fontSize: 14,
     fontWeight: '600',
-    color: colors.text,              // #1E1E1E
     letterSpacing: -0.1,
   },
   stockChange: {
-    fontSize: 11,
-    fontWeight: '500',
-    marginTop: 3,
-  },
-
-  // ── B / S buttons ─────────────────────────────────────────────────────────
-  bsWrap: {
-    flexDirection: 'row',
-    gap: 5,
-  },
-  buyBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 4,
-    backgroundColor: colors.gain,    // #25B87E
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  sellBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 4,
-    backgroundColor: colors.loss,    // #E64D3D
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  bsBtnText: {
     fontSize: 12,
-    fontWeight: '800',
-    color: '#FFFFFF',
-    lineHeight: 14,
+    fontWeight: '400',
+    color: colors.text,
+    marginTop: 2,
   },
 
   // ── Empty state ───────────────────────────────────────────────────────────

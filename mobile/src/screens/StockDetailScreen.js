@@ -1,37 +1,34 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   Dimensions, ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../theme/colors';
 import { api, getSocket } from '../api/client';
 import CandlestickChart from '../components/CandlestickChart';
+import TimeframeSheet, { ChartToolbar, useTimeframeFavorites } from '../components/TimeframeSheet';
 
 const { width } = Dimensions.get('window');
 
-const INTERVALS = [
-  { label: '1m',  value: '1m'  },
-  { label: '3m',  value: '3m'  },
-  { label: '5m',  value: '5m'  },
-  { label: '15m', value: '15m' },
-  { label: '30m', value: '30m' },
-  { label: '1h',  value: '1h'  },
-  { label: '1D',  value: '1d'  },
-  { label: '1W',  value: '1d'  },
-  { label: '1M',  value: '1d'  },
-];
-
 export default function StockDetailScreen({ route, navigation }) {
-  const { symbol } = route.params;
-  const [quote, setQuote] = useState(route.params || {});
+  // Guard against being reached with no params (deep link, notification tap,
+  // stale nav state) — every other params-consuming screen in the app does
+  // this; this one didn't, and `route.params` being undefined would red-
+  // screen-crash immediately on the destructure below.
+  const { symbol } = route?.params || {};
+  const [quote, setQuote] = useState(route?.params || {});
   const [candles, setCandles] = useState([]);
-  const [activeInterval, setActiveInterval] = useState('15m');
   const [candleInterval, setCandleInterval] = useState('15m');
+  const [tfSheetOpen, setTfSheetOpen] = useState(false);
+  const { favorites, toggleFavorite } = useTimeframeFavorites();
   const [chartLoading, setChartLoading] = useState(true);
   const [isWatchlisted, setIsWatchlisted] = useState(false);
   const insets = useSafeAreaInsets();
+  const candleIntervalRef = useRef(candleInterval);
+  candleIntervalRef.current = candleInterval;
 
   const fetchQuote = async () => {
     try {
@@ -50,10 +47,14 @@ export default function StockDetailScreen({ route, navigation }) {
     finally { setChartLoading(false); }
   };
 
-  useEffect(() => {
+  // Refetch quote + chart every time this screen regains focus (e.g. coming
+  // back from placing an order), not just on first mount.
+  useFocusEffect(useCallback(() => {
     fetchQuote();
-    fetchCandles(candleInterval);
+    fetchCandles(candleIntervalRef.current);
+  }, [symbol]));
 
+  useEffect(() => {
     const socket = getSocket();
     const handler = (data) => {
       if (data.prices?.[symbol]) setQuote(prev => ({ ...prev, ...data.prices[symbol] }));
@@ -62,10 +63,9 @@ export default function StockDetailScreen({ route, navigation }) {
     return () => socket.off('marketData', handler);
   }, [symbol]);
 
-  const changeInterval = (label, value) => {
-    setActiveInterval(label);
-    setCandleInterval(value);
-    fetchCandles(value);
+  const changeInterval = (tf) => {
+    setCandleInterval(tf.value);
+    fetchCandles(tf.value);
   };
 
   const ltp = quote?.ltp ?? quote?.price ?? 0;
@@ -147,6 +147,12 @@ export default function StockDetailScreen({ route, navigation }) {
 
         {/* ── Candlestick chart ── */}
         <View style={styles.chartContainer}>
+          <ChartToolbar
+            selected={candleInterval}
+            favorites={favorites}
+            onSelect={changeInterval}
+            onOpenSheet={() => setTfSheetOpen(true)}
+          />
           {chartLoading ? (
             <View style={[styles.chartPlaceholder, { width, height: 280 }]}>
               <ActivityIndicator color="#387ED1" />
@@ -162,27 +168,15 @@ export default function StockDetailScreen({ route, navigation }) {
           )}
         </View>
 
-        {/* ── Interval tabs ── */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.intervalRow}
-          contentContainerStyle={styles.intervalContent}
-        >
-          {INTERVALS.map(({ label, value }) => (
-            <TouchableOpacity
-              key={label}
-              style={styles.intervalBtn}
-              onPress={() => changeInterval(label, value)}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.intervalTxt, activeInterval === label && styles.intervalTxtActive]}>
-                {label}
-              </Text>
-              {activeInterval === label && <View style={styles.intervalUnderline} />}
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
+        {/* ── Timeframe picker sheet ── */}
+        <TimeframeSheet
+          visible={tfSheetOpen}
+          selected={candleInterval}
+          favorites={favorites}
+          onSelect={changeInterval}
+          onToggleFav={toggleFavorite}
+          onClose={() => setTfSheetOpen(false)}
+        />
 
         {/* ── OHLC card ── */}
         <View style={styles.card}>
