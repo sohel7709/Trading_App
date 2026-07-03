@@ -100,20 +100,23 @@ export default function OptionChainScreen({ navigation, route }) {
     return () => clearInterval(intervalRef.current);
   }, [selectedIndex]);
 
-  // Also update on socket marketData (index price changes)
+  // Also update on socket marketData (index price changes). `chain`'s
+  // truthiness check moved inside the functional setState updater instead
+  // of the effect's dependency array — having `chain` there meant this
+  // effect tore down and re-subscribed the listener on the shared,
+  // app-lifetime socket on every single update to `chain` (i.e. every
+  // marketData tick that touched it), instead of once per selectedIndex.
   useEffect(() => {
     const socket = getSocket();
     const handler = (data) => {
-      if (data.indexes && chain) {
-        const idxData = data.indexes[selectedIndex];
-        if (idxData) {
-          setChain(prev => prev ? { ...prev, indexPrice: idxData.ltp, indexChange: idxData.change, indexChangePercent: idxData.changePercent } : prev);
-        }
-      }
+      if (!data.indexes) return;
+      const idxData = data.indexes[selectedIndex];
+      if (!idxData) return;
+      setChain(prev => prev ? { ...prev, indexPrice: idxData.ltp, indexChange: idxData.change, indexChangePercent: idxData.changePercent } : prev);
     };
     socket.on('marketData', handler);
     return () => socket.off('marketData', handler);
-  }, [selectedIndex, chain]);
+  }, [selectedIndex]);
 
   const onExpiryChange = (exp) => {
     setSelectedExpiry(exp);

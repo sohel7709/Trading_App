@@ -212,15 +212,6 @@ export default function AppNavigator() {
         }}
       />
       <Tab.Screen
-        name="Markets"
-        component={MarketsStack}
-        options={{
-          tabBarIcon: ({ focused }) => (
-            <TabLabel icon="stats-chart" iconOutline="stats-chart-outline" focused={focused} label="Markets" />
-          ),
-        }}
-      />
-      <Tab.Screen
         name="Orders"
         component={OrdersStack}
         options={{

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, RefreshControl, ScrollView, Animated,
@@ -65,32 +65,37 @@ export default function MarketsScreen({ navigation }) {
     return () => socket.off('marketData', onMarketData);
   }, []);
 
-  const enriched = allStocks.map((s) => {
+  // These used to run unmemoized in the render body — `prices` gets a new
+  // object reference on every ~1s marketData tick, so mapping/filtering/
+  // sorting ~50 stocks was redone every second regardless of which tab was
+  // active or whether the screen was even focused (React Navigation keeps
+  // tab-root screens mounted in the background).
+  const enriched = useMemo(() => allStocks.map((s) => {
     const p = prices[s.symbol] || {};
     return { ...s, ltp: p.ltp ?? p.price ?? 0, change: p.change ?? 0, changePercent: p.changePercent ?? 0, high52w: p.high52w, low52w: p.low52w };
-  });
+  }), [allStocks, prices]);
 
-  const filtered = enriched.filter(s =>
+  const filtered = useMemo(() => enriched.filter(s =>
     s.symbol.includes(search.toUpperCase()) || s.name.toUpperCase().includes(search.toUpperCase())
-  );
+  ), [enriched, search]);
 
-  // Enrich mover items with full stock info
-  const enrichMover = (m) => {
-    const stockInfo = allStocks.find(s => s.symbol === m.symbol) || {};
-    return {
-      ...stockInfo,
-      symbol: m.symbol,
-      name: stockInfo.name || m.symbol,
-      sector: stockInfo.sector || '',
-      ltp: m.ltp ?? 0,
-      change: m.change ?? 0,
-      changePercent: m.changePercent ?? 0,
-      high52w: m.high52w,
-      low52w: m.low52w,
+  const data = useMemo(() => {
+    // Enrich mover items with full stock info
+    const enrichMover = (m) => {
+      const stockInfo = allStocks.find(s => s.symbol === m.symbol) || {};
+      return {
+        ...stockInfo,
+        symbol: m.symbol,
+        name: stockInfo.name || m.symbol,
+        sector: stockInfo.sector || '',
+        ltp: m.ltp ?? 0,
+        change: m.change ?? 0,
+        changePercent: m.changePercent ?? 0,
+        high52w: m.high52w,
+        low52w: m.low52w,
+      };
     };
-  };
 
-  const getTabData = () => {
     const q = search.toUpperCase();
     const searchFilter = (s) =>
       !q || s.symbol?.includes(q) || s.name?.toUpperCase().includes(q);
@@ -122,11 +127,9 @@ export default function MarketsScreen({ navigation }) {
         .filter(searchFilter).slice(0, 20);
     }
     return filtered;
-  };
+  }, [tab, search, enriched, filtered, movers, pricesLoaded, allStocks]);
 
   const isLoadingCategory = !pricesLoaded && tab > 0;
-
-  const data = getTabData();
 
   const renderStock = ({ item }) => {
     const isGain = item.change >= 0;

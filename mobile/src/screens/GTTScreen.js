@@ -217,6 +217,10 @@ export default function GTTScreen({ navigation }) {
         data={displayed}
         keyExtractor={(item, i) => item._id ?? String(i)}
         renderItem={({ item }) => <GTTRow item={item} onDelete={deleteGTT} />}
+        removeClippedSubviews
+        initialNumToRender={12}
+        maxToRenderPerBatch={10}
+        windowSize={7}
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl

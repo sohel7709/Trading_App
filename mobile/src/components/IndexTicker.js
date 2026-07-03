@@ -4,6 +4,35 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { api, getSocket } from '../api/client';
 
+// Hoisted out of IndexTicker (and memoized) so a `marketData` tick — which
+// gives `indexes` a new object identity every ~1s — doesn't redefine this
+// component and force React Native to unmount+remount every chip's native
+// view tree instead of just updating its text. IndexTicker is mounted
+// concurrently on 7+ screens, several of them permanently-mounted tab roots,
+// so this ran continuously in the background even while the user was
+// nowhere near it.
+const IndexItem = React.memo(function IndexItem({ name, data, compact, onPress }) {
+  const isGain = (data?.change ?? 0) >= 0;
+  const ltp    = Number(data?.ltp ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const change = Number(data?.change ?? 0).toFixed(2);
+  const pct    = Number(data?.changePercent ?? 0).toFixed(2);
+
+  return (
+    <TouchableOpacity
+      style={compact ? styles.indexItemCompact : styles.indexItem}
+      onPress={onPress}
+      disabled={!onPress}
+      activeOpacity={onPress ? 0.7 : 1}
+    >
+      <Text style={styles.indexName}>{name}</Text>
+      <Text style={[styles.indexLtp, { color: isGain ? colors.gain : colors.loss }]}>{ltp}</Text>
+      <Text style={[styles.indexChange, { color: isGain ? colors.gain : colors.loss }]}>
+        {isGain ? '+' : ''}{change} ({isGain ? '+' : ''}{pct}%)
+      </Text>
+    </TouchableOpacity>
+  );
+});
+
 export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
   const [indexes, setIndexes] = useState({});
   const [expanded, setExpanded] = useState(false);
@@ -45,35 +74,15 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
   const niftyIT   = merged['NIFTY IT'];
   const finNifty  = merged['FINNIFTY'];
 
-  const IndexItem = ({ name, data, compact }) => {
-    const isGain = (data?.change ?? 0) >= 0;
-    const ltp    = Number(data?.ltp ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const change = Number(data?.change ?? 0).toFixed(2);
-    const pct    = Number(data?.changePercent ?? 0).toFixed(2);
-
-    return (
-      <TouchableOpacity
-        style={compact ? styles.indexItemCompact : styles.indexItem}
-        onPress={() => onIndexPress && onIndexPress(name)}
-        disabled={!onIndexPress}
-        activeOpacity={onIndexPress ? 0.7 : 1}
-      >
-        <Text style={styles.indexName}>{name}</Text>
-        <Text style={[styles.indexLtp, { color: isGain ? colors.gain : colors.loss }]}>{ltp}</Text>
-        <Text style={[styles.indexChange, { color: isGain ? colors.gain : colors.loss }]}>
-          {isGain ? '+' : ''}{change} ({isGain ? '+' : ''}{pct}%)
-        </Text>
-      </TouchableOpacity>
-    );
-  };
+  const press = (name) => (onIndexPress ? () => onIndexPress(name) : undefined);
 
   return (
     <View>
       <TouchableOpacity style={styles.container} onPress={() => setExpanded(!expanded)} activeOpacity={0.85}>
         <View style={styles.row}>
-          {nifty50   && <IndexItem name="NIFTY 50"   data={nifty50} />}
-          {niftyBank && <IndexItem name="BANK NIFTY" data={niftyBank} />}
-          {sensex && !nifty50 && <IndexItem name="SENSEX" data={sensex} />}
+          {nifty50   && <IndexItem name="NIFTY 50"   data={nifty50}   onPress={press('NIFTY 50')} />}
+          {niftyBank && <IndexItem name="BANK NIFTY" data={niftyBank} onPress={press('BANK NIFTY')} />}
+          {sensex && !nifty50 && <IndexItem name="SENSEX" data={sensex} onPress={press('SENSEX')} />}
 
           <View style={styles.rightGroup}>
             <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textSecondary} />
@@ -84,14 +93,14 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
       {expanded && (
         <View style={styles.expandedContainer}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.expandedRow}>
-            {sensex   && <IndexItem name="SENSEX"   data={sensex}   compact />}
-            {niftyIT  && <IndexItem name="NIFTY IT" data={niftyIT}  compact />}
-            {finNifty && <IndexItem name="FINNIFTY" data={finNifty} compact />}
-            {merged['MIDCPNIFTY']    && <IndexItem name="MIDCPNIFTY"    data={merged['MIDCPNIFTY']}    compact />}
-            {merged['NIFTY NEXT 50'] && <IndexItem name="NIFTY NEXT 50" data={merged['NIFTY NEXT 50']} compact />}
-            {merged['BANKEX']        && <IndexItem name="BANKEX"        data={merged['BANKEX']}        compact />}
-            {merged['INDIA VIX']     && <IndexItem name="INDIA VIX"   data={merged['INDIA VIX']}   compact />}
-            {merged['NIFTY MIDCAP'] && <IndexItem name="MIDCAP"      data={merged['NIFTY MIDCAP']} compact />}
+            {sensex   && <IndexItem name="SENSEX"   data={sensex}   compact onPress={press('SENSEX')} />}
+            {niftyIT  && <IndexItem name="NIFTY IT" data={niftyIT}  compact onPress={press('NIFTY IT')} />}
+            {finNifty && <IndexItem name="FINNIFTY" data={finNifty} compact onPress={press('FINNIFTY')} />}
+            {merged['MIDCPNIFTY']    && <IndexItem name="MIDCPNIFTY"    data={merged['MIDCPNIFTY']}    compact onPress={press('MIDCPNIFTY')} />}
+            {merged['NIFTY NEXT 50'] && <IndexItem name="NIFTY NEXT 50" data={merged['NIFTY NEXT 50']} compact onPress={press('NIFTY NEXT 50')} />}
+            {merged['BANKEX']        && <IndexItem name="BANKEX"        data={merged['BANKEX']}        compact onPress={press('BANKEX')} />}
+            {merged['INDIA VIX']     && <IndexItem name="INDIA VIX"   data={merged['INDIA VIX']}   compact onPress={press('INDIA VIX')} />}
+            {merged['NIFTY MIDCAP'] && <IndexItem name="MIDCAP"      data={merged['NIFTY MIDCAP']} compact onPress={press('NIFTY MIDCAP')} />}
           </ScrollView>
         </View>
       )}

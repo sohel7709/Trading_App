@@ -191,15 +191,18 @@ export default function IndexChartScreen({ route, navigation }) {
 
       if (chartRef.current) chartRef.current.updateLivePrice(price);
 
-      // Re-run pattern detection on updated last candle
+      // Re-run pattern detection on updated last candle — detectPatterns only
+      // ever reads the last 3 candles, so patch+pass just those instead of
+      // spreading the full array (100-500+ candles on longer timeframes)
+      // every single tick.
       if (candles.length > 0) {
-        const updated = [...candles];
-        const last = { ...updated[updated.length - 1] };
+        const n = candles.length;
+        const last = { ...candles[n - 1] };
         last.close = price;
         last.high = Math.max(last.high, price);
         last.low  = Math.min(last.low, price);
-        updated[updated.length - 1] = last;
-        setPatterns(detectPatterns(updated));
+        const tail = [candles[n - 3], candles[n - 2], last].filter(Boolean);
+        setPatterns(detectPatterns(tail));
       }
     };
     socket.on('marketData', handler);

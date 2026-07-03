@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   RefreshControl, Animated, Alert,
@@ -166,10 +166,26 @@ export default function PortfolioScreen({ navigation }) {
     const onMarketData = (data) => {
       if (data.indexes) setIndexes(data.indexes);
       if (!data.prices) return;
-      setHoldings(prev => prev.map(h => {
-        const p = data.prices[h.stockSymbol];
-        return p ? { ...h, ltp: p.ltp ?? h.ltp } : h;
-      }));
+      // Every tick carries the full tracked-symbol price snapshot, but most
+      // ticks don't move any of *this* user's holdings — the previous
+      // version unconditionally allocated a new array (and every row's new
+      // object) and called setState regardless, forcing the invested/
+      // current reduce below (and every row's re-render) to redo work 1x/
+      // sec even when nothing on screen actually changed. Returning the
+      // *same* array reference when nothing changed lets React bail out of
+      // the re-render entirely (Object.is check on setState).
+      setHoldings(prev => {
+        let changed = false;
+        const next = prev.map(h => {
+          const p = data.prices[h.stockSymbol];
+          if (p && p.ltp != null && p.ltp !== h.ltp) {
+            changed = true;
+            return { ...h, ltp: p.ltp };
+          }
+          return h;
+        });
+        return changed ? next : prev;
+      });
     };
     const onOptionOrderExecuted = () => {
       api.getOptionPositions().then(setOptPos).catch(() => {});
@@ -198,11 +214,21 @@ export default function PortfolioScreen({ navigation }) {
   }, []);
 
   // ── Holdings P&L summary (3-col kite-pnl style) ─────────────────
-  const invested  = holdings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
-  const current   = holdings.reduce((s, h) => s + h.ltp * h.quantity, 0);
-  const hPnl      = current - invested;
-  const hPnlGain  = hPnl >= 0;
-  const hPnlPct   = invested > 0 ? (hPnl / invested) * 100 : 0;
+  // Memoized on `holdings` specifically — this screen is a permanently-
+  // mounted tab root, so without this the reduce below re-ran on every
+  // render including ones triggered by unrelated positions/indexes ticks.
+  const { invested, current, hPnl, hPnlGain, hPnlPct } = useMemo(() => {
+    const inv = holdings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
+    const cur = holdings.reduce((s, h) => s + h.ltp * h.quantity, 0);
+    const pnl = cur - inv;
+    return {
+      invested: inv,
+      current: cur,
+      hPnl: pnl,
+      hPnlGain: pnl >= 0,
+      hPnlPct: inv > 0 ? (pnl / inv) * 100 : 0,
+    };
+  }, [holdings]);
 
   // Split number into whole + decimal for kite-pnl.png style
   const splitNum = (n) => {
@@ -510,6 +536,10 @@ export default function PortfolioScreen({ navigation }) {
         data={listData}
         keyExtractor={(item, i) => item._id ?? item.stockSymbol ?? String(i)}
         renderItem={renderItem}
+        removeClippedSubviews
+        initialNumToRender={12}
+        maxToRenderPerBatch={10}
+        windowSize={7}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchData(); }} />
         }

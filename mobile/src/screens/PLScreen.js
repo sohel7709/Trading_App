@@ -7,7 +7,14 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import * as FileSystem from 'expo-file-system';
+// expo-file-system v19 (this Expo SDK) replaced the old function-based API
+// (EncodingType, StorageAccessFramework, writeAsStringAsync, cacheDirectory)
+// with a new class-based File/Directory API under the default export — none
+// of the symbols this screen uses exist there anymore, so every download
+// (CSV/PDF/Excel) failed immediately on tap. The old API is still shipped,
+// just moved to this subpath, specifically so existing code doesn't need a
+// rewrite.
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as Print from 'expo-print';
 import XLSX from 'xlsx';
