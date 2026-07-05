@@ -6,6 +6,7 @@ const yahooFinance = (typeof _YF2 === 'function') ? new _YF2({ suppressNotices: 
 const liveDataService = require('./liveDataService');
 const dhanDataService = require('./dhanDataService');
 const candleDataService = require('./candleDataService');
+const { isMarketOpen } = require('./marketRules');
 
 // NSE symbols — used for Groww / Yahoo fallback
 const NSE_STOCK_SYMBOLS = [
@@ -93,8 +94,14 @@ async function ensurePrevClose(key, isIndex = false) {
         if (candles && candles.length >= 2) {
             const last = candles[candles.length - 1];
             const lastDate = new Date(last.time * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-            // If the last daily candle is today's, the previous close is the one before it
-            const prevClose = lastDate === today ? candles[candles.length - 2].close : last.close;
+            // While the market is open and today's candle is still forming, the
+            // previous close is the day before it. Otherwise — market closed for
+            // the day, weekend, or holiday — the LTP itself already equals the
+            // last completed session's close, so "previous close" (the reference
+            // for today's/last session's % change) is the one before *that*.
+            const prevClose = (isMarketOpen() && lastDate !== today)
+                ? last.close
+                : candles[candles.length - 2].close;
             prevCloseStore[key] = { date: today, prevClose };
             return prevClose;
         }

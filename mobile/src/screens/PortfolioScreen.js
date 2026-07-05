@@ -200,11 +200,21 @@ export default function PortfolioScreen({ navigation }) {
       if (Array.isArray(data?.closedPositions)) setClosedPositions(data.closedPositions);
       if (typeof data?.totalPnl === 'number') setTotalDayPnl(data.totalPnl);
     };
+    // A dropped connection (backend restart, network blip, app backgrounded)
+    // leaves `holdings`/`indexes` frozen at whatever the last tick was until
+    // the next marketData broadcast arrives. Reconnecting via socket.io fires
+    // 'connect' again (including on auto-reconnect, not just first mount), so
+    // forcing a REST refetch there guarantees fresh DB+live-priced data right
+    // away instead of silently waiting for the next tick.
+    const onConnect = () => fetchData();
+    socket.on('connect', onConnect);
+
     socket.on('orderExecuted', onOrderExecuted);
     socket.on('marketData', onMarketData);
     socket.on('optionOrderExecuted', onOptionOrderExecuted);
     socket.on('positionsTick', onPositionsTick);
     return () => {
+      socket.off('connect', onConnect);
       socket.off('initialData', onInitialData);
       socket.off('orderExecuted', onOrderExecuted);
       socket.off('marketData', onMarketData);

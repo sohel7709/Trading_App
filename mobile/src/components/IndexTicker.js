@@ -38,14 +38,16 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
-    // Skip the network fetch when the parent already supplies indexes
-    if (!propIndexes || Object.keys(propIndexes).length === 0) {
+    const refetch = () => {
+      // Skip the network fetch when the parent already supplies indexes
+      if (propIndexes && Object.keys(propIndexes).length > 0) return;
       api.getIndexes().then(res => {
         if (res?.indexes && Object.keys(res.indexes).length > 0) {
           setIndexes(res.indexes);
         }
       }).catch(() => {});
-    }
+    };
+    refetch();
 
     const socket = getSocket();
     const handler = (data) => {
@@ -54,7 +56,14 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
       }
     };
     socket.on('marketData', handler);
-    return () => socket.off('marketData', handler);
+    // A dropped/reconnected socket (backend restart, network blip) would
+    // otherwise leave `indexes` frozen at the last tick until the next
+    // broadcast — refetch on every (re)connect so it self-heals immediately.
+    socket.on('connect', refetch);
+    return () => {
+      socket.off('marketData', handler);
+      socket.off('connect', refetch);
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {

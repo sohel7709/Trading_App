@@ -1,6 +1,8 @@
 // Candle data service
 // Uses yahoo-finance2 v3 chart() API for real OHLCV data
-// Falls back to simulated data when market is closed / API fails
+// Live-data only: when the market is closed or Yahoo has nothing for the
+// requested window, we widen the lookback and/or serve the last real
+// historical candles we cached — never synthetic/simulated data.
 
 const yf2 = require('yahoo-finance2');
 const YahooFinance = yf2.default;
@@ -27,26 +29,6 @@ const INDEX_BASE_PRICES = {
     'SENSEX':     77155, 'NIFTY IT':   28810,
     'FINNIFTY':   26405, 'INDIA VIX':  13.2,
     'MIDCPNIFTY': 14564, 'NIFTY NEXT 50': 72363, 'BANKEX': 65494,
-};
-
-const SIMULATED_BASE_PRICES = {
-    'RELIANCE': 1332, 'TCS': 2223, 'HDFCBANK': 787,
-    'INFY': 1157, 'ICICIBANK': 1280, 'HINDUNILVR': 2417,
-    'KOTAKBANK': 1780, 'SBIN': 430, 'BHARTIARTL': 541,
-    'ITC': 207, 'LT': 3654, 'WIPRO': 577,
-    'AXISBANK': 1150, 'SUNPHARMA': 1870, 'M&M': 779,
-    'TITAN': 3450, 'ADANIENT': 2840, 'ADANIPORTS': 1350,
-    'NTPC': 245, 'MARUTI': 9750, 'POWERGRID': 315,
-    'TATAMOTORS': 985, 'HCLTECH': 1450, 'TATASTEEL': 142,
-    'ULTRACEMCO': 11250, 'ASIANPAINT': 3240, 'BAJFINANCE': 7120,
-    'NESTLEIND': 2840, 'ONGC': 116, 'JSWSTEEL': 985,
-    'TECHM': 1350, 'DIVISLAB': 5780, 'CIPLA': 1580,
-    'DRREDDY': 6350, 'GRASIM': 2480, 'HDFCLIFE': 640,
-    'SBILIFE': 1540, 'BPCL': 345, 'BAJAJFINSV': 1680,
-    'TATAPOWER': 124, 'KPITTECH': 266, 'COALINDIA': 245,
-    'EICHERMOT': 3850, 'BRITANNIA': 5420, 'HEROMOTOCO': 4150,
-    'HINDALCO': 635, 'APOLLOHOSP': 6750, 'INDUSINDBK': 1120,
-    'BAJAJ-AUTO': 5240, 'SHREECEM': 2580,
 };
 
 // How many days of data to request per interval (non-Yahoo intervals are aggregated from base intervals)
@@ -87,10 +69,10 @@ function aggregateCandles(candles, factor) {
 }
 
 // OHLCV cache: key → { candles, fetchedAt, source }
-// `source` ('yahoo' | 'simulated') lets the API surface whether a chart is
-// showing real market data or the synthetic fallback — without it, the two
-// look identical to the client and a Yahoo hiccup silently shows fake
-// candles under a live-looking LTP with no indication anything's off.
+// Also doubles as the "last known real data" store: when Yahoo is down or
+// the market is closed with nothing in the requested window, callers serve
+// straight from here instead of the TTL-gated path, so charts always show
+// real historical candles rather than going blank or synthetic.
 const cache = {};
 const CACHE_TTL = {
     '1m': 60e3, '3m': 60e3,
@@ -137,45 +119,9 @@ function getLastTickPrice(indexName) {
     return ticks[ticks.length - 1].price;
 }
 
-// ─── Simulated candle generators ─────────────────────────────────
-function seededRandom(seed) {
-    let s = seed;
-    return () => { s = (s * 16807 + 0) % 2147483647; return (s - 1) / 2147483646; };
-}
-
-function simulateCandles(basePrice, interval, count, seed = 42) {
-    const rng = seededRandom(seed);
-    const msMap = { '1m': 60e3, '5m': 5 * 60e3, '15m': 15 * 60e3, '1h': 3600e3, '1d': 86400e3 };
-    const intervalMs = msMap[interval] || 3600e3;
-    const volatility = basePrice * 0.0035;
-    const candles = [];
-    let price = basePrice * (0.85 + rng() * 0.3);
-    const now = Date.now();
-
-    for (let i = count - 1; i >= 0; i--) {
-        const time = Math.floor((now - i * intervalMs) / 1000);
-        const trend = (rng() - 0.48) * volatility;
-        const noise = (rng() - 0.5) * volatility * 2;
-        const open  = price;
-        const close = Math.max(0.01, open + trend);
-        const high  = Math.max(open, close) + Math.abs(noise) * rng();
-        const low   = Math.min(open, close) - Math.abs(noise) * rng();
-        candles.push({
-            time,
-            open:   Math.round(open  * 100) / 100,
-            high:   Math.round(high  * 100) / 100,
-            low:    Math.round(low   * 100) / 100,
-            close:  Math.round(close * 100) / 100,
-            volume: Math.floor(500000 + rng() * 2000000),
-        });
-        price = close;
-    }
-    return candles;
-}
-
 // ─── Yahoo Finance fetcher (v3 chart API) ─────────────────────────
-async function fetchYahooCandles(yahooSymbol, interval) {
-    const days = PERIOD_DAYS[interval] || 365;
+async function fetchYahooCandles(yahooSymbol, interval, daysOverride) {
+    const days = daysOverride || PERIOD_DAYS[interval] || 365;
     const period2 = new Date();
     const period1 = new Date(); period1.setDate(period1.getDate() - days);
 
@@ -233,7 +179,13 @@ async function generateCandles(symbol, interval) {
     }
 
     const yahooSym = `${normSymbol}.NS`;
-    const candles = await fetchYahooCandles(yahooSym, interval);
+    let candles = await fetchYahooCandles(yahooSym, interval);
+
+    // Market closed / no candles in the default window (e.g. weekend, holiday) —
+    // widen the lookback so we still surface the last real trading session.
+    if ((!candles || candles.length <= 5) && (PERIOD_DAYS[interval] || 365) < 7) {
+        candles = await fetchYahooCandles(yahooSym, interval, 7);
+    }
 
     if (candles && candles.length > 5) {
         console.log(`[Candles] ${symbol} (${interval}): ${candles.length} candles from Yahoo`);
@@ -241,13 +193,15 @@ async function generateCandles(symbol, interval) {
         return candles;
     }
 
-    // Simulated fallback
-    const basePrice = SIMULATED_BASE_PRICES[symbol.toUpperCase()] || 1000;
-    const counts = { '1m': 300, '5m': 200, '15m': 150, '1h': 200, '1d': 365 };
-    const seed = symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-    const simulated = simulateCandles(basePrice, interval, counts[interval] || 200, seed);
-    cache[cacheKey] = { candles: simulated, fetchedAt: now, source: 'simulated' };
-    return simulated;
+    // Yahoo unavailable — serve the last real historical candles we have
+    // rather than fabricating data.
+    if (cache[cacheKey]) {
+        console.log(`[Candles] ${symbol} (${interval}): Yahoo unavailable, serving last cached historical data`);
+        return cache[cacheKey].candles;
+    }
+
+    console.log(`[Candles] ${symbol} (${interval}): no real data available`);
+    return [];
 }
 
 // ─── Public: index candles ────────────────────────────────────────
@@ -286,7 +240,14 @@ async function generateIndexCandles(indexName, interval) {
 
     const yahooSym = INDEX_YAHOO_MAP[normalised];
     if (yahooSym) {
-        const candles = await fetchYahooCandles(yahooSym, interval);
+        let candles = await fetchYahooCandles(yahooSym, interval);
+
+        // Market closed / no candles in the default window — widen the
+        // lookback so we still surface the last real trading session.
+        if ((!candles || candles.length <= 5) && (PERIOD_DAYS[interval] || 365) < 7) {
+            candles = await fetchYahooCandles(yahooSym, interval, 7);
+        }
+
         if (candles && candles.length > 5) {
             console.log(`[Candles] ${normalised} (${interval}): ${candles.length} candles from Yahoo`);
             cache[cacheKey] = { candles, fetchedAt: now, source: 'yahoo' };
@@ -294,13 +255,15 @@ async function generateIndexCandles(indexName, interval) {
         }
     }
 
-    // Simulated fallback
-    const basePrice = INDEX_BASE_PRICES[normalised] || 22450;
-    const counts = { '1m': 390, '5m': 200, '15m': 150, '1h': 200, '1d': 365 };
-    const seed = normalised.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-    const simulated = simulateCandles(basePrice, interval, counts[interval] || 200, seed);
-    cache[cacheKey] = { candles: simulated, fetchedAt: now, source: 'simulated' };
-    return simulated;
+    // Yahoo unavailable — serve the last real historical candles we have
+    // rather than fabricating data.
+    if (cache[cacheKey]) {
+        console.log(`[Candles] ${normalised} (${interval}): Yahoo unavailable, serving last cached historical data`);
+        return cache[cacheKey].candles;
+    }
+
+    console.log(`[Candles] ${normalised} (${interval}): no real data available`);
+    return [];
 }
 
 // Resolves the *actual* underlying cache entry's source for a given
