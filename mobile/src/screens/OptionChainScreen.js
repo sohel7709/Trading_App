@@ -85,7 +85,11 @@ export default function OptionChainScreen({ navigation, route }) {
     }
   }, [chain?.rows]);
 
-  // Initial load when index changes + auto-refresh every 5s
+  // Initial load when index changes + auto-refresh every 3s. The backend
+  // caches Dhan's option chain response for exactly 3000ms (shared across
+  // every connected client — see marketDataService.getOptionChain), so
+  // polling any faster wouldn't get fresher data; polling slower (this used
+  // to be 5s) just left up to 2s of already-available freshness unused.
   useEffect(() => {
     setLoading(true);
     setChain(null);
@@ -96,7 +100,7 @@ export default function OptionChainScreen({ navigation, route }) {
     fetchChain(null);
 
     clearInterval(intervalRef.current);
-    intervalRef.current = setInterval(() => fetchChain(undefined), 5000);
+    intervalRef.current = setInterval(() => fetchChain(undefined), 3000);
     return () => clearInterval(intervalRef.current);
   }, [selectedIndex]);
 
@@ -351,7 +355,6 @@ export default function OptionChainScreen({ navigation, route }) {
       {/* Live indicator */}
       <View style={styles.liveBar}>
         <View style={styles.liveDot} />
-        <Text style={styles.liveText}>Live · Auto-updates every 5s · Tap CE/PE to open order screen</Text>
         {chain?.lastUpdated && (
           <Text style={styles.liveTime}>
             {new Date(chain.lastUpdated).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -531,7 +534,6 @@ const styles = StyleSheet.create({
   liveDot: {
     width: 6, height: 6, borderRadius: 3, backgroundColor: colors.gain,
   },
-  liveText: { fontSize: 11, color: colors.textSecondary, flex: 1 },
   liveTime: { fontSize: 11, color: colors.textMuted },
 
   // Position indicator on chain cell
