@@ -1,17 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable,
-  Dimensions, ActivityIndicator, Animated,
+  useWindowDimensions, ActivityIndicator, Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { colors } from '../theme/colors';
 import { api, getSocket } from '../api/client';
-import CandlestickChart from '../components/CandlestickChart';
+import CandlestickChart, { intervalToSeconds } from '../components/CandlestickChart';
 import TimeframeSheet, { ChartToolbar, useTimeframeFavorites } from '../components/TimeframeSheet';
-
-const { width } = Dimensions.get('window');
 
 const INDICES = [
   { name: 'NIFTY 50',      short: 'NIFTY' },
@@ -123,6 +121,9 @@ function PatternCard({ pattern }) {
 
 // ─── Main Screen ─────────────────────────────────────────────────
 export default function IndexChartScreen({ route, navigation }) {
+  // Reactive window size — see StockDetailScreen.js for why a one-time
+  // `Dimensions.get('window')` at module load is the wrong tool here.
+  const { width } = useWindowDimensions();
   const initIndex = route?.params?.indexName || 'NIFTY 50';
   const [selectedIndex, setSelectedIndex] = useState(initIndex);
   const [quote, setQuote] = useState({});
@@ -322,6 +323,7 @@ export default function IndexChartScreen({ route, navigation }) {
               height={290}
               isGain={isGain}
               livePrice={livePrice}
+              intervalSeconds={intervalToSeconds(apiInterval)}
             />
           )}
 

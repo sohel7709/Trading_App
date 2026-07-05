@@ -3,6 +3,16 @@ import { View, StyleSheet, ActivityIndicator, Text } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { colors } from '../theme/colors';
 
+// Bucket size (seconds) for each timeframe value used across the app's
+// interval pickers — lets the live-tick handler know when to roll into a
+// new candle instead of extending the last one forever.
+const UNIT_SECONDS = { m: 60, h: 3600, d: 86400, w: 604800 };
+export function intervalToSeconds(interval) {
+  const match = /^(\d+)([mhdw])$/i.exec(interval || '');
+  if (!match) return 60;
+  return Number(match[1]) * (UNIT_SECONDS[match[2].toLowerCase()] || 60);
+}
+
 function toChartData(candles) {
   if (!candles || candles.length === 0) return { candles: [], volumes: [] };
 
@@ -39,7 +49,7 @@ function toChartData(candles) {
 }
 
 const CandlestickChart = forwardRef(function CandlestickChart(
-  { candles = [], width, height = 260, isGain = true, livePrice = null },
+  { candles = [], width, height = 260, isGain = true, livePrice = null, intervalSeconds = 60 },
   ref
 ) {
   const webViewRef = useRef(null);
@@ -192,18 +202,35 @@ const CandlestickChart = forwardRef(function CandlestickChart(
         tooltip.style.display='block';
       });
 
-      // Live price updates from React Native
+      // Live price updates from React Native. A tick landing inside the same
+      // bucket as the last candle just extends it (existing behaviour); a
+      // tick landing in a NEW bucket (e.g. the next minute/hour has started)
+      // must open a fresh candle instead — previously this always mutated
+      // the last candle forever, so the newest bar could sit "melted" and
+      // increasingly stale relative to wall-clock time between data refreshes.
+      var intervalSeconds = ${intervalSeconds};
+      function bucketStart(epochSec) {
+        return Math.floor(epochSec / intervalSeconds) * intervalSeconds;
+      }
       function handleLiveUpdate(price) {
         if(!candleSeries || !candleData.length) return;
         var last = candleData[candleData.length - 1];
-        var updated = {
-          time: last.time,
-          open: last.open,
-          high: Math.max(last.high, price),
-          low:  Math.min(last.low,  price),
-          close: price,
-        };
-        candleSeries.update(updated);
+        var nowBucket = bucketStart(Math.floor(Date.now() / 1000));
+        if (nowBucket > last.time) {
+          var fresh = { time: nowBucket, open: price, high: price, low: price, close: price };
+          candleData.push(fresh);
+          candleSeries.update(fresh);
+        } else {
+          var updated = {
+            time: last.time,
+            open: last.open,
+            high: Math.max(last.high, price),
+            low:  Math.min(last.low,  price),
+            close: price,
+          };
+          candleData[candleData.length - 1] = updated;
+          candleSeries.update(updated);
+        }
       }
 
       // Android
@@ -225,7 +252,7 @@ const CandlestickChart = forwardRef(function CandlestickChart(
   </script>
 </body>
 </html>`;
-  }, [chartData, volumes, isGain]);
+  }, [chartData, volumes, isGain, intervalSeconds]);
 
   if (!candles || candles.length === 0) {
     return (

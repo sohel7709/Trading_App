@@ -305,6 +305,58 @@ async function fetchDhanLTP(symbols) {
     return results;
 }
 
+// ─── Historical daily candles (used to backfill real holding avg prices) ───
+
+/**
+ * Real daily OHLC history for one NSE equity symbol between two dates via
+ * Dhan's v2 historical charts endpoint. Returns an array of
+ * { date: 'YYYY-MM-DD', open, high, low, close, volume }, oldest first, or
+ * [] if Dhan isn't configured / the symbol has no security ID / the call
+ * fails — callers should treat that as "no real data available", not throw.
+ */
+async function fetchDhanHistoricalDaily(symbol, fromDate, toDate) {
+    if (!isConfigured()) return [];
+    if (!scripMasterLoaded) await loadScripMaster();
+
+    const securityId = securityIdMap[symbol];
+    if (!securityId) {
+        console.log(`[Dhan] No security ID for historical fetch: ${symbol}`);
+        return [];
+    }
+
+    try {
+        const res = await fetch(`${DHAN_BASE}/v2/charts/historical`, {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({
+                securityId: String(securityId),
+                exchangeSegment: 'NSE_EQ',
+                instrument: 'EQUITY',
+                expiryCode: 0,
+                fromDate,
+                toDate,
+            }),
+            signal: AbortSignal.timeout(15000),
+        });
+
+        if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            console.warn(`[Dhan] Historical API error ${res.status} for ${symbol}: ${body.slice(0, 150)}`);
+            return [];
+        }
+
+        const json = await res.json();
+        const { open = [], high = [], low = [], close = [], volume = [], timestamp = [] } = json || {};
+        return timestamp.map((ts, i) => ({
+            date: new Date(ts * 1000).toISOString().slice(0, 10),
+            open: open[i], high: high[i], low: low[i], close: close[i], volume: volume[i],
+        }));
+    } catch (e) {
+        console.warn(`[Dhan] Historical fetch error for ${symbol}: ${e.message}`);
+        return [];
+    }
+}
+
 // ─── BSE quote (on-demand, e.g. NSE/BSE toggle on the order entry screen) ────
 
 /**
@@ -614,5 +666,6 @@ module.exports = {
     fetchDhanExpiryList,
     fetchDhanOptionChain,
     fetchDhanBseQuote,
+    fetchDhanHistoricalDaily,
     INDEX_SECURITY_IDS,
 };

@@ -1,19 +1,25 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Dimensions, ActivityIndicator,
+  useWindowDimensions, ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../theme/colors';
 import { api, getSocket } from '../api/client';
-import CandlestickChart from '../components/CandlestickChart';
+import CandlestickChart, { intervalToSeconds } from '../components/CandlestickChart';
 import TimeframeSheet, { ChartToolbar, useTimeframeFavorites } from '../components/TimeframeSheet';
 
-const { width } = Dimensions.get('window');
+const INTRADAY_INTERVALS = ['1m', '2m', '3m', '4m', '5m', '10m', '15m', '30m', '1h', '2h', '3h', '4h'];
 
 export default function StockDetailScreen({ route, navigation }) {
+  // `useWindowDimensions` (reactive) instead of a one-time `Dimensions.get`
+  // at module load — the old value was captured once for the life of the
+  // JS bundle and never updated for the device the app actually ended up
+  // running on if it changed (split-screen/multi-window resize, a foldable
+  // unfolding, or a tablet), leaving the chart permanently mis-sized.
+  const { width } = useWindowDimensions();
   // Guard against being reached with no params (deep link, notification tap,
   // stale nav state) — every other params-consuming screen in the app does
   // this; this one didn't, and `route.params` being undefined would red-
@@ -25,10 +31,12 @@ export default function StockDetailScreen({ route, navigation }) {
   const [tfSheetOpen, setTfSheetOpen] = useState(false);
   const { favorites, toggleFavorite } = useTimeframeFavorites();
   const [chartLoading, setChartLoading] = useState(true);
+  const [candleSource, setCandleSource] = useState(null);
   const [isWatchlisted, setIsWatchlisted] = useState(false);
   const insets = useSafeAreaInsets();
   const candleIntervalRef = useRef(candleInterval);
   candleIntervalRef.current = candleInterval;
+  const chartRef = useRef(null);
 
   const fetchQuote = async () => {
     try {
@@ -43,6 +51,7 @@ export default function StockDetailScreen({ route, navigation }) {
     try {
       const res = await api.getCandles(symbol, ivl);
       setCandles(res.candles || []);
+      setCandleSource(res.candleSource ?? null);
     } catch {}
     finally { setChartLoading(false); }
   };
@@ -54,10 +63,25 @@ export default function StockDetailScreen({ route, navigation }) {
     fetchCandles(candleIntervalRef.current);
   }, [symbol]));
 
+  // Auto-refresh the candle set every 30s for intraday intervals — without
+  // this, a viewer who lingers on the screen only ever sees whatever candles
+  // were fetched on the last focus, while the LTP above keeps moving live.
+  useEffect(() => {
+    if (!INTRADAY_INTERVALS.includes(candleInterval)) return;
+    const t = setInterval(() => fetchCandles(candleInterval), 30000);
+    return () => clearInterval(t);
+  }, [symbol, candleInterval]);
+
   useEffect(() => {
     const socket = getSocket();
     const handler = (data) => {
-      if (data.prices?.[symbol]) setQuote(prev => ({ ...prev, ...data.prices[symbol] }));
+      const price = data.prices?.[symbol];
+      if (!price) return;
+      setQuote(prev => ({ ...prev, ...price }));
+      // Patch the chart's last candle immediately — previously the LTP text
+      // above updated live but the chart itself stayed frozen at whatever
+      // was fetched on last focus, so price and candle visibly disagreed.
+      if (price.ltp) chartRef.current?.updateLivePrice(price.ltp);
     };
     socket.on('marketData', handler);
     return () => socket.off('marketData', handler);
@@ -153,6 +177,11 @@ export default function StockDetailScreen({ route, navigation }) {
             onSelect={changeInterval}
             onOpenSheet={() => setTfSheetOpen(true)}
           />
+          {candleSource === 'simulated' && !chartLoading && (
+            <View style={styles.simulatedBadge}>
+              <Text style={styles.simulatedBadgeTxt}>Showing simulated data — live feed unavailable</Text>
+            </View>
+          )}
           {chartLoading ? (
             <View style={[styles.chartPlaceholder, { width, height: 280 }]}>
               <ActivityIndicator color="#387ED1" />
@@ -160,10 +189,13 @@ export default function StockDetailScreen({ route, navigation }) {
             </View>
           ) : (
             <CandlestickChart
+              ref={chartRef}
               candles={candles}
               width={width}
               height={280}
               isGain={isGain}
+              livePrice={ltp}
+              intervalSeconds={intervalToSeconds(candleInterval)}
             />
           )}
         </View>
@@ -351,6 +383,12 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   chartLoadingTxt: { fontSize: 13, color: '#B3BBBF' },
+  simulatedBadge: {
+    backgroundColor: '#FFF7ED',
+    paddingHorizontal: 12, paddingVertical: 5,
+    borderBottomWidth: 1, borderBottomColor: '#E8E8E8',
+  },
+  simulatedBadgeTxt: { fontSize: 10, color: '#EA580C', fontWeight: '600' },
 
   // ── Interval tabs ──
   intervalRow: {

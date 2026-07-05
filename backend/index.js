@@ -1864,7 +1864,8 @@ app.get('/market/index-candles/:indexName', async (req, res) => {
         const candles = await candleDataService.generateIndexCandles(indexName, interval);
         const indexData = marketDataService.getIndexData();
         const quote = indexData[indexName] || {};
-        res.status(200).json({ indexName, interval, candles, quote });
+        const candleSource = candleDataService.getCandleSource('index', indexName, interval);
+        res.status(200).json({ indexName, interval, candles, quote, candleSource });
     } catch (err) {
         res.status(500).json({ message: 'Error fetching index candles', error: err.message });
     }
@@ -1933,7 +1934,8 @@ app.get('/market/candles/:symbol', async (req, res) => {
 
     try {
         const candles = await candleDataService.generateCandles(symbol, candleInterval);
-        res.status(200).json({ symbol: symbol.toUpperCase(), interval: candleInterval, candles });
+        const candleSource = candleDataService.getCandleSource('stock', symbol, candleInterval);
+        res.status(200).json({ symbol: symbol.toUpperCase(), interval: candleInterval, candles, candleSource });
     } catch (err) {
         res.status(500).json({ message: 'Error fetching candles', error: err.message });
     }

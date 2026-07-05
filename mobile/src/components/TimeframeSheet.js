@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Modal,
-  ScrollView, Dimensions,
+  ScrollView, useWindowDimensions,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-
-const { height: SCREEN_H } = Dimensions.get('window');
 
 // TradingView-style timeframe menu. `value` is what the backend candle API
 // accepts; `short` is the compact toolbar label.
@@ -56,11 +54,16 @@ export function useTimeframeFavorites() {
 
 // ─── Bottom sheet (mirrors the TradingView interval picker) ──────────────────
 export default function TimeframeSheet({ visible, selected, favorites, onSelect, onToggleFav, onClose }) {
+  // Reactive window size — see StockDetailScreen.js for why a one-time
+  // `Dimensions.get('window')` at module load is the wrong tool here (this
+  // sheet's max height needs to actually match the device it's on, not
+  // whatever the first device to ever load this bundle happened to report).
+  const { height: screenH } = useWindowDimensions();
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={styles.overlayWrap}>
         <TouchableOpacity style={styles.overlay} activeOpacity={1} onPress={onClose} />
-        <View style={styles.sheet}>
+        <View style={[styles.sheet, { maxHeight: screenH * 0.78 }]}>
           <View style={styles.handle} />
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }}>
             {SECTIONS.map(section => (
@@ -144,7 +147,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
-    maxHeight: SCREEN_H * 0.78,
     paddingTop: 8,
   },
   handle: {

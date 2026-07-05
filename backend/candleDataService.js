@@ -86,7 +86,11 @@ function aggregateCandles(candles, factor) {
     return out;
 }
 
-// OHLCV cache: key → { candles, fetchedAt }
+// OHLCV cache: key → { candles, fetchedAt, source }
+// `source` ('yahoo' | 'simulated') lets the API surface whether a chart is
+// showing real market data or the synthetic fallback — without it, the two
+// look identical to the client and a Yahoo hiccup silently shows fake
+// candles under a live-looking LTP with no indication anything's off.
 const cache = {};
 const CACHE_TTL = {
     '1m': 60e3, '3m': 60e3,
@@ -215,7 +219,7 @@ async function generateCandles(symbol, interval) {
         // For intraday intervals, patch the last candle with the latest live
         // tick so the candle keeps moving between Yahoo TTL refreshes.
         const candles = [...cache[cacheKey].candles];
-        if (['1m', '5m', '15m'].includes(interval)) {
+        if (['1m', '5m', '15m', '1h', '1d'].includes(interval)) {
             const livePrice = getLastTickPrice(normSymbol);
             if (livePrice && candles.length > 0) {
                 const last = { ...candles[candles.length - 1] };
@@ -233,7 +237,7 @@ async function generateCandles(symbol, interval) {
 
     if (candles && candles.length > 5) {
         console.log(`[Candles] ${symbol} (${interval}): ${candles.length} candles from Yahoo`);
-        cache[cacheKey] = { candles, fetchedAt: now };
+        cache[cacheKey] = { candles, fetchedAt: now, source: 'yahoo' };
         return candles;
     }
 
@@ -242,7 +246,7 @@ async function generateCandles(symbol, interval) {
     const counts = { '1m': 300, '5m': 200, '15m': 150, '1h': 200, '1d': 365 };
     const seed = symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
     const simulated = simulateCandles(basePrice, interval, counts[interval] || 200, seed);
-    cache[cacheKey] = { candles: simulated, fetchedAt: now };
+    cache[cacheKey] = { candles: simulated, fetchedAt: now, source: 'simulated' };
     return simulated;
 }
 
@@ -267,7 +271,7 @@ async function generateIndexCandles(indexName, interval) {
     if (cache[cacheKey] && (now - cache[cacheKey].fetchedAt) < ttl) {
         // For intraday intervals, patch the last candle with live tick
         const candles = [...cache[cacheKey].candles];
-        if (['1m', '5m', '15m'].includes(interval)) {
+        if (['1m', '5m', '15m', '1h', '1d'].includes(interval)) {
             const livePrice = getLastTickPrice(normalised);
             if (livePrice && candles.length > 0) {
                 const last = { ...candles[candles.length - 1] };
@@ -285,7 +289,7 @@ async function generateIndexCandles(indexName, interval) {
         const candles = await fetchYahooCandles(yahooSym, interval);
         if (candles && candles.length > 5) {
             console.log(`[Candles] ${normalised} (${interval}): ${candles.length} candles from Yahoo`);
-            cache[cacheKey] = { candles, fetchedAt: now };
+            cache[cacheKey] = { candles, fetchedAt: now, source: 'yahoo' };
             return candles;
         }
     }
@@ -295,8 +299,23 @@ async function generateIndexCandles(indexName, interval) {
     const counts = { '1m': 390, '5m': 200, '15m': 150, '1h': 200, '1d': 365 };
     const seed = normalised.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
     const simulated = simulateCandles(basePrice, interval, counts[interval] || 200, seed);
-    cache[cacheKey] = { candles: simulated, fetchedAt: now };
+    cache[cacheKey] = { candles: simulated, fetchedAt: now, source: 'simulated' };
     return simulated;
+}
+
+// Resolves the *actual* underlying cache entry's source for a given
+// (type, symbol, interval), following the aggregate-interval -> base-interval
+// mapping so 2h/3h/4h/30m/10m/3m/1w report the real source of the data they
+// were built from instead of always looking unset.
+function getCandleSource(type, symbolOrIndex, interval) {
+    const resolved = AGGREGATE_MAP[interval] ? AGGREGATE_MAP[interval].base : interval;
+    const key = type === 'index'
+        ? `INDEX_${Object.keys(INDEX_BASE_PRICES).find(
+              k => k.toUpperCase() === symbolOrIndex.toUpperCase() ||
+                   k.replace(/ /g, '') === symbolOrIndex.replace(/ /g, '').toUpperCase()
+          ) || 'NIFTY 50'}_${resolved}`
+        : `STOCK_${symbolOrIndex.toUpperCase()}_${resolved}`;
+    return cache[key]?.source ?? null;
 }
 
 // ─── Public: get live accumulated candles from ticks ─────────────
@@ -309,6 +328,7 @@ module.exports = {
     generateIndexCandles,
     getLiveCandles,
     recordTick,
+    getCandleSource,
     INDEX_BASE_PRICES,
     SUPPORTED_INTERVALS,
 };
