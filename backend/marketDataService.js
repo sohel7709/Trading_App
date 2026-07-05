@@ -513,6 +513,11 @@ async function getOptionChain(indexName, expiry) {
 
     const hit = optionChainCache[key];
     if (hit && Date.now() - hit.at < 3000) return hit.data;
+    // Market closed and we already have a snapshot for this key — nothing
+    // can have actually traded, so skip the Dhan round-trip entirely rather
+    // than burning an API call (and any transient variance in what it
+    // returns) just to re-serve data that should be sitting perfectly still.
+    if (hit && !isMarketOpen()) return hit.data;
     if (chainInflight.has(key)) return chainInflight.get(key);
 
     const p = (async () => {
@@ -544,9 +549,21 @@ async function getOptionChain(indexName, expiry) {
             }
         }
         if (!data) {
-            data = generateOptionChainForIndex(indexName, resolvedExpiry);
-            data.expiries = expiries;
-            data.source = 'SIMULATED';
+            // Outside market hours (or when Dhan has nothing), reuse whatever
+            // was last generated for this key instead of rolling fresh
+            // Math.random() IV/OI/volume/change every time the 3s cache
+            // expires — otherwise the chain visibly "updates" every few
+            // seconds with pure noise even while the market is closed and
+            // nothing has actually moved. Only regenerate when there's truly
+            // no prior snapshot yet, or the market is genuinely open (real
+            // Dhan data merely gapped for one cycle).
+            if (!isMarketOpen() && optionChainCache[key]?.data) {
+                data = optionChainCache[key].data;
+            } else {
+                data = generateOptionChainForIndex(indexName, resolvedExpiry);
+                data.expiries = expiries;
+                data.source = 'SIMULATED';
+            }
         }
         optionChainCache[key] = { at: Date.now(), data };
         return data;
