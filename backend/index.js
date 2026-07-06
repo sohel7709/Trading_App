@@ -2873,10 +2873,14 @@ app.get('/admin/test-dhan-historical', async (req, res) => {
         } catch (e) { out[label] = { error: e.message }; }
     }
 
-    await tryFetch('equity_daily_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', expiryCode: 0, fromDate: '2026-06-15', toDate: '2026-06-25' });
-    await tryIntraday('equity_5m_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', interval: '5', fromDate: '2026-07-01', toDate: '2026-07-05' });
-    await tryFetch('index_daily_NIFTY', { securityId: '13', exchangeSegment: 'IDX_I', instrument: 'INDEX', expiryCode: 0, fromDate: '2026-06-15', toDate: '2026-06-25' });
-    await tryIntraday('index_5m_NIFTY', { securityId: '13', exchangeSegment: 'IDX_I', instrument: 'INDEX', interval: '5', fromDate: '2026-07-01', toDate: '2026-07-05' });
+    const today = new Date();
+    const toDate = today.toISOString().slice(0, 10);
+    const daysAgo = (n) => { const d = new Date(today); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
+
+    await tryIntraday('equity_60m_30d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', interval: '60', fromDate: daysAgo(30), toDate });
+    await tryIntraday('equity_15m_7d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', interval: '15', fromDate: daysAgo(7), toDate });
+    await tryIntraday('index_60m_30d_NIFTY', { securityId: '13', exchangeSegment: 'IDX_I', instrument: 'INDEX', interval: '60', fromDate: daysAgo(30), toDate });
+    await tryFetch('equity_daily_365d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', expiryCode: 0, fromDate: daysAgo(365), toDate });
 
     res.json(out);
 });
