@@ -2881,6 +2881,8 @@ app.get('/admin/test-dhan-historical', async (req, res) => {
     await tryIntraday('equity_15m_7d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', interval: '15', fromDate: daysAgo(7), toDate });
     await tryIntraday('index_60m_30d_NIFTY', { securityId: '13', exchangeSegment: 'IDX_I', instrument: 'INDEX', interval: '60', fromDate: daysAgo(30), toDate });
     await tryFetch('equity_daily_365d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', expiryCode: 0, fromDate: daysAgo(365), toDate });
+    await tryIntraday('equity_1m_1d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', interval: '1', fromDate: daysAgo(1), toDate });
+    await tryIntraday('index_1m_1d_NIFTY', { securityId: '13', exchangeSegment: 'IDX_I', instrument: 'INDEX', interval: '1', fromDate: daysAgo(1), toDate });
 
     res.json(out);
 });
