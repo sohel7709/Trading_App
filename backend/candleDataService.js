@@ -142,7 +142,13 @@ async function fetchYahooCandles(yahooSymbol, interval, daysOverride) {
             }))
             .filter((c, i, arr) => i === 0 || c.time !== arr[i - 1].time); // dedup
     } catch (e) {
-        console.log(`[Candles] Yahoo ${yahooSymbol} (${interval}) failed: ${e.message.substring(0, 80)}`);
+        // Node's fetch() wraps the real network error in `.cause` (DNS
+        // failure, connection reset, TLS error, etc.) and leaves `.message`
+        // as a useless generic "fetch failed" — logging only `.message`
+        // (as before) hid the actual reason a cloud host's outbound request
+        // to Yahoo was failing.
+        const cause = e.cause ? ` | cause: ${e.cause.code || e.cause.message || e.cause}` : '';
+        console.log(`[Candles] Yahoo ${yahooSymbol} (${interval}) failed: ${e.message.substring(0, 80)}${cause}`);
         return null;
     }
 }
