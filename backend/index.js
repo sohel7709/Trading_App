@@ -2843,50 +2843,6 @@ app.get('/admin/token-status', (req, res) => {
     res.json(tokenService.getTokenStatus());
 });
 
-// TEMPORARY diagnostic — checking whether Dhan's historical charts API works
-// with the freshly-renewed token (an earlier 401 test used a token that has
-// since expired, so it's inconclusive). Remove once confirmed either way.
-app.get('/admin/test-dhan-historical', async (req, res) => {
-    const out = {};
-    // tokenService.saveToken() keeps process.env.DHAN_ACCESS_TOKEN synced
-    // in-memory on every update, same as what dhanDataService.getHeaders()
-    // already reads for the quote calls that are succeeding — so this is
-    // the current live token, not a stale value.
-    const headers = {
-        'client-id': process.env.DHAN_CLIENT_ID || '',
-        'access-token': process.env.DHAN_ACCESS_TOKEN || '',
-        'Content-Type': 'application/json', 'Accept': 'application/json',
-    };
-
-    async function tryFetch(label, body) {
-        try {
-            const r = await fetch('https://api.dhan.co/v2/charts/historical', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
-            const text = await r.text();
-            out[label] = { status: r.status, body: text.slice(0, 300) };
-        } catch (e) { out[label] = { error: e.message }; }
-    }
-    async function tryIntraday(label, body) {
-        try {
-            const r = await fetch('https://api.dhan.co/v2/charts/intraday', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
-            const text = await r.text();
-            out[label] = { status: r.status, body: text.slice(0, 300) };
-        } catch (e) { out[label] = { error: e.message }; }
-    }
-
-    const today = new Date();
-    const toDate = today.toISOString().slice(0, 10);
-    const daysAgo = (n) => { const d = new Date(today); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
-
-    await tryIntraday('equity_60m_30d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', interval: '60', fromDate: daysAgo(30), toDate });
-    await tryIntraday('equity_15m_7d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', interval: '15', fromDate: daysAgo(7), toDate });
-    await tryIntraday('index_60m_30d_NIFTY', { securityId: '13', exchangeSegment: 'IDX_I', instrument: 'INDEX', interval: '60', fromDate: daysAgo(30), toDate });
-    await tryFetch('equity_daily_365d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', expiryCode: 0, fromDate: daysAgo(365), toDate });
-    await tryIntraday('equity_1m_1d_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', interval: '1', fromDate: daysAgo(1), toDate });
-    await tryIntraday('index_1m_1d_NIFTY', { securityId: '13', exchangeSegment: 'IDX_I', instrument: 'INDEX', interval: '1', fromDate: daysAgo(1), toDate });
-
-    res.json(out);
-});
-
 // ============ START SERVER ============
 server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);

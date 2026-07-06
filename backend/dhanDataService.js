@@ -305,56 +305,66 @@ async function fetchDhanLTP(symbols) {
     return results;
 }
 
-// ─── Historical daily candles (used to backfill real holding avg prices) ───
+// ─── Historical / intraday candles (primary candle source — see below) ────
 
 /**
- * Real daily OHLC history for one NSE equity symbol between two dates via
- * Dhan's v2 historical charts endpoint. Returns an array of
- * { date: 'YYYY-MM-DD', open, high, low, close, volume }, oldest first, or
- * [] if Dhan isn't configured / the symbol has no security ID / the call
- * fails — callers should treat that as "no real data available", not throw.
+ * Real OHLCV candles for one instrument between two dates via Dhan's v2
+ * charts API — /charts/historical for daily bars, /charts/intraday (with an
+ * `interval` in minutes) for anything intraday. Returns
+ * [{ time: epochSeconds, open, high, low, close, volume }], oldest first, or
+ * [] if Dhan isn't configured or the call fails — callers should treat that
+ * as "no real data available right now", not throw. Confirmed working for
+ * equity AND index instruments, daily ranges up to a year, and intraday
+ * ranges up to 30 days even at 1-minute granularity.
  */
-async function fetchDhanHistoricalDaily(symbol, fromDate, toDate) {
+async function fetchDhanChart({ securityId, exchangeSegment, instrument, fromDate, toDate, intervalMinutes }) {
     if (!isConfigured()) return [];
-    if (!scripMasterLoaded) await loadScripMaster();
 
-    const securityId = securityIdMap[symbol];
-    if (!securityId) {
-        console.log(`[Dhan] No security ID for historical fetch: ${symbol}`);
-        return [];
-    }
+    const isIntraday = !!intervalMinutes;
+    const url = `${DHAN_BASE}/v2/charts/${isIntraday ? 'intraday' : 'historical'}`;
+    const body = {
+        securityId: String(securityId), exchangeSegment, instrument,
+        ...(isIntraday ? { interval: String(intervalMinutes) } : { expiryCode: 0 }),
+        fromDate, toDate,
+    };
 
     try {
-        const res = await fetch(`${DHAN_BASE}/v2/charts/historical`, {
-            method: 'POST',
-            headers: getHeaders(),
-            body: JSON.stringify({
-                securityId: String(securityId),
-                exchangeSegment: 'NSE_EQ',
-                instrument: 'EQUITY',
-                expiryCode: 0,
-                fromDate,
-                toDate,
-            }),
+        const res = await fetch(url, {
+            method: 'POST', headers: getHeaders(), body: JSON.stringify(body),
             signal: AbortSignal.timeout(15000),
         });
 
         if (!res.ok) {
-            const body = await res.text().catch(() => '');
-            console.warn(`[Dhan] Historical API error ${res.status} for ${symbol}: ${body.slice(0, 150)}`);
+            const text = await res.text().catch(() => '');
+            console.warn(`[Dhan] Chart API error ${res.status} for ${securityId} (${intervalMinutes ? intervalMinutes + 'm' : '1d'}): ${text.slice(0, 150)}`);
             return [];
         }
 
         const json = await res.json();
         const { open = [], high = [], low = [], close = [], volume = [], timestamp = [] } = json || {};
-        return timestamp.map((ts, i) => ({
-            date: new Date(ts * 1000).toISOString().slice(0, 10),
-            open: open[i], high: high[i], low: low[i], close: close[i], volume: volume[i],
-        }));
+        return timestamp
+            .map((ts, i) => ({ time: ts, open: open[i], high: high[i], low: low[i], close: close[i], volume: volume[i] || 0 }))
+            .filter(c => c.open && c.high && c.low && c.close);
     } catch (e) {
-        console.warn(`[Dhan] Historical fetch error for ${symbol}: ${e.message}`);
+        console.warn(`[Dhan] Chart fetch error for ${securityId}: ${e.message}`);
         return [];
     }
+}
+
+/**
+ * Real daily OHLC history for one NSE equity symbol — thin wrapper over
+ * fetchDhanChart kept for the holdings avg-price backfill use case, which
+ * wants { date: 'YYYY-MM-DD', ... } rather than epoch-second `time`.
+ */
+async function fetchDhanHistoricalDaily(symbol, fromDate, toDate) {
+    if (!scripMasterLoaded) await loadScripMaster();
+    const securityId = securityIdMap[symbol];
+    if (!securityId) {
+        console.log(`[Dhan] No security ID for historical fetch: ${symbol}`);
+        return [];
+    }
+    const candles = await fetchDhanChart({ securityId, exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', fromDate, toDate });
+    return candles.map(c => ({ date: new Date(c.time * 1000).toISOString().slice(0, 10), open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume }));
 }
 
 // ─── BSE quote (on-demand, e.g. NSE/BSE toggle on the order entry screen) ────
@@ -667,5 +677,6 @@ module.exports = {
     fetchDhanOptionChain,
     fetchDhanBseQuote,
     fetchDhanHistoricalDaily,
+    fetchDhanChart,
     INDEX_SECURITY_IDS,
 };

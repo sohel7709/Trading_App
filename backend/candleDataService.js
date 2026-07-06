@@ -7,6 +7,21 @@
 const yf2 = require('yahoo-finance2');
 const YahooFinance = yf2.default;
 const yf = new YahooFinance({ suppressNotices: ['ripHistorical'], validation: { logErrors: false } });
+const dhanDataService = require('./dhanDataService');
+
+// Dhan is the primary candle source — confirmed reliable (real OHLCV, daily
+// ranges up to a year, intraday up to 30 days even at 1-minute granularity)
+// from this app's cloud host, unlike Yahoo Finance's chart API which times
+// out entirely from the same host (ETIMEDOUT — see fetchYahooCandles below).
+// Yahoo is kept as a fallback for symbols/indices Dhan has no security ID
+// for, or if Dhan itself has an outage.
+const DHAN_INTERVAL_MINUTES = { '1m': 1, '5m': 5, '15m': 15, '1h': 60 }; // no entry for '1d' — uses the daily endpoint
+
+function dhanDateRange(days) {
+    const toDate = new Date().toISOString().slice(0, 10);
+    const fromDate = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    return { fromDate, toDate };
+}
 
 // ─── Symbol maps ─────────────────────────────────────────────────
 const INDEX_YAHOO_MAP = {
@@ -184,6 +199,20 @@ async function generateCandles(symbol, interval) {
         return candles;
     }
 
+    const securityId = dhanDataService.getSecurityId(normSymbol);
+    if (securityId) {
+        const { fromDate, toDate } = dhanDateRange(PERIOD_DAYS[interval] || 365);
+        const dhanCandles = await dhanDataService.fetchDhanChart({
+            securityId, exchangeSegment: 'NSE_EQ', instrument: 'EQUITY',
+            fromDate, toDate, intervalMinutes: DHAN_INTERVAL_MINUTES[interval],
+        });
+        if (dhanCandles.length > 5) {
+            console.log(`[Candles] ${symbol} (${interval}): ${dhanCandles.length} candles from Dhan`);
+            cache[cacheKey] = { candles: dhanCandles, fetchedAt: now, source: 'dhan' };
+            return dhanCandles;
+        }
+    }
+
     const yahooSym = `${normSymbol}.NS`;
     let candles = await fetchYahooCandles(yahooSym, interval);
 
@@ -199,10 +228,10 @@ async function generateCandles(symbol, interval) {
         return candles;
     }
 
-    // Yahoo unavailable — serve the last real historical candles we have
-    // rather than fabricating data.
+    // Dhan and Yahoo both unavailable — serve the last real historical
+    // candles we have rather than fabricating data.
     if (cache[cacheKey]) {
-        console.log(`[Candles] ${symbol} (${interval}): Yahoo unavailable, serving last cached historical data`);
+        console.log(`[Candles] ${symbol} (${interval}): no live source available, serving last cached historical data`);
         return cache[cacheKey].candles;
     }
 
@@ -244,6 +273,20 @@ async function generateIndexCandles(indexName, interval) {
         return candles;
     }
 
+    const indexSecurityId = dhanDataService.INDEX_SECURITY_IDS[normalised];
+    if (indexSecurityId) {
+        const { fromDate, toDate } = dhanDateRange(PERIOD_DAYS[interval] || 365);
+        const dhanCandles = await dhanDataService.fetchDhanChart({
+            securityId: indexSecurityId, exchangeSegment: 'IDX_I', instrument: 'INDEX',
+            fromDate, toDate, intervalMinutes: DHAN_INTERVAL_MINUTES[interval],
+        });
+        if (dhanCandles.length > 5) {
+            console.log(`[Candles] ${normalised} (${interval}): ${dhanCandles.length} candles from Dhan`);
+            cache[cacheKey] = { candles: dhanCandles, fetchedAt: now, source: 'dhan' };
+            return dhanCandles;
+        }
+    }
+
     const yahooSym = INDEX_YAHOO_MAP[normalised];
     if (yahooSym) {
         let candles = await fetchYahooCandles(yahooSym, interval);
@@ -261,10 +304,10 @@ async function generateIndexCandles(indexName, interval) {
         }
     }
 
-    // Yahoo unavailable — serve the last real historical candles we have
-    // rather than fabricating data.
+    // Dhan and Yahoo both unavailable — serve the last real historical
+    // candles we have rather than fabricating data.
     if (cache[cacheKey]) {
-        console.log(`[Candles] ${normalised} (${interval}): Yahoo unavailable, serving last cached historical data`);
+        console.log(`[Candles] ${normalised} (${interval}): no live source available, serving last cached historical data`);
         return cache[cacheKey].candles;
     }
 
