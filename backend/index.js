@@ -2847,12 +2847,38 @@ app.get('/admin/token-status', (req, res) => {
 // with the freshly-renewed token (an earlier 401 test used a token that has
 // since expired, so it's inconclusive). Remove once confirmed either way.
 app.get('/admin/test-dhan-historical', async (req, res) => {
-    try {
-        const data = await dhanDataService.fetchDhanHistoricalDaily('SBIN', '2026-06-15', '2026-06-25');
-        res.json({ count: data.length, sample: data.slice(0, 3) });
-    } catch (e) {
-        res.status(500).json({ message: e.message });
+    const out = {};
+    // tokenService.saveToken() keeps process.env.DHAN_ACCESS_TOKEN synced
+    // in-memory on every update, same as what dhanDataService.getHeaders()
+    // already reads for the quote calls that are succeeding — so this is
+    // the current live token, not a stale value.
+    const headers = {
+        'client-id': process.env.DHAN_CLIENT_ID || '',
+        'access-token': process.env.DHAN_ACCESS_TOKEN || '',
+        'Content-Type': 'application/json', 'Accept': 'application/json',
+    };
+
+    async function tryFetch(label, body) {
+        try {
+            const r = await fetch('https://api.dhan.co/v2/charts/historical', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
+            const text = await r.text();
+            out[label] = { status: r.status, body: text.slice(0, 300) };
+        } catch (e) { out[label] = { error: e.message }; }
     }
+    async function tryIntraday(label, body) {
+        try {
+            const r = await fetch('https://api.dhan.co/v2/charts/intraday', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
+            const text = await r.text();
+            out[label] = { status: r.status, body: text.slice(0, 300) };
+        } catch (e) { out[label] = { error: e.message }; }
+    }
+
+    await tryFetch('equity_daily_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', expiryCode: 0, fromDate: '2026-06-15', toDate: '2026-06-25' });
+    await tryIntraday('equity_5m_SBIN', { securityId: '3045', exchangeSegment: 'NSE_EQ', instrument: 'EQUITY', interval: '5', fromDate: '2026-07-01', toDate: '2026-07-05' });
+    await tryFetch('index_daily_NIFTY', { securityId: '13', exchangeSegment: 'IDX_I', instrument: 'INDEX', expiryCode: 0, fromDate: '2026-06-15', toDate: '2026-06-25' });
+    await tryIntraday('index_5m_NIFTY', { securityId: '13', exchangeSegment: 'IDX_I', instrument: 'INDEX', interval: '5', fromDate: '2026-07-01', toDate: '2026-07-05' });
+
+    res.json(out);
 });
 
 // ============ START SERVER ============
