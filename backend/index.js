@@ -2843,6 +2843,18 @@ app.get('/admin/token-status', (req, res) => {
     res.json(tokenService.getTokenStatus());
 });
 
+// TEMPORARY diagnostic — checking whether Dhan's historical charts API works
+// with the freshly-renewed token (an earlier 401 test used a token that has
+// since expired, so it's inconclusive). Remove once confirmed either way.
+app.get('/admin/test-dhan-historical', async (req, res) => {
+    try {
+        const data = await dhanDataService.fetchDhanHistoricalDaily('SBIN', '2026-06-15', '2026-06-25');
+        res.json({ count: data.length, sample: data.slice(0, 3) });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+
 // ============ START SERVER ============
 server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
