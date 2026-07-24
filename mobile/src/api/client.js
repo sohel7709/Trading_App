@@ -6,7 +6,7 @@ import Constants from 'expo-constants';
 export const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL ||
   Constants.expoConfig?.extra?.apiUrl ||
-  'http://10.13.11.71:8080';
+  'http://10.101.64.71:8080';
 
 const get = async (path) => {
   const res = await fetch(`${BASE_URL}${path}`);

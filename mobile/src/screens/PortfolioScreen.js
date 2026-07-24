@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, Animated, Alert,
+  RefreshControl, Animated, Alert, Modal, TextInput, ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -66,6 +66,25 @@ export default function PortfolioScreen({ navigation }) {
   // sees currently-open positions, not the full closed trade log.
   const [totalDayPnl, setTotalDayPnl] = useState(0);
   const insets = useSafeAreaInsets();
+
+  // ── Holdings authorisation (CDSL TPIN flow) — visual-only simulation of
+  // real Kite's actual holdings-authorisation step. 'info' -> 'sending' ->
+  // 'otp' -> 'verifying' -> 'success', each transition on a short timer to
+  // read as a real network round-trip rather than an instant fake toggle.
+  const [authVisible, setAuthVisible] = useState(false);
+  const [authStep, setAuthStep]       = useState('info');
+  const [authOtp, setAuthOtp]         = useState('');
+
+  const openAuth = () => { setAuthStep('info'); setAuthOtp(''); setAuthVisible(true); };
+  const sendAuthOtp = () => {
+    setAuthStep('sending');
+    setTimeout(() => setAuthStep('otp'), 900);
+  };
+  const verifyAuthOtp = () => {
+    if (authOtp.length !== 6) return;
+    setAuthStep('verifying');
+    setTimeout(() => setAuthStep('success'), 1100);
+  };
 
   // ── Data fetch ──────────────────────────────────────────────────
   const fetchData = async () => {
@@ -626,7 +645,7 @@ export default function PortfolioScreen({ navigation }) {
           isHoldings && holdings.length > 0 ? (
             <TouchableOpacity
               style={styles.authRow}
-              onPress={() => Alert.alert('Authorisation', 'Not required in paper trading mode — real Kite uses this to authorise holdings for selling via CDSL/NSDL e-DIS.')}
+              onPress={openAuth}
             >
               <Ionicons name="lock-closed-outline" size={14} color={colors.primary} />
               <Text style={styles.authTxt}>Authorisation</Text>
@@ -661,6 +680,94 @@ export default function PortfolioScreen({ navigation }) {
       <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('IndexChart', { indexName: 'NIFTY 50' })}>
         <Ionicons name="trending-up" size={18} color={colors.primary} />
       </TouchableOpacity>
+
+      {/* Holdings authorisation — CDSL TPIN flow (visual simulation) */}
+      <Modal visible={authVisible} transparent animationType="slide" onRequestClose={() => setAuthVisible(false)}>
+        <View style={styles.authOverlayWrap}>
+          <TouchableOpacity style={styles.authOverlay} activeOpacity={1} onPress={() => setAuthVisible(false)} />
+          <View style={[styles.authSheet, { paddingBottom: (insets.bottom || 12) + 16 }]}>
+            <View style={styles.authHandle} />
+
+            {authStep === 'info' && (
+              <>
+                <View style={styles.authCdslBadge}>
+                  <Ionicons name="shield-checkmark" size={16} color="#387ED1" />
+                  <Text style={styles.authCdslBadgeTxt}>CDSL</Text>
+                </View>
+                <Text style={styles.authTitle}>Authorise holdings</Text>
+                <Text style={styles.authBody}>
+                  SEBI requires a one-time authorisation before holdings can be sold from your demat
+                  account. We'll send a 6-digit OTP to your registered mobile number linked with CDSL.
+                </Text>
+                <View style={styles.authInfoRow}>
+                  <Ionicons name="briefcase-outline" size={14} color="#738390" />
+                  <Text style={styles.authInfoTxt}>{holdings.length} holding{holdings.length === 1 ? '' : 's'} pending authorisation</Text>
+                </View>
+                <TouchableOpacity style={styles.authPrimaryBtn} onPress={sendAuthOtp} activeOpacity={0.85}>
+                  <Text style={styles.authPrimaryBtnTxt}>Send OTP</Text>
+                </TouchableOpacity>
+              </>
+            )}
+
+            {authStep === 'sending' && (
+              <View style={styles.authCenter}>
+                <ActivityIndicator color="#387ED1" size="large" />
+                <Text style={styles.authWaitTxt}>Requesting OTP from CDSL…</Text>
+              </View>
+            )}
+
+            {authStep === 'otp' && (
+              <>
+                <Text style={styles.authTitle}>Enter OTP</Text>
+                <Text style={styles.authBody}>OTP sent to your registered mobile number ending •••210</Text>
+                <TextInput
+                  style={styles.authOtpInput}
+                  value={authOtp}
+                  onChangeText={(t) => setAuthOtp(t.replace(/[^0-9]/g, '').slice(0, 6))}
+                  keyboardType="number-pad"
+                  maxLength={6}
+                  placeholder="••••••"
+                  placeholderTextColor="#B3BBBF"
+                  autoFocus
+                />
+                <TouchableOpacity onPress={sendAuthOtp}>
+                  <Text style={styles.authResendTxt}>Resend OTP</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.authPrimaryBtn, authOtp.length !== 6 && styles.authPrimaryBtnDisabled]}
+                  onPress={verifyAuthOtp}
+                  disabled={authOtp.length !== 6}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.authPrimaryBtnTxt}>Verify & Authorise</Text>
+                </TouchableOpacity>
+              </>
+            )}
+
+            {authStep === 'verifying' && (
+              <View style={styles.authCenter}>
+                <ActivityIndicator color="#387ED1" size="large" />
+                <Text style={styles.authWaitTxt}>Verifying with CDSL…</Text>
+              </View>
+            )}
+
+            {authStep === 'success' && (
+              <View style={styles.authCenter}>
+                <View style={styles.authSuccessIcon}>
+                  <Ionicons name="checkmark" size={28} color="#fff" />
+                </View>
+                <Text style={styles.authTitle}>Holdings authorised</Text>
+                <Text style={styles.authBody}>
+                  Your holdings are authorised for selling. This stays valid for today's trading session.
+                </Text>
+                <TouchableOpacity style={styles.authPrimaryBtn} onPress={() => setAuthVisible(false)} activeOpacity={0.85}>
+                  <Text style={styles.authPrimaryBtnTxt}>Done</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -870,4 +977,54 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08, shadowRadius: 4, elevation: 3,
   },
   fabTxt: { fontSize: 13, fontWeight: '700', color: colors.primary },
+
+  // ── Holdings authorisation sheet (CDSL TPIN flow) ──
+  authOverlayWrap: { flex: 1, justifyContent: 'flex-end' },
+  authOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  authSheet: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 16, borderTopRightRadius: 16,
+    paddingTop: 10, paddingHorizontal: 20,
+  },
+  authHandle: {
+    width: 40, height: 4, borderRadius: 2, backgroundColor: '#D1D5DB',
+    alignSelf: 'center', marginBottom: 16,
+  },
+  authCdslBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    alignSelf: 'flex-start',
+    backgroundColor: '#EAF2FC', borderRadius: 6,
+    paddingHorizontal: 8, paddingVertical: 4, marginBottom: 12,
+  },
+  authCdslBadgeTxt: { fontSize: 11, fontWeight: '700', color: '#387ED1', letterSpacing: 0.5 },
+  authTitle: { fontSize: 18, fontWeight: '700', color: '#1E1E1E', marginBottom: 8, textAlign: 'left' },
+  authBody: { fontSize: 13, color: '#738390', lineHeight: 19, marginBottom: 14 },
+  authInfoRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#F8F9FA', borderRadius: 8,
+    paddingHorizontal: 12, paddingVertical: 10, marginBottom: 18,
+  },
+  authInfoTxt: { fontSize: 12, color: '#738390' },
+  authPrimaryBtn: {
+    backgroundColor: '#387ED1', borderRadius: 8,
+    paddingVertical: 14, alignItems: 'center', marginBottom: 4,
+  },
+  authPrimaryBtnDisabled: { backgroundColor: '#B8D3F0' },
+  authPrimaryBtnTxt: { fontSize: 15, fontWeight: '700', color: '#fff' },
+  authOtpInput: {
+    borderWidth: 1.5, borderColor: '#E8E8E8', borderRadius: 8,
+    fontSize: 22, fontWeight: '700', letterSpacing: 12, color: '#1E1E1E',
+    textAlign: 'center', paddingVertical: 14, marginBottom: 12,
+  },
+  authResendTxt: { fontSize: 13, color: '#387ED1', fontWeight: '600', marginBottom: 18, textAlign: 'center' },
+  authCenter: { alignItems: 'center', paddingVertical: 20 },
+  authWaitTxt: { fontSize: 13, color: '#738390', marginTop: 14 },
+  authSuccessIcon: {
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: colors.gain,
+    alignItems: 'center', justifyContent: 'center', marginBottom: 14,
+  },
 });
