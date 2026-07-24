@@ -273,7 +273,7 @@ async function executeOrder(orderDoc, execPrice) {
 
     const holdingsWithLiveLtp = holdings.map(h => {
         const live = marketDataService.getStockPrice(h.stockSymbol);
-        return { ...h.toObject(), ltp: live?.ltp ?? h.ltp };
+        return { ...h.toObject(), ltp: live?.ltp ?? h.ltp, change: live?.change ?? 0, changePercent: live?.changePercent ?? 0 };
     });
 
     if (_io) {

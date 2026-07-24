@@ -178,9 +178,9 @@ export default function PortfolioScreen({ navigation }) {
         let changed = false;
         const next = prev.map(h => {
           const p = data.prices[h.stockSymbol];
-          if (p && p.ltp != null && p.ltp !== h.ltp) {
+          if (p && p.ltp != null && (p.ltp !== h.ltp || p.changePercent !== h.changePercent)) {
             changed = true;
-            return { ...h, ltp: p.ltp };
+            return { ...h, ltp: p.ltp, change: p.change ?? h.change, changePercent: p.changePercent ?? h.changePercent };
           }
           return h;
         });
@@ -227,32 +227,37 @@ export default function PortfolioScreen({ navigation }) {
   // Memoized on `holdings` specifically — this screen is a permanently-
   // mounted tab root, so without this the reduce below re-ran on every
   // render including ones triggered by unrelated positions/indexes ticks.
-  const { invested, current, hPnl, hPnlGain, hPnlPct } = useMemo(() => {
+  const { invested, current, hPnl, hPnlGain, hPnlPct, dayPnl, dayPnlGain, dayPnlPct } = useMemo(() => {
     const inv = holdings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
     const cur = holdings.reduce((s, h) => s + h.ltp * h.quantity, 0);
     const pnl = cur - inv;
+    // Day's P&L — today's price move only (item.change, from the live feed),
+    // not the holding's overall gain/loss since purchase. previous-close
+    // value is derived as current - dayPnl rather than stored separately.
+    const dPnl = holdings.reduce((s, h) => s + (h.change ?? 0) * h.quantity, 0);
+    const prevCloseValue = cur - dPnl;
     return {
       invested: inv,
       current: cur,
       hPnl: pnl,
       hPnlGain: pnl >= 0,
       hPnlPct: inv > 0 ? (pnl / inv) * 100 : 0,
+      dayPnl: dPnl,
+      dayPnlGain: dPnl >= 0,
+      dayPnlPct: prevCloseValue > 0 ? (dPnl / prevCloseValue) * 100 : 0,
     };
   }, [holdings]);
 
-  // Split number into whole + decimal for kite-pnl.png style
-  const splitNum = (n) => {
-    const s = Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const [w, d] = s.split('.');
-    return { w, d: d ?? '00' };
-  };
 
-  // ── Render: Holdings row ────────────────────────────────────────
+  // ── Render: Holdings row (matches real Kite's Holdings-tab row exactly:
+  // Qty/Avg + overall P&L%   |   Symbol + P&L   |   Invested + LTP(day%)) ──
   const renderHolding = ({ item }) => {
+    const invested = item.avgPrice * item.quantity;
     const pnl      = (item.ltp - item.avgPrice) * item.quantity;
     const isGain   = pnl >= 0;
-    const badge    = BADGE[item.productType] ?? BADGE.CNC;
-    const exchange = 'EQ';
+    const pnlPct   = invested > 0 ? (pnl / invested) * 100 : 0;
+    const dayPct   = item.changePercent ?? 0;
+    const dayGain  = dayPct >= 0;
 
     return (
       <TouchableOpacity
@@ -263,16 +268,13 @@ export default function PortfolioScreen({ navigation }) {
         <View style={styles.rowLine1}>
           <Text style={styles.rowMeta}>
             <Text style={styles.metaLabel}>Qty. </Text>
-            <Text style={styles.metaQty}>{item.quantity}</Text>
-            {'   '}
-            <Text style={styles.metaLabel}>Avg. </Text>
+            <Text style={styles.metaVal}>{item.quantity}</Text>
+            <Text style={styles.metaLabel}>  •  Avg. </Text>
             <Text style={styles.metaVal}>{fmt2(item.avgPrice)}</Text>
           </Text>
-          <View style={[styles.badge, { backgroundColor: badge.bg }]}>
-            <Text style={[styles.badgeTxt, { color: badge.text }]}>
-              {item.productType ?? 'CNC'}
-            </Text>
-          </View>
+          <Text style={[styles.rowPctSmall, { color: isGain ? colors.gain : colors.loss }]}>
+            {isGain ? '+' : ''}{pnlPct.toFixed(2)}%
+          </Text>
         </View>
 
         <View style={styles.rowLine2}>
@@ -283,26 +285,17 @@ export default function PortfolioScreen({ navigation }) {
         </View>
 
         <View style={styles.rowLine3}>
-          <Text style={styles.rowExchange}>{exchange}</Text>
+          <Text style={styles.rowExchange}>
+            <Text style={styles.ltpLabel}>Invested </Text>
+            {fmt2(invested)}
+          </Text>
           <Text style={styles.rowLtp}>
             <Text style={styles.ltpLabel}>LTP </Text>
-            {fmt2(item.ltp)}
+            {fmt2(item.ltp)}{' '}
+            <Text style={{ color: dayGain ? colors.gain : colors.loss }}>
+              ({dayGain ? '+' : ''}{dayPct.toFixed(2)}%)
+            </Text>
           </Text>
-        </View>
-
-        <View style={styles.rowActions}>
-          <TouchableOpacity
-            style={styles.btnAdd}
-            onPress={() => navigation.navigate('OrderEntry', { symbol: item.stockSymbol, ltp: item.ltp, defaultSide: 'BUY' })}
-          >
-            <Text style={styles.btnAddTxt}>Add more</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.btnExit}
-            onPress={() => navigation.navigate('OrderEntry', { symbol: item.stockSymbol, ltp: item.ltp, defaultSide: 'SELL', productType: item.productType })}
-          >
-            <Text style={styles.btnExitTxt}>Exit</Text>
-          </TouchableOpacity>
         </View>
       </TouchableOpacity>
     );
@@ -483,6 +476,37 @@ export default function PortfolioScreen({ navigation }) {
     </View>
   );
 
+  // ── Holdings toolbar (matches real Kite's Holdings-tab toolbar exactly:
+  // search, filter, lock  |  Equity segment  |  Family  |  Analytics) ──
+  const HoldingsToolbar = () => (
+    <View style={styles.toolbar}>
+      <View style={styles.toolLeft}>
+        <TouchableOpacity style={styles.toolBtn}>
+          <Ionicons name="search-outline" size={18} color={colors.primary} />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.toolBtn}>
+          <Ionicons name="options-outline" size={18} color={colors.primary} />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.toolBtn}>
+          <Ionicons name="lock-closed-outline" size={16} color={colors.primary} />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.segmentPill}>
+          <Text style={styles.segmentPillTxt}>Equity</Text>
+          <Ionicons name="chevron-down" size={12} color="#1E1E1E" />
+        </TouchableOpacity>
+      </View>
+      <View style={styles.toolRight}>
+        <TouchableOpacity style={styles.familyBtn}>
+          <Ionicons name="people-outline" size={16} color={colors.primary} />
+          <Text style={styles.familyTxt}>Family</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.analyticsCircle}>
+          <Ionicons name="analytics" size={13} color="#fff" />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+
   // ── Render ───────────────────────────────────────────────────────
   const isHoldings = tab === 0;
   // Positions tab merges live equity + F&O positions AND today's squared-off
@@ -556,40 +580,32 @@ export default function PortfolioScreen({ navigation }) {
         contentContainerStyle={{ flexGrow: 1, paddingBottom: 100 }}
         ListHeaderComponent={
           <>
-            {/* ── Holdings: 3-col kite-pnl.png card ── */}
+            {/* ── Holdings: Invested/Current row + P&L row (matches real Kite) ── */}
             {isHoldings ? (
-              <View style={styles.hPnlCard}>
-                {/* Col 1: Total investment */}
-                <View style={styles.hCol}>
-                  <View style={styles.hNumRow}>
-                    <Text style={styles.hNum}>{splitNum(invested).w}</Text>
-                    <Text style={styles.hDec}>.{splitNum(invested).d}</Text>
+              <View style={styles.summaryCard}>
+                <View style={styles.summaryRow}>
+                  <View>
+                    <Text style={styles.summaryLabel}>Invested</Text>
+                    <Text style={styles.summaryValue}>{fmt2(invested)}</Text>
                   </View>
-                  <Text style={styles.hLabel}>Total investment</Text>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={styles.summaryLabel}>Current</Text>
+                    <Text style={styles.summaryValue}>{fmt2(current)}</Text>
+                  </View>
                 </View>
-                <View style={styles.hDivider} />
-                {/* Col 2: Current value */}
-                <View style={styles.hCol}>
-                  <View style={styles.hNumRow}>
-                    <Text style={styles.hNum}>{splitNum(current).w}</Text>
-                    <Text style={styles.hDec}>.{splitNum(current).d}</Text>
-                  </View>
-                  <Text style={styles.hLabel}>Current value</Text>
-                </View>
-                <View style={styles.hDivider} />
-                {/* Col 3: P&L */}
-                <View style={[styles.hCol, { alignItems: 'flex-end' }]}>
-                  <View style={styles.hNumRow}>
-                    <Text style={[styles.hNum, { color: hPnlGain ? colors.gain : colors.loss }]}>
-                      {hPnlGain ? '+' : '-'}{splitNum(hPnl).w}
+                <View style={styles.summaryDivider} />
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>P&L</Text>
+                  <View style={styles.summaryPnlRow}>
+                    <Text style={[styles.summaryPnlValue, { color: hPnlGain ? colors.gain : colors.loss }]}>
+                      {hPnlGain ? '+' : '-'}{fmtINR(hPnl)}
                     </Text>
-                    <Text style={[styles.hDec, { color: hPnlGain ? colors.gain : colors.loss }]}>
-                      .{splitNum(hPnl).d}
-                    </Text>
+                    <View style={[styles.pctPill, { backgroundColor: hPnlGain ? '#E6F7EF' : '#FCEAE8' }]}>
+                      <Text style={[styles.pctPillTxt, { color: hPnlGain ? colors.gain : colors.loss }]}>
+                        {hPnlGain ? '+' : ''}{hPnlPct.toFixed(2)}%
+                      </Text>
+                    </View>
                   </View>
-                  <Text style={[styles.hLabel, { color: hPnlGain ? colors.gain : colors.loss }]}>
-                    {hPnlGain ? '+' : ''}{hPnlPct.toFixed(2)}%
-                  </Text>
                 </View>
               </View>
             ) : (
@@ -603,8 +619,19 @@ export default function PortfolioScreen({ navigation }) {
               </View>
             )}
 
-            <Toolbar />
+            {isHoldings ? <HoldingsToolbar /> : <Toolbar />}
           </>
+        }
+        ListFooterComponent={
+          isHoldings && holdings.length > 0 ? (
+            <TouchableOpacity
+              style={styles.authRow}
+              onPress={() => Alert.alert('Authorisation', 'Not required in paper trading mode — real Kite uses this to authorise holdings for selling via CDSL/NSDL e-DIS.')}
+            >
+              <Ionicons name="lock-closed-outline" size={14} color={colors.primary} />
+              <Text style={styles.authTxt}>Authorisation</Text>
+            </TouchableOpacity>
+          ) : null
         }
         ListEmptyComponent={
           <View style={styles.empty}>
@@ -618,6 +645,17 @@ export default function PortfolioScreen({ navigation }) {
           </View>
         }
       />
+
+      {/* Day's P&L footer bar — Holdings tab only, matches real Kite */}
+      {isHoldings && holdings.length > 0 && (
+        <View style={styles.dayPnlBar}>
+          <Text style={styles.dayPnlLabel}>Day's P&L</Text>
+          <Text style={[styles.dayPnlValue, { color: dayPnlGain ? colors.gain : colors.loss }]}>
+            {dayPnlGain ? '+' : ''}{fmtINR(dayPnl)}{'  '}
+            {dayPnlGain ? '+' : ''}{dayPnlPct.toFixed(2)}%
+          </Text>
+        </View>
+      )}
 
       {/* Index FAB */}
       <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('IndexChart', { indexName: 'NIFTY 50' })}>
@@ -661,20 +699,22 @@ const styles = StyleSheet.create({
   countTxtActive:  { color: '#fff' },
   tabLine: { height: 2, backgroundColor: '#387ED1', borderRadius: 1, width: '60%' },
 
-  // ── Holdings 3-col card (kite-pnl.png) ──
-  hPnlCard: {
-    flexDirection: 'row', alignItems: 'center',
+  // ── Holdings summary card — Invested/Current row, divider, P&L row
+  // (matches real Kite's Holdings-tab layout exactly) ──
+  summaryCard: {
     backgroundColor: '#fff',
     marginHorizontal: 12, marginTop: 10, marginBottom: 4,
     borderRadius: 8, borderWidth: 1, borderColor: '#E8E8E8',
-    paddingHorizontal: 12, paddingVertical: 14,
+    paddingHorizontal: 14, paddingVertical: 14,
   },
-  hCol:    { flex: 1 },
-  hNumRow: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 3 },
-  hNum:    { fontSize: 15, fontWeight: '400', color: '#1E1E1E' },
-  hDec:    { fontSize: 11, fontWeight: '400', color: '#1E1E1E', marginBottom: 1 },
-  hLabel:  { fontSize: 10, color: '#738390' },
-  hDivider:{ width: 1, height: 38, backgroundColor: '#E8E8E8', marginHorizontal: 8 },
+  summaryRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  summaryLabel: { fontSize: 12, color: '#738390', marginBottom: 4 },
+  summaryValue: { fontSize: 17, fontWeight: '600', color: '#1E1E1E' },
+  summaryDivider: { height: 1, backgroundColor: '#E8E8E8', marginVertical: 12 },
+  summaryPnlRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  summaryPnlValue: { fontSize: 17, fontWeight: '600' },
+  pctPill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
+  pctPillTxt: { fontSize: 12, fontWeight: '700' },
 
   // ── Positions single P&L card (exact from screenshot) ──
   posPnlCard: {
@@ -718,6 +758,41 @@ const styles = StyleSheet.create({
   toggleDotOn: { backgroundColor: '#387ED1' },
   toggleTxt: { fontSize: 13, color: '#738390', fontWeight: '500' },
 
+  // ── Holdings toolbar extras (Equity segment / Family / Analytics) ──
+  segmentPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    backgroundColor: '#F1F3F4', borderRadius: 12,
+    paddingHorizontal: 10, paddingVertical: 5, marginLeft: 4,
+  },
+  segmentPillTxt: { fontSize: 12, fontWeight: '600', color: '#1E1E1E' },
+  familyBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  familyTxt: { fontSize: 13, color: colors.primary, fontWeight: '500' },
+  analyticsCircle: {
+    width: 24, height: 24, borderRadius: 12,
+    backgroundColor: '#387ED1',
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  // ── Authorisation link (Holdings tab footer) ──
+  authRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#fff',
+    paddingHorizontal: 16, paddingVertical: 14,
+    borderBottomWidth: 1, borderBottomColor: '#F0F0F0',
+  },
+  authTxt: { fontSize: 13, color: colors.primary, fontWeight: '600' },
+
+  // ── Day's P&L bar (Holdings tab, pinned above the bottom tab nav) ──
+  dayPnlBar: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#fff',
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderTopWidth: 1, borderTopColor: '#E8E8E8',
+  },
+  dayPnlLabel: { fontSize: 13, color: '#738390' },
+  dayPnlValue: { fontSize: 13, fontWeight: '600' },
+
   // ── Position / Holding row ──
   row: {
     backgroundColor: '#fff',
@@ -757,6 +832,7 @@ const styles = StyleSheet.create({
   },
   rowSymbol: { fontSize: 14, fontWeight: '400', color: '#1E1E1E', flex: 1, marginRight: 8 },
   rowPnl:    { fontSize: 14, fontWeight: '400' },
+  rowPctSmall: { fontSize: 12, fontWeight: '500' },
 
   rowLine3: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',

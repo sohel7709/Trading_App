@@ -60,7 +60,15 @@ mongoose.connect(MONGO_URI)
 // socket tick corrected it.
 function withLiveLtp(doc) {
     const live = marketDataService.getStockPrice(doc.stockSymbol);
-    return { ...doc.toObject(), ltp: live?.ltp ?? doc.ltp };
+    return {
+        ...doc.toObject(),
+        ltp: live?.ltp ?? doc.ltp,
+        // Day's change (today's price move, NOT the holding's overall P&L) —
+        // needed for the Holdings screen's "LTP (day %)" row and the
+        // aggregate "Day's P&L" footer, same numbers real Kite shows.
+        change: live?.change ?? 0,
+        changePercent: live?.changePercent ?? 0,
+    };
 }
 
 // ============ HOLDINGS ============
