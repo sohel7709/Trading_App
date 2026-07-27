@@ -314,6 +314,21 @@ async function fastRefresh() {
                 }
             } else if (stockPrices[key]) {
                 const old = stockPrices[key];
+                // Sanity guard: a last-traded price must lie within the day's
+                // [low, high]. The 1s LTP endpoint and the 30s full-quote
+                // endpoint occasionally resolve a symbol (seen on LTIM) to
+                // inconsistent instruments, so the fast LTP can land far
+                // outside the quote's own OHLC — e.g. ltp 4190 while the day
+                // low is 4486, which is physically impossible and made Day's
+                // P&L visibly jump each time it flip-flopped. Allow a 4% band
+                // so genuine new highs/lows (which extend the range by well
+                // under 1% per tick) still pass, but reject the wild outliers.
+                if (old.high > 0 && old.low > 0) {
+                    const TOL = 0.04;
+                    if (val.ltp < old.low * (1 - TOL) || val.ltp > old.high * (1 + TOL)) {
+                        continue; // keep the last consistent (quote-derived) value
+                    }
+                }
                 const change    = val.ltp - (old.previousClose || old.ltp);
                 const chgPct    = old.previousClose > 0 ? (change / old.previousClose) * 100 : 0;
                 stockPrices[key] = {
