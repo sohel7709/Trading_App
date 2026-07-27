@@ -163,16 +163,14 @@ export default function PortfolioScreen({ navigation }) {
     const onOrderExecuted = (data) => {
       if (data.positions) setPositions(data.positions.map(withPositionPnl));
       if (data.holdings) {
-        // Merge incoming DB holdings with current live ltps so current value
-        // updates instantly without waiting for the next marketData tick.
-        setHoldings(prev => {
-          const ltpMap = {};
-          prev.forEach(h => { ltpMap[h.stockSymbol] = h.ltp; });
-          return data.holdings.map(h => ({
-            ...h,
-            ltp: ltpMap[h.stockSymbol] ?? h.ltp,
-          }));
-        });
+        // Use the server payload as-is. It's already live-priced from the same
+        // tick store (holdingsWithLiveLtp), so ltp/change/changePercent are
+        // mutually consistent. The old code overrode the fresh server ltp with
+        // the stale client ltp while keeping the fresh change/changePercent —
+        // that desynced the three: current value & overall P&L used the old
+        // ltp, but Day's P&L used change relative to the *new* ltp, so the
+        // numbers stopped reconciling (prevClose = ltp - change no longer held).
+        setHoldings(data.holdings);
       }
       if (data.order) {
         setFlashMsg(`${data.order.side} ${data.order.stockSymbol} executed`);
