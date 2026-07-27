@@ -195,9 +195,22 @@ export default function PortfolioScreen({ navigation }) {
         let changed = false;
         const next = prev.map(h => {
           const p = data.prices[h.stockSymbol];
-          if (p && p.ltp != null && (p.ltp !== h.ltp || p.changePercent !== h.changePercent)) {
+          if (p && p.ltp != null && p.ltp !== h.ltp) {
             changed = true;
-            return { ...h, ltp: p.ltp, change: p.change ?? h.change, changePercent: p.changePercent ?? h.changePercent };
+            // Keep ltp and change on the SAME price basis so overall P&L
+            // (derived from ltp) and Day's P&L (derived from change) can never
+            // drift apart. previous-close is fixed for the session, so derive
+            // it once and recompute change from the new ltp against it —
+            // rather than taking a new ltp but a stale `change`, which would
+            // desync the two. When the tick carries a server change we trust
+            // its prevClose; otherwise we reconstruct it from the last
+            // consistent snapshot (h.ltp - h.change).
+            const prevClose = (p.change != null)
+              ? (p.ltp - p.change)
+              : (h.ltp - (h.change ?? 0));
+            const change = p.ltp - prevClose;
+            const changePercent = prevClose ? (change / prevClose) * 100 : (h.changePercent ?? 0);
+            return { ...h, ltp: p.ltp, change, changePercent };
           }
           return h;
         });
