@@ -172,6 +172,23 @@ async function fetchQuote(symbol) {
     }
 }
 
+// Is a newly-fetched LTP believable? Guards against the bad-mapping ticks
+// where a Dhan endpoint returns a wrong-instrument price for a symbol (seen
+// on LTIM: real ~4190, but one feed returned ~4504 and it flip-flopped,
+// swinging Day's P&L by lakhs). A genuine trade moves incrementally, so:
+//  - against the last good price: reject a single jump beyond ±6% (an
+//    outlier that reverts is bad data; a real sustained move arrives as many
+//    small ticks the anchor follows through),
+//  - with no prior price yet (cold start): fall back to a ±10% circuit-style
+//    band around the day's previous close, which is reliable even when the
+//    live OHLC/LTP isn't.
+function isSaneTick(oldLtp, newLtp, prevClose) {
+    if (!(newLtp > 0)) return false;
+    if (oldLtp > 0)    return Math.abs(newLtp - oldLtp) / oldLtp <= 0.06;
+    if (prevClose > 0) return Math.abs(newLtp - prevClose) / prevClose <= 0.10;
+    return true;
+}
+
 // ─── Main fetch ───────────────────────────────────────────────────────────────
 
 async function fetchAllStockPrices() {
@@ -189,7 +206,13 @@ async function fetchAllStockPrices() {
                 const dhanData = await dhanDataService.fetchDhanStockQuotes(getTrackedSymbols());
                 if (Object.keys(dhanData).length > 0) {
                     for (const [sym, d] of Object.entries(dhanData)) {
-                        stockPrices[sym] = d;
+                        // Same outlier guard as fastRefresh — a wrong-instrument
+                        // quote (e.g. LTIM's ~4504 vs its real ~4190) must not
+                        // clobber the good live price and its OHLC.
+                        const prev = stockPrices[sym];
+                        if (isSaneTick(prev?.ltp, d.ltp, d.previousClose ?? prev?.previousClose)) {
+                            stockPrices[sym] = d;
+                        }
                     }
                     gotLiveStocks = true;
                     console.log(`[Market] Dhan stocks: ${Object.keys(dhanData).length}`);
@@ -314,29 +337,27 @@ async function fastRefresh() {
                 }
             } else if (stockPrices[key]) {
                 const old = stockPrices[key];
-                // Sanity guard: a last-traded price must lie within the day's
-                // [low, high]. The 1s LTP endpoint and the 30s full-quote
-                // endpoint occasionally resolve a symbol (seen on LTIM) to
-                // inconsistent instruments, so the fast LTP can land far
-                // outside the quote's own OHLC — e.g. ltp 4190 while the day
-                // low is 4486, which is physically impossible and made Day's
-                // P&L visibly jump each time it flip-flopped. Allow a 4% band
-                // so genuine new highs/lows (which extend the range by well
-                // under 1% per tick) still pass, but reject the wild outliers.
-                if (old.high > 0 && old.low > 0) {
-                    const TOL = 0.04;
-                    if (val.ltp < old.low * (1 - TOL) || val.ltp > old.high * (1 + TOL)) {
-                        continue; // keep the last consistent (quote-derived) value
-                    }
+                // Outlier guard against bad-mapping ticks. Dhan's 1s LTP and
+                // 30s quote endpoints occasionally resolve a symbol (seen on
+                // LTIM) to different instruments, so one feed returns a price
+                // far off the real one and it flip-flops every few seconds —
+                // with a big holding that swung Day's P&L by lakhs each tick.
+                // A genuine trade moves the price incrementally; a single 1s
+                // tick that jumps >6% off the last value and then reverts is
+                // bad data, so drop it and keep the last good price. (Real
+                // sustained moves arrive as many small ticks the anchor
+                // follows, so they still get through.)
+                if (isSaneTick(old.ltp, val.ltp, old.previousClose)) {
+                    const change    = val.ltp - (old.previousClose || old.ltp);
+                    const chgPct    = old.previousClose > 0 ? (change / old.previousClose) * 100 : 0;
+                    stockPrices[key] = {
+                        ...old,
+                        ltp:           val.ltp,
+                        change:        Math.round(change * 100) / 100,
+                        changePercent: Math.round(chgPct  * 100) / 100,
+                    };
                 }
-                const change    = val.ltp - (old.previousClose || old.ltp);
-                const chgPct    = old.previousClose > 0 ? (change / old.previousClose) * 100 : 0;
-                stockPrices[key] = {
-                    ...old,
-                    ltp:           val.ltp,
-                    change:        Math.round(change * 100) / 100,
-                    changePercent: Math.round(chgPct  * 100) / 100,
-                };
+                // else: keep the last good price (outlier rejected)
             } else {
                 stockPrices[key] = { symbol: key, ltp: val.ltp, source: 'DHAN_LIVE' };
             }
