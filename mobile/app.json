@@ -71,6 +71,7 @@
       "expo-font"
     ],
     "extra": {
+      "apiUrl": "https://zerodha-backend-production-58b3.up.railway.app",
       "eas": {
         "projectId": "f83a41b9-d1f9-4f56-8f0f-fea76d8c078f"
       }
