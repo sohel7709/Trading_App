@@ -345,6 +345,7 @@ async function fastRefresh() {
                         previousClose: pc > 0 ? pc : old.previousClose,
                         change:        Math.round(change * 100) / 100,
                         changePercent: Math.round(chgPct  * 100) / 100,
+                        source:        'DHAN_LIVE',  // data is Dhan now — don't inherit a stale source label
                     };
                 }
             } else if (val.ltp > 0) {
