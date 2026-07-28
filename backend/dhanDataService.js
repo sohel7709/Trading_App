@@ -552,6 +552,100 @@ async function fetchDhanLTPAll(symbols) {
     return results;
 }
 
+// Full snapshot — stocks (NSE_EQ) AND indices (IDX_I) with complete OHLC,
+// previousClose, 52W and net_change, in ONE /marketfeed/quote request. This
+// is the single source now used for the live tick loop: everything comes from
+// Dhan every second, so there's no separate LTP-only fast path and no slower
+// full-quote refresh cycle. Indices ride along in the first batch's request
+// body (Dhan accepts NSE_EQ + IDX_I together); only if >100 stocks are tracked
+// do we spill into extra stock-only batches.
+// Returns: { stocks: { [sym]: fullQuote }, indexes: { [name]: fullQuote } }
+async function fetchDhanSnapshot(symbols) {
+    if (!isConfigured()) return { stocks: {}, indexes: {} };
+    if (!scripMasterLoaded) await loadScripMaster();
+
+    const idToSym = {};
+    const stockIds = [];
+    for (const sym of symbols) {
+        const id = securityIdMap[sym];
+        if (id) { stockIds.push(id); idToSym[String(id)] = sym; }
+    }
+    const idxIdToName = Object.fromEntries(
+        Object.entries(INDEX_SECURITY_IDS).map(([n, id]) => [String(id), n])
+    );
+    const idxIds = Object.values(INDEX_SECURITY_IDS);
+
+    const stocks = {}, indexes = {};
+    const BATCH = 100; // Dhan allows up to 100 instruments per marketfeed call
+
+    for (let i = 0; i < Math.max(stockIds.length, 1); i += BATCH) {
+        const body = { NSE_EQ: stockIds.slice(i, i + BATCH) };
+        if (i === 0) body.IDX_I = idxIds; // indices only need to be requested once
+        try {
+            const res = await fetch(`${DHAN_BASE}/v2/marketfeed/quote`, {
+                method: 'POST',
+                headers: getHeaders(),
+                body: JSON.stringify(body),
+                signal: AbortSignal.timeout(8000),
+            });
+            if (!res.ok) {
+                const b = await res.text().catch(() => '');
+                console.warn(`[Dhan] snapshot ${res.status}: ${b.slice(0, 100)}`);
+                continue;
+            }
+            const json = await res.json();
+
+            for (const [secIdStr, q] of Object.entries(json?.data?.NSE_EQ || {})) {
+                const sym = idToSym[secIdStr];
+                if (!sym) continue;
+                const ltp       = q.last_price ?? 0;
+                const prevClose = q.ohlc?.close ?? 0;
+                const change    = q.net_change ?? (ltp - prevClose);
+                stocks[sym] = {
+                    symbol:        sym,
+                    ltp:           Math.round(ltp * 100) / 100,
+                    open:          q.ohlc?.open ?? 0,
+                    high:          q.ohlc?.high ?? 0,
+                    low:           q.ohlc?.low  ?? 0,
+                    previousClose: prevClose,
+                    volume:        q.volume ?? 0,
+                    change:        Math.round(change * 100) / 100,
+                    changePercent: prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0,
+                    high52w:       q['52_week_high'] ?? 0,
+                    low52w:        q['52_week_low']  ?? 0,
+                    currency:      'INR',
+                    source:        'DHAN_LIVE',
+                };
+            }
+
+            for (const [secIdStr, q] of Object.entries(json?.data?.IDX_I || {})) {
+                const name = idxIdToName[secIdStr];
+                if (!name) continue;
+                const ltp       = q.last_price ?? 0;
+                const prevClose = q.ohlc?.close ?? 0;
+                const change    = q.net_change ?? (ltp - prevClose);
+                indexes[name] = {
+                    name,
+                    ltp:           Math.round(ltp * 100) / 100,
+                    open:          q.ohlc?.open ?? 0,
+                    high:          q.ohlc?.high ?? 0,
+                    low:           q.ohlc?.low  ?? 0,
+                    previousClose: prevClose,
+                    change:        Math.round(change * 100) / 100,
+                    changePercent: prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0,
+                    symbol:        name.replace(/ /g, '_'),
+                    source:        'DHAN_LIVE',
+                };
+            }
+
+            if (i + BATCH < stockIds.length) await new Promise(r => setTimeout(r, 200));
+        } catch (e) {
+            console.warn(`[Dhan] snapshot batch error: ${e.message}`);
+        }
+    }
+    return { stocks, indexes };
+}
+
 // ─── Option Chain (real NFO data) ─────────────────────────────────────────────
 // Docs: https://dhanhq.co/docs/v2/option-chain/
 // Rate limit: 1 option-chain request per ~3s per underlying — callers must cache.
@@ -666,6 +760,7 @@ module.exports = {
     fetchDhanLTP,
     fetchDhanIndices,
     fetchDhanLTPAll,
+    fetchDhanSnapshot,
     isConfigured,
     loadScripMaster,
     getSecurityId: (sym) => securityIdMap[sym] ?? null,

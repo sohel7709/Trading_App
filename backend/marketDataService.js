@@ -189,134 +189,59 @@ function isSaneTick(oldLtp, newLtp, prevClose) {
     return true;
 }
 
-// ─── Main fetch ───────────────────────────────────────────────────────────────
+// ─── Dhan-only live snapshot ────────────────────────────────────────────────
+// Single source of truth for live prices: one batched Dhan /marketfeed/quote
+// call gives full OHLC + previousClose + net_change + 52W for every tracked
+// stock AND index. Groww and Yahoo are no longer in the live-price path, and
+// there is no separate slow "full refresh" — this runs on the 1s tick, so all
+// data is fetched from Dhan every second with no hard refresh cycle.
+//
+// On any failure/429 we simply keep the last good in-memory values (no wipe),
+// so a transient Dhan hiccup shows stale-but-correct prices rather than blanks.
+async function applyDhanSnapshot() {
+    if (!dhanDataService.isConfigured()) return false;
 
+    const { stocks, indexes } = await dhanDataService.fetchDhanSnapshot(getTrackedSymbols());
+    let gotStocks = false;
+
+    for (const [sym, d] of Object.entries(stocks)) {
+        if (!(d.ltp > 0)) continue;
+        const prev = stockPrices[sym];
+        // Outlier guard — a wrong-instrument quote (seen on LTIM: ~4504 vs its
+        // real ~4190) that jumps >6% off the last good price and reverts is bad
+        // data; keep the last good value. Genuine moves arrive as small ticks.
+        if (isSaneTick(prev?.ltp, d.ltp, d.previousClose ?? prev?.previousClose)) {
+            stockPrices[sym] = d;
+        }
+        gotStocks = true;
+    }
+
+    for (const [name, d] of Object.entries(indexes)) {
+        if (!(d.ltp > 0)) continue;
+        const prev = indexData[name];
+        if (isSaneTick(prev?.ltp, d.ltp, d.previousClose ?? prev?.previousClose)) {
+            indexData[name] = d;
+        }
+    }
+
+    if (gotStocks || Object.keys(indexes).length > 0) {
+        dataSource  = 'DHAN_LIVE';
+        lastUpdated = new Date().toISOString();
+        return true;
+    }
+    return false;
+}
+
+// Kept for the startup seed and the add-to-watchlist path — same Dhan-only
+// snapshot, just guarded against overlapping with itself.
 async function fetchAllStockPrices() {
     if (isFetching) return;
     isFetching = true;
-
     try {
-        let gotLiveStocks  = false;
-        let gotLiveIndexes = false;
-
-        // ── Step 0: Dhan — stocks + indices (primary source) ──────────────────
-        if (dhanDataService.isConfigured()) {
-            // Stocks via full quote (OHLC + 52W)
-            try {
-                const dhanData = await dhanDataService.fetchDhanStockQuotes(getTrackedSymbols());
-                if (Object.keys(dhanData).length > 0) {
-                    for (const [sym, d] of Object.entries(dhanData)) {
-                        // Same outlier guard as fastRefresh — a wrong-instrument
-                        // quote (e.g. LTIM's ~4504 vs its real ~4190) must not
-                        // clobber the good live price and its OHLC.
-                        const prev = stockPrices[sym];
-                        if (isSaneTick(prev?.ltp, d.ltp, d.previousClose ?? prev?.previousClose)) {
-                            stockPrices[sym] = d;
-                        }
-                    }
-                    gotLiveStocks = true;
-                    console.log(`[Market] Dhan stocks: ${Object.keys(dhanData).length}`);
-                }
-            } catch (e) {
-                console.warn('[Market] Dhan stock fetch error:', e.message);
-            }
-
-            // Indices via IDX_I segment — spaced out to respect Dhan's 1 req/s
-            // quote-API rate limit (back-to-back calls intermittently 429)
-            await new Promise(r => setTimeout(r, 1100));
-            try {
-                const dhanIdx = await dhanDataService.fetchDhanIndices();
-                if (Object.keys(dhanIdx).length > 0) {
-                    for (const [name, d] of Object.entries(dhanIdx)) {
-                        indexData[name] = d;
-                    }
-                    gotLiveIndexes = true;
-                }
-            } catch (e) {
-                console.warn('[Market] Dhan index fetch error:', e.message);
-            }
+        const ok = await applyDhanSnapshot();
+        if (ok) {
+            console.log(`[Market] Dhan snapshot | stocks: ${Object.keys(stockPrices).length} | idx: ${Object.keys(indexData).length}`);
         }
-
-        // ── Step 1: NSE (indices) + Groww stocks — if Dhan didn't cover them ──
-        const needGroww = !gotLiveStocks;
-        const live = await liveDataService.fetchLiveMarketData(
-            needGroww ? getTrackedSymbols() : []
-        );
-
-        if (needGroww && live.stockData && Object.keys(live.stockData).length > 0) {
-            for (const [sym, d] of Object.entries(live.stockData)) {
-                stockPrices[sym] = d;
-            }
-            gotLiveStocks = true;
-            console.log(`[Market] Groww stocks: ${Object.keys(live.stockData).length}`);
-        }
-
-        if (!gotLiveIndexes && live.indexData && Object.keys(live.indexData).length > 0) {
-            for (const [name, d] of Object.entries(live.indexData)) {
-                indexData[name] = d;
-            }
-            gotLiveIndexes = true;
-            console.log(`[Market] NSE indices: ${Object.keys(live.indexData).length}`);
-        }
-
-        // ── Step 2: Yahoo Finance fallback for stocks ──────────────────────────
-        if (!gotLiveStocks) {
-            console.log('[Market] Dhan+Groww failed, trying Yahoo Finance…');
-            let ok = false;
-            const batchSize = 10;
-            const yahooSyms = getTrackedSymbols().map(s => s + '.NS');
-            for (let i = 0; i < yahooSyms.length; i += batchSize) {
-                const batch = yahooSyms.slice(i, i + batchSize);
-                const res = await Promise.allSettled(batch.map(s => fetchQuote(s)));
-                res.forEach(r => {
-                    if (r.status === 'fulfilled' && r.value && r.value.ltp > 0) {
-                        stockPrices[r.value.symbol] = r.value;
-                        ok = true;
-                    }
-                });
-                if (i + batchSize < yahooSyms.length) {
-                    await new Promise(r => setTimeout(r, 300));
-                }
-            }
-            if (ok) {
-                gotLiveStocks = true;
-                console.log('[Market] Yahoo Finance stocks: OK');
-            }
-        }
-
-        // ── Step 3: Yahoo Finance fallback for missing indices ─────────────────
-        const LIVE_SOURCES = new Set(['NSE_LIVE', 'YAHOO_LIVE', 'DHAN_LIVE']);
-        const missingIdx = INDEX_SYMBOLS.filter(
-            i => !indexData[i.name] || !LIVE_SOURCES.has(indexData[i.name]?.source)
-        );
-        if (missingIdx.length > 0) {
-            const idxRes = await Promise.allSettled(missingIdx.map(i => fetchQuote(i.symbol)));
-            idxRes.forEach((r, i) => {
-                if (r.status === 'fulfilled' && r.value && r.value.ltp > 0) {
-                    indexData[missingIdx[i].name] = {
-                        ...r.value,
-                        name:   missingIdx[i].name,
-                        source: 'YAHOO_LIVE',
-                    };
-                    gotLiveIndexes = true;
-                    console.log(`[Market] Yahoo index: ${missingIdx[i].name} = ${r.value.ltp}`);
-                }
-            });
-        }
-
-        dataSource = dhanDataService.isConfigured() && gotLiveStocks && gotLiveIndexes
-            ? 'DHAN_LIVE'
-            : gotLiveStocks && gotLiveIndexes ? 'NSE+GROWW'
-            : gotLiveStocks  ? 'STOCKS_ONLY'
-            : gotLiveIndexes ? 'INDEX_ONLY'
-            : Object.keys(stockPrices).length > 0 ? 'YAHOO'
-            : 'NO_DATA';
-
-        // Fix zeroed change% (Dhan reports prevClose == ltp after market close)
-        await repairChangeFields();
-
-        lastUpdated = new Date().toISOString();
-        console.log(`[Market] source: ${dataSource} | stocks: ${Object.keys(stockPrices).length} | idx: ${Object.keys(indexData).length}`);
     } catch (err) {
         console.error('[Market] fetchAllStockPrices error:', err.message);
     } finally {
@@ -324,7 +249,11 @@ async function fetchAllStockPrices() {
     }
 }
 
-// ─── Fast LTP-only refresh (called every 2s during market hours) ──────────────
+// The 1s live tick — Dhan LTP endpoint only (light, safely sustains 1 req/s;
+// the heavier /marketfeed/quote endpoint rate-limits and 429s at that rate).
+// LTP is all that moves tick-to-tick; OHLC/prevClose/52W are refreshed by the
+// slower snapshot below. change/changePercent are recomputed against the
+// stored previousClose so Day's P&L stays consistent with the LTP.
 async function fastRefresh() {
     if (!dhanDataService.isConfigured()) return;
     try {
@@ -332,24 +261,23 @@ async function fastRefresh() {
         for (const [key, val] of Object.entries(ltps)) {
             if (key.startsWith('__IDX__')) {
                 const name = key.replace('__IDX__', '');
-                if (indexData[name]) {
+                if (indexData[name] && val.ltp > 0) {
+                    const pc = indexData[name].previousClose;
                     indexData[name].ltp = val.ltp;
+                    if (pc > 0) {
+                        const chg = val.ltp - pc;
+                        indexData[name].change = Math.round(chg * 100) / 100;
+                        indexData[name].changePercent = Math.round((chg / pc) * 10000) / 100;
+                    }
                 }
             } else if (stockPrices[key]) {
                 const old = stockPrices[key];
-                // Outlier guard against bad-mapping ticks. Dhan's 1s LTP and
-                // 30s quote endpoints occasionally resolve a symbol (seen on
-                // LTIM) to different instruments, so one feed returns a price
-                // far off the real one and it flip-flops every few seconds —
-                // with a big holding that swung Day's P&L by lakhs each tick.
-                // A genuine trade moves the price incrementally; a single 1s
-                // tick that jumps >6% off the last value and then reverts is
-                // bad data, so drop it and keep the last good price. (Real
-                // sustained moves arrive as many small ticks the anchor
-                // follows, so they still get through.)
-                if (isSaneTick(old.ltp, val.ltp, old.previousClose)) {
-                    const change    = val.ltp - (old.previousClose || old.ltp);
-                    const chgPct    = old.previousClose > 0 ? (change / old.previousClose) * 100 : 0;
+                // Outlier guard: a wrong-instrument tick (seen on LTIM) that
+                // jumps >6% off the last good price and reverts is bad data —
+                // keep the last good value. Genuine moves arrive incrementally.
+                if (val.ltp > 0 && isSaneTick(old.ltp, val.ltp, old.previousClose)) {
+                    const change = val.ltp - (old.previousClose || old.ltp);
+                    const chgPct = old.previousClose > 0 ? (change / old.previousClose) * 100 : 0;
                     stockPrices[key] = {
                         ...old,
                         ltp:           val.ltp,
@@ -357,13 +285,13 @@ async function fastRefresh() {
                         changePercent: Math.round(chgPct  * 100) / 100,
                     };
                 }
-                // else: keep the last good price (outlier rejected)
-            } else {
+            } else if (val.ltp > 0) {
                 stockPrices[key] = { symbol: key, ltp: val.ltp, source: 'DHAN_LIVE' };
             }
         }
         lastUpdated = new Date().toISOString();
     } catch (e) {
+        // Keep last good prices on a transient Dhan error/429.
         console.warn('[Market] fastRefresh error:', e.message);
     }
 }

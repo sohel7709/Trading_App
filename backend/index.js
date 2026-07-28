@@ -2057,7 +2057,9 @@ function emitMarketData() {
 let _fullBroadcastBusy = false;
 let _fastTickBusy = false;
 
-// Full OHLC refresh — runs every 30s always (keeps 52W, volume, OHLC current)
+// Slow OHLC snapshot — one batched Dhan /marketfeed/quote (stocks + indices)
+// for OHLC/previousClose/52W. Runs on boot (seed) and every 15s. The 1s fast
+// tick handles live LTP movement between these.
 async function broadcastMarketData() {
     if (_fullBroadcastBusy) return;
     _fullBroadcastBusy = true;
@@ -2284,15 +2286,24 @@ async function trackPortfolioSymbols() {
     } catch (e) { console.error('[Track] error:', e.message); }
 }
 
-// Initial full fetch, then full refresh every 30s + fast ticks every 2s
+// Seed once on boot (so data exists before market open / right after a
+// restart), then the 1s tick is the ONLY refresh — a full Dhan snapshot every
+// second during market hours. No 30s hard-refresh cycle, no Groww/Yahoo.
 (async () => {
     await mongoose.connection.asPromise().catch(() => {});
     await trackPortfolioSymbols();
     await broadcastMarketData();
     await prepareNewTradingDay();
 })();
-setInterval(broadcastMarketData, 30000);
+// Dhan-only, two-tier (no Groww/Yahoo):
+//  • fast tick every 1s → LTP endpoint (light, safely sustains 1 req/s) for
+//    live price movement + the order engine.
+//  • snapshot every 15s → the heavier /marketfeed/quote endpoint (OHLC,
+//    previousClose, 52W). Kept slow because quote rate-limits/429s if polled
+//    every second and prevClose is constant intraday while high/low only
+//    extend gradually. 4 quote calls/min stays well within Dhan's limit.
 setInterval(fastTickBroadcast, 1000);
+setInterval(broadcastMarketData, 15000);
 
 // Real-time position P&L push: every 1s during market hours, recomputed from
 // already-cached prices (no extra Dhan calls) so both equity and option open
