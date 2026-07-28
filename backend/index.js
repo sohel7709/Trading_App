@@ -1849,12 +1849,18 @@ app.get('/market/quote/:symbol', async (req, res) => {
 
 // ============ MARKET DATA STATUS ============
 app.get('/market/status', (req, res) => {
-    const liveDataService = require('./liveDataService');
+    // Dhan is the only live source now (Groww/Yahoo removed), so report that
+    // directly instead of liveDataService.getStats(), whose Groww/NSE numbers
+    // are stale and misleading once liveDataService is out of the live path.
     res.status(200).json({
         isOpen: isMarketOpen(),
         source: marketDataService.getDataSource(),
         lastUpdated: marketDataService.getLastUpdated(),
-        liveStats: liveDataService.getStats(),
+        liveStats: {
+            source: marketDataService.getDataSource(),
+            stockSource: 'DHAN_LIVE',
+            indexSource: 'DHAN_LIVE',
+        },
         indexCount: Object.keys(marketDataService.getIndexData()).length,
         stockCount: Object.keys(marketDataService.getStockPrices()).length,
     });
