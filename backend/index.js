@@ -2263,6 +2263,11 @@ async function prepareNewTradingDay(force = false) {
             { $set: { value: dateStr } },
             { upsert: true }
         );
+
+        // New session → yesterday's close changed; refresh the candle-derived
+        // reference closes that anchor Day's-P&L (fire-and-forget, throttled).
+        marketDataService.seedReferenceCloses(marketDataService.getTrackedSymbols()).catch(() => {});
+
         console.log(`[DayPrep] ${dateStr} ready | trade groups archived to P&L: ${archivedCount} | orders cleared: ${oldOrders.deletedCount} | MIS squared off: ${misSquaredOff} | options settled: ${optionPositions.length} | T1 rolled: ${t1Result.modifiedCount} | corp actions: ${corpActionsApplied}`);
     } catch (e) {
         console.error('[DayPrep] error:', e.message);
@@ -2298,6 +2303,12 @@ async function trackPortfolioSymbols() {
 (async () => {
     await mongoose.connection.asPromise().catch(() => {});
     await trackPortfolioSymbols();
+    // Anchor Day's-P&L previous-closes to Dhan daily candles (reliable even
+    // when the live quote/LTP mis-resolves a symbol like LTIM).
+    await marketDataService.seedReferenceCloses(marketDataService.getTrackedSymbols());
+    // Establish LTP anchors (reliable) BEFORE the quote snapshot, so a
+    // wrong-instrument quote value can't seed a symbol as a stuck bad anchor.
+    await marketDataService.fastRefresh();
     await broadcastMarketData();
     await prepareNewTradingDay();
 })();

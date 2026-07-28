@@ -48,6 +48,49 @@ let lastUpdated = null;
 let isFetching  = false;
 let dataSource  = 'LOADING';
 
+// Authoritative previous-session close per symbol, sourced from Dhan DAILY
+// CANDLES rather than the live feed. Some symbols (seen on LTIM) get a
+// wrong-instrument price and/or a stale previousClose from the live quote/LTP
+// endpoints, which corrupts Day's P&L. The daily candle is the one source
+// that's reliably correct for them, so we anchor change/Day-P&L to it.
+// { [SYMBOL]: prevClose }
+const referenceClose = {};
+
+// The previous *completed* session's close from a daily-candle array. If the
+// last candle is today's (still forming / just closed), the reference is the
+// one before it; otherwise the last candle is already a completed session.
+function prevCloseFromDaily(candles) {
+    if (!Array.isArray(candles) || candles.length < 2) return null;
+    const last = candles[candles.length - 1];
+    if (!last?.time) return null;
+    const lastDate = new Date(last.time * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const today    = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const pc = (lastDate === today ? candles[candles.length - 2] : last)?.close;
+    return pc > 0 ? pc : null;
+}
+
+// Seed/refresh reference closes from Dhan daily candles. Throttled so we don't
+// burst the historical API. Failures are non-fatal — a symbol without a
+// reference simply falls back to the live feed's previousClose.
+async function seedReferenceCloses(symbols) {
+    let n = 0;
+    for (const sym of symbols) {
+        try {
+            const candles = await candleDataService.generateCandles(sym, '1d');
+            const pc = prevCloseFromDaily(candles);
+            if (pc > 0) { referenceClose[sym.toUpperCase()] = pc; n++; }
+        } catch { /* keep going */ }
+        await new Promise(r => setTimeout(r, 120));
+    }
+    console.log(`[Market] Reference closes seeded from daily candles: ${n}/${symbols.length}`);
+}
+
+// prevClose to use for change/Day-P&L: the reliable candle-derived value when
+// we have it, else whatever the live feed reported.
+function refPrevClose(symbol, livePrevClose) {
+    return referenceClose[symbol] > 0 ? referenceClose[symbol] : (livePrevClose || 0);
+}
+
 // Dynamic symbol universe — starts with the core basket, grows as users
 // search / watchlist / trade any NSE share (scrip master covers all of NSE EQ).
 const trackedSymbols = new Set(NSE_STOCK_SYMBOLS);
@@ -184,8 +227,14 @@ async function fetchQuote(symbol) {
 //    live OHLC/LTP isn't.
 function isSaneTick(oldLtp, newLtp, prevClose) {
     if (!(newLtp > 0)) return false;
+    // Rolling: reject a single tick that jumps >6% off the last good price.
     if (oldLtp > 0)    return Math.abs(newLtp - oldLtp) / oldLtp <= 0.06;
-    if (prevClose > 0) return Math.abs(newLtp - prevClose) / prevClose <= 0.10;
+    // Cold start: the anchor passed in is now the reliable daily-candle prev
+    // close, so a tighter 7% band is safe and rejects wrong-instrument first
+    // ticks (LTIM's ~4504 is +7.5% off its real ~4190 close) before they can
+    // become a stuck anchor. Genuine >7% single-day gaps are rare for the
+    // tracked large-caps and self-heal once the rolling guard takes over.
+    if (prevClose > 0) return Math.abs(newLtp - prevClose) / prevClose <= 0.07;
     return true;
 }
 
@@ -207,10 +256,19 @@ async function applyDhanSnapshot() {
     for (const [sym, d] of Object.entries(stocks)) {
         if (!(d.ltp > 0)) continue;
         const prev = stockPrices[sym];
+        const pc = refPrevClose(sym, d.previousClose);
         // Outlier guard — a wrong-instrument quote (seen on LTIM: ~4504 vs its
-        // real ~4190) that jumps >6% off the last good price and reverts is bad
-        // data; keep the last good value. Genuine moves arrive as small ticks.
-        if (isSaneTick(prev?.ltp, d.ltp, d.previousClose ?? prev?.previousClose)) {
+        // real ~4190) that jumps >6% off the last good price (or off the
+        // reliable candle-derived prev close at cold start) is bad data; keep
+        // the last good value. Genuine moves arrive as small incremental ticks.
+        if (isSaneTick(prev?.ltp, d.ltp, pc || prev?.previousClose)) {
+            // Recompute change/prevClose against the authoritative candle-derived
+            // close so Day's P&L can't be thrown off by a stale/wrong feed close.
+            if (pc > 0) {
+                d.previousClose = pc;
+                d.change        = Math.round((d.ltp - pc) * 100) / 100;
+                d.changePercent = Math.round(((d.ltp - pc) / pc) * 10000) / 100;
+            }
             stockPrices[sym] = d;
         }
         gotStocks = true;
@@ -272,21 +330,38 @@ async function fastRefresh() {
                 }
             } else if (stockPrices[key]) {
                 const old = stockPrices[key];
+                const pc  = refPrevClose(key, old.previousClose);
                 // Outlier guard: a wrong-instrument tick (seen on LTIM) that
-                // jumps >6% off the last good price and reverts is bad data —
-                // keep the last good value. Genuine moves arrive incrementally.
-                if (val.ltp > 0 && isSaneTick(old.ltp, val.ltp, old.previousClose)) {
-                    const change = val.ltp - (old.previousClose || old.ltp);
-                    const chgPct = old.previousClose > 0 ? (change / old.previousClose) * 100 : 0;
+                // jumps >6% off the last good price (or off the reliable candle
+                // prev close at cold start) is bad data — keep the last good
+                // value. Genuine moves arrive as small incremental ticks.
+                if (val.ltp > 0 && isSaneTick(old.ltp, val.ltp, pc || old.previousClose)) {
+                    const base   = pc || old.previousClose || old.ltp;
+                    const change = val.ltp - base;
+                    const chgPct = base > 0 ? (change / base) * 100 : 0;
                     stockPrices[key] = {
                         ...old,
                         ltp:           val.ltp,
+                        previousClose: pc > 0 ? pc : old.previousClose,
                         change:        Math.round(change * 100) / 100,
                         changePercent: Math.round(chgPct  * 100) / 100,
                     };
                 }
             } else if (val.ltp > 0) {
-                stockPrices[key] = { symbol: key, ltp: val.ltp, source: 'DHAN_LIVE' };
+                // First value for this symbol — accept only if it's near the
+                // reliable candle prev close (guards against a wrong first tick
+                // becoming a stuck anchor); recompute change against it.
+                const pc = refPrevClose(key, 0);
+                if (!pc || isSaneTick(0, val.ltp, pc)) {
+                    const change = pc > 0 ? val.ltp - pc : 0;
+                    stockPrices[key] = {
+                        symbol: key, ltp: val.ltp,
+                        previousClose: pc > 0 ? pc : undefined,
+                        change: Math.round(change * 100) / 100,
+                        changePercent: pc > 0 ? Math.round((change / pc) * 10000) / 100 : 0,
+                        source: 'DHAN_LIVE',
+                    };
+                }
             }
         }
         lastUpdated = new Date().toISOString();
@@ -549,6 +624,7 @@ async function getOptionLTP(indexName, strikePrice, optionType, expiry) {
 module.exports = {
     fetchAllStockPrices,
     fastRefresh,
+    seedReferenceCloses,
     getOptionChain,
     getOptionExpiries,
     getOptionLTP,
