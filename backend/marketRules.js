@@ -37,14 +37,23 @@ function isHoliday(d = istNow()) {
     return HOLIDAY_SET.has(istDateStr(d));
 }
 
-// NSE market hours: Mon–Fri 09:15–15:30 IST, excluding holidays
-function isMarketOpen() {
+// NSE market hours: Mon–Fri 09:15 IST start, excluding holidays. Since the
+// Aug 3, 2026 SEBI/NSE Closing Auction Session (CAS) rollout, cash-equity
+// close (09:15-15:30) and F&O/derivatives close (09:15-15:40, extended 10
+// min to run alongside the new closing auction) diverge — pass segment
+// 'FO' for options/futures routes, default 'EQ' for equity cash routes.
+const MARKET_OPEN_MINS = 9 * 60 + 15; // 9:15 AM, unchanged for both segments
+const EQ_CLOSE_MINS = 15 * 60 + 30; // 3:30 PM, cash-equity close (unchanged)
+const FO_CLOSE_MINS = 15 * 60 + 40; // 3:40 PM, F&O close (was 15:30 before 2026-08-03)
+
+function isMarketOpen(segment = 'EQ') {
     const ist = istNow();
     const day = ist.getDay();
     if (day === 0 || day === 6) return false;
     if (isHoliday(ist)) return false;
     const mins = ist.getHours() * 60 + ist.getMinutes();
-    return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+    const close = segment === 'FO' ? FO_CLOSE_MINS : EQ_CLOSE_MINS;
+    return mins >= MARKET_OPEN_MINS && mins <= close;
 }
 
 // True during the ~10 min BOD window (9:00-9:15) or EOD window (15:30-15:45)
@@ -108,4 +117,7 @@ module.exports = {
     OPTION_WRITE_MARGIN_PCT,
     approxOptionWriteMargin,
     NSE_HOLIDAYS_2026,
+    MARKET_OPEN_MINS,
+    EQ_CLOSE_MINS,
+    FO_CLOSE_MINS,
 };

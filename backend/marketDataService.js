@@ -426,8 +426,9 @@ function getExpiryDates(indexName) {
     const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
     const expiries = [];
     const nowIst = istNow();
-    // Today's expiry stays tradeable until 15:30 IST
-    const includeToday = nowIst.getHours() * 60 + nowIst.getMinutes() <= 15 * 60 + 30;
+    // Today's expiry stays tradeable until 15:40 IST (F&O close, extended
+    // from 15:30 on 2026-08-03 alongside the new cash-market closing auction)
+    const includeToday = nowIst.getHours() * 60 + nowIst.getMinutes() <= 15 * 60 + 40;
     const today = new Date(nowIst);
     today.setHours(0, 0, 0, 0);
 
@@ -453,7 +454,7 @@ function getExpiryDates(indexName) {
 // Days until expiry (fractional), floored at expiry-day close
 function daysToExpiry(expiry) {
     if (!expiry) return 7;
-    const end = new Date(expiry + 'T15:30:00');
+    const end = new Date(expiry + 'T15:40:00');
     const diff = (end - istNow()) / 86400000;
     return Math.max(0.02, diff);
 }
@@ -557,7 +558,7 @@ async function getOptionChain(indexName, expiry) {
     // can have actually traded, so skip the Dhan round-trip entirely rather
     // than burning an API call (and any transient variance in what it
     // returns) just to re-serve data that should be sitting perfectly still.
-    if (hit && !isMarketOpen()) return hit.data;
+    if (hit && !isMarketOpen('FO')) return hit.data;
     if (chainInflight.has(key)) return chainInflight.get(key);
 
     const p = (async () => {
@@ -597,7 +598,7 @@ async function getOptionChain(indexName, expiry) {
             // nothing has actually moved. Only regenerate when there's truly
             // no prior snapshot yet, or the market is genuinely open (real
             // Dhan data merely gapped for one cycle).
-            if (!isMarketOpen() && optionChainCache[key]?.data) {
+            if (!isMarketOpen('FO') && optionChainCache[key]?.data) {
                 data = optionChainCache[key].data;
             } else {
                 data = generateOptionChainForIndex(indexName, resolvedExpiry);

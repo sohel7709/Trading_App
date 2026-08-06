@@ -192,8 +192,10 @@ app.get('/allOrders', async (req, res) => {
     }
 });
 
-// NSE market hours: Mon–Fri 09:15–15:30 IST, excluding NSE holidays — single
+// NSE market hours: Mon–Fri 09:15 IST start, excluding NSE holidays — single
 // source of truth lives in marketRules.js (was duplicated inline before).
+// Default (no arg) is the cash-equity close of 15:30; F&O routes pass 'FO'
+// for the 15:40 close (extended 2026-08-03 alongside the new CAS auction).
 const isMarketOpen = rules.isMarketOpen;
 
 // Today's date boundaries in IST (works regardless of server timezone)
@@ -1853,7 +1855,9 @@ app.get('/market/status', (req, res) => {
     // directly instead of liveDataService.getStats(), whose Groww/NSE numbers
     // are stale and misleading once liveDataService is out of the live path.
     res.status(200).json({
-        isOpen: isMarketOpen(),
+        // 'FO' (15:40 close) so the banner doesn't say "closed" while F&O is
+        // still trading during the 15:30-15:40 window (extended 2026-08-03).
+        isOpen: isMarketOpen('FO'),
         source: marketDataService.getDataSource(),
         lastUpdated: marketDataService.getLastUpdated(),
         liveStats: {
@@ -2078,9 +2082,10 @@ async function broadcastMarketData() {
     }
 }
 
-// Fast LTP-only refresh — runs every 1s during market hours
+// Fast LTP-only refresh — runs every 1s during market hours. Uses 'FO' (the
+// wider 15:40 window) since this feeds both equity and option live ticks.
 async function fastTickBroadcast() {
-    if (!isMarketOpen() || _fastTickBusy) return;
+    if (!isMarketOpen('FO') || _fastTickBusy) return;
     _fastTickBusy = true;
     try {
         await marketDataService.fastRefresh();
@@ -2327,7 +2332,8 @@ setInterval(broadcastMarketData, 15000);
 // positions re-price continuously without the client ever polling for it.
 let _pnlTickBusy = false;
 setInterval(async () => {
-    if (!isMarketOpen() || _pnlTickBusy) return;
+    // 'FO' (15:40 close) — this loop re-prices both equity and option positions.
+    if (!isMarketOpen('FO') || _pnlTickBusy) return;
     _pnlTickBusy = true;
     try {
         const { dateStr } = istDayRange();
@@ -2692,10 +2698,10 @@ app.post('/newOptionOrder', async (req, res) => {
     if (!Number.isFinite(Number(lots)) || Number(lots) <= 0 || !Number.isFinite(Number(premium)) || Number(premium) <= 0) {
         return res.status(400).json({ message: 'lots and premium must be positive numbers' });
     }
-    if (!isMarketOpen()) {
+    if (!isMarketOpen('FO')) {
         return res.status(400).json({
             message: 'Market is closed',
-            detail: 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.',
+            detail: 'NSE F&O trading hours: Mon–Fri, 9:15 AM – 3:40 PM IST.',
             marketClosed: true,
         });
     }
@@ -2707,7 +2713,7 @@ app.post('/newOptionOrder', async (req, res) => {
 // Square off (fully or partially close) an existing option position at the
 // current live chain premium — the long-press "Square off" action in the app.
 app.post('/optionPositions/:id/squareoff', async (req, res) => {
-    if (!isMarketOpen()) {
+    if (!isMarketOpen('FO')) {
         return res.status(400).json({ message: 'Market is closed', marketClosed: true });
     }
     try {
