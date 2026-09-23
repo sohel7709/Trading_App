@@ -13,32 +13,50 @@
 import React, { useContext, useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Switch, StatusBar, Alert
+  Switch, StatusBar, Alert, Dimensions, RefreshControl
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
+import { LineChart } from 'react-native-chart-kit';
 import { AuthContext } from '../context/AuthContext';
 import { colors } from '../theme/colors';
 import { getAccessToken, getStoredUser, setStoredUser } from '../services/authService';
 import { api, BASE_URL } from '../api/client';
 import useSocket from '../hooks/useSocket';
 
+const SCREEN_WIDTH = Dimensions.get('window').width;
+
 export default function ProfileScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const auth = useContext(AuthContext);
   const [profileUser, setProfileUser] = useState(auth?.user || null);
   const [wallet, setWallet] = useState(null);
+  const [portfolio, setPortfolio] = useState(null);
+  const [pnlTimeline, setPnlTimeline] = useState([]);
+  const [unreadNotifs, setUnreadNotifs] = useState(0);
+  const [riskAlert, setRiskAlert] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Auto-refresh student profile, batch & capital when user taps Profile tab
+  // Auto-refresh student profile, batch, capital & portfolio stats
   const loadProfileAndWallet = useCallback(async () => {
     try {
-      const [stored, w] = await Promise.all([
+      const [stored, w, summary] = await Promise.all([
         getStoredUser().catch(() => null),
         api.getWallet().catch(() => null),
+        api.getDashboardSummary().catch(() => null),
       ]);
       if (stored) setProfileUser(stored);
       if (w) setWallet(w);
+
+      if (summary && summary.success) {
+        if (summary.portfolio) setPortfolio(summary.portfolio);
+        if (Array.isArray(summary.pnlTimeline) && summary.pnlTimeline.length > 0) {
+          setPnlTimeline(summary.pnlTimeline);
+        }
+        if (typeof summary.unreadNotifs === 'number') setUnreadNotifs(summary.unreadNotifs);
+        if (summary.riskAlert) setRiskAlert(summary.riskAlert);
+      }
 
       const token = await getAccessToken();
       if (token) {
@@ -55,6 +73,8 @@ export default function ProfileScreen({ navigation }) {
       }
     } catch (e) {
       // fallback
+    } finally {
+      setRefreshing(false);
     }
   }, []);
 
@@ -81,6 +101,21 @@ export default function ProfileScreen({ navigation }) {
     const targetUid = (data?.studentId || data?.userId)?.toString();
     if (!targetUid || !currentUid || targetUid !== currentUid) return;
     if (data?.balance != null) setWallet(prev => ({ ...prev, balance: data.balance }));
+    if (data?.todayPnl != null || data?.totalPnl != null) {
+      setPortfolio(prev => ({
+        ...prev,
+        todayPnl: data.todayPnl ?? prev?.todayPnl ?? 0,
+        totalPnl: data.totalPnl ?? prev?.totalPnl ?? 0,
+      }));
+    }
+  });
+  useSocket('notification', () => {
+    setUnreadNotifs(prev => prev + 1);
+  });
+  useSocket('risk_alert', (alert) => {
+    if (alert?.message) {
+      setRiskAlert({ message: alert.message, isHardStop: true });
+    }
   });
 
   const displayName = profileUser?.name || 'Student Trader';
@@ -91,8 +126,26 @@ export default function ProfileScreen({ navigation }) {
     ? profileUser.batch.instructors.join(', ')
     : (profileUser?.instructorEmail || profileUser?.instructorName || 'intructor1@gmail.com');
   const displayInstitute = profileUser?.instituteName || profileUser?.instituteCode || 'TEST1';
+
+  // Capital & PnL computations
   const assignedCapital = profileUser?.startingCapital ?? (profileUser?.startingCapitalPaise ? profileUser.startingCapitalPaise / 100 : (profileUser?.initialBalance ?? 500000));
-  const currentFunds = wallet?.balance ?? (wallet?.balancePaise ? wallet.balancePaise / 100 : assignedCapital);
+  const currentFunds = wallet?.balance ?? (wallet?.balancePaise ? wallet.balancePaise / 100 : (portfolio?.balance ?? assignedCapital));
+  const availableMargin = portfolio?.availableMargin ?? currentFunds;
+  const usedMargin = portfolio?.usedMargin ?? 0;
+  const totalPnl = portfolio?.totalPnl ?? 0;
+  const todayPnl = portfolio?.todayPnl ?? 0;
+  const winRate = portfolio?.winRate ?? 0;
+  const openPositionsCount = portfolio?.openPositionsCount ?? (Array.isArray(portfolio?.positions) ? portfolio.positions.length : 0);
+  const marginPercent = currentFunds > 0 ? Math.min(100, Math.round((usedMargin / currentFunds) * 100)) : 0;
+
+  // Mini Chart data
+  const miniChartLabels = pnlTimeline.length > 0
+    ? pnlTimeline.slice(-7).map((t, idx) => (idx % 2 === 0 ? (t.label || `D${idx + 1}`) : ''))
+    : ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+  const miniChartData = pnlTimeline.length > 0
+    ? pnlTimeline.slice(-7).map(t => t.cumulativePnl ?? t.pnl ?? 0)
+    : [0, 0, 0, 0, 0, 0, 0];
 
   const initials = displayName
     .split(' ')
@@ -101,6 +154,10 @@ export default function ProfileScreen({ navigation }) {
     .join('')
     .slice(0, 2)
     .toUpperCase() || 'ST';
+
+  const fmt = (n) => '₹' + Math.abs(Math.round(n || 0)).toLocaleString('en-IN');
+  const fmtPL = (n) => (n >= 0 ? '+' : '-') + fmt(n);
+  const pnlColor = (n) => (n >= 0 ? colors.gain : colors.loss);
 
   const handleLogoutConfirm = () => {
     Alert.alert(
@@ -123,11 +180,58 @@ export default function ProfileScreen({ navigation }) {
 
       {/* Header */}
       <View style={styles.topBar}>
-        <Text style={styles.topBarTitle}>Student Profile</Text>
+        <View>
+          <Text style={styles.topBarTitle}>Account & Profile</Text>
+          <View style={styles.paperBadge}>
+            <View style={styles.liveBeacon} />
+            <Text style={styles.paperBadgeText}>PAPER TRADING SIMULATOR</Text>
+          </View>
+        </View>
+
+        {/* Top Actions: Notifications Bell */}
+        <TouchableOpacity
+          style={styles.headerIconBtn}
+          onPress={() => navigation.navigate('Notifications')}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="notifications-outline" size={20} color="#0F172A" />
+          {unreadNotifs > 0 && (
+            <View style={styles.notifBadge}>
+              <Text style={styles.notifBadgeText}>{unreadNotifs > 9 ? '9+' : unreadNotifs}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Profile Card */}
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => { setRefreshing(true); loadProfileAndWallet(); }}
+            colors={[colors.primary]}
+          />
+        }
+      >
+        {/* Risk Warning Banner (if active) */}
+        {riskAlert && (
+          <View style={[styles.riskBanner, riskAlert.isHardStop ? styles.riskBannerDanger : styles.riskBannerWarning]}>
+            <Ionicons
+              name={riskAlert.isHardStop ? 'alert-circle' : 'warning-outline'}
+              size={18}
+              color={riskAlert.isHardStop ? colors.loss : '#d97706'}
+            />
+            <Text style={[styles.riskBannerText, { color: riskAlert.isHardStop ? colors.loss : '#b45309' }]} numberOfLines={2}>
+              {riskAlert.message}
+            </Text>
+            <TouchableOpacity onPress={() => setRiskAlert(null)} hitSlop={8}>
+              <Ionicons name="close" size={16} color="#64748B" />
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Profile Identity Card */}
         <View style={styles.profileHero}>
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>{initials}</Text>
@@ -140,6 +244,147 @@ export default function ProfileScreen({ navigation }) {
               <Text style={styles.roleText}>ACTIVE STUDENT • {displayInstitute}</Text>
             </View>
           </View>
+        </View>
+
+        {/* ── TRADING CAPITAL & LIVE P&L CARD ──────────────────────── */}
+        <View style={styles.heroCard}>
+          <View style={styles.heroHeader}>
+            <View>
+              <Text style={styles.heroSub}>Available Trading Margin</Text>
+              <Text style={styles.heroBalance}>{fmt(availableMargin)}</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.fundsPill}
+              onPress={() => navigation.navigate('Funds')}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="wallet-outline" size={14} color="#0284c7" />
+              <Text style={styles.fundsPillText}>Wallet</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* PnL Highlights Row */}
+          <View style={styles.pnlRow}>
+            {/* Total PnL */}
+            <View style={styles.pnlCol}>
+              <Text style={styles.pnlLabel}>Total Net P&L</Text>
+              <Text style={[styles.pnlValue, { color: pnlColor(totalPnl) }]}>
+                {fmtPL(totalPnl)}
+              </Text>
+            </View>
+
+            <View style={styles.pnlDivider} />
+
+            {/* Today's PnL */}
+            <View style={styles.pnlCol}>
+              <Text style={styles.pnlLabel}>Today's P&L</Text>
+              <Text style={[styles.pnlValue, { color: pnlColor(todayPnl) }]}>
+                {fmtPL(todayPnl)}
+              </Text>
+            </View>
+          </View>
+
+          {/* Margin Utilization Progress */}
+          <View style={styles.marginWrap}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+              <Text style={styles.marginLabel}>Margin Utilization</Text>
+              <Text style={[styles.marginPct, { color: marginPercent > 80 ? colors.loss : marginPercent > 50 ? '#f59e0b' : '#10b981' }]}>
+                {marginPercent}% ({fmt(usedMargin)} used)
+              </Text>
+            </View>
+            <View style={styles.marginBarTrack}>
+              <View
+                style={[
+                  styles.marginBarFill,
+                  {
+                    width: `${marginPercent}%`,
+                    backgroundColor: marginPercent > 80 ? colors.loss : marginPercent > 50 ? '#f59e0b' : '#10b981',
+                  }
+                ]}
+              />
+            </View>
+          </View>
+
+          {/* Middle Performance Quick Stats */}
+          <View style={styles.quickStatsRow}>
+            <TouchableOpacity
+              style={styles.quickStatCol}
+              onPress={() => navigation.navigate('Positions')}
+              activeOpacity={0.8}
+            >
+              <View style={[styles.quickStatIcon, { backgroundColor: '#EFF6FF' }]}>
+                <Ionicons name="layers-outline" size={16} color="#2563eb" />
+              </View>
+              <View>
+                <Text style={styles.quickStatLabel}>Positions</Text>
+                <Text style={styles.quickStatValue}>{openPositionsCount} Active</Text>
+              </View>
+            </TouchableOpacity>
+
+            <View style={styles.quickStatDivider} />
+
+            <TouchableOpacity
+              style={styles.quickStatCol}
+              onPress={() => navigation.navigate('Analytics')}
+              activeOpacity={0.8}
+            >
+              <View style={[styles.quickStatIcon, { backgroundColor: '#ECFDF5' }]}>
+                <Ionicons name="trophy-outline" size={16} color="#059669" />
+              </View>
+              <View>
+                <Text style={styles.quickStatLabel}>Win Rate</Text>
+                <Text style={[styles.quickStatValue, { color: colors.gain }]}>{winRate}%</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* ── 7-DAY P&L EQUITY CURVE CHART ─────────────────────────── */}
+        <View style={styles.chartCard}>
+          <View style={styles.chartCardHeader}>
+            <View>
+              <Text style={styles.chartSectionTitle}>7-Day P&L Equity Curve</Text>
+              <Text style={styles.chartSectionSub}>Cumulative performance</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.chartFullBtn}
+              onPress={() => navigation.navigate('Analytics')}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.chartFullText}>Full Analytics</Text>
+              <Ionicons name="chevron-forward" size={14} color={colors.primary} />
+            </TouchableOpacity>
+          </View>
+
+          <LineChart
+            data={{
+              labels: miniChartLabels,
+              datasets: [{ data: miniChartData }],
+            }}
+            width={SCREEN_WIDTH - 64}
+            height={150}
+            yAxisLabel="₹"
+            yAxisInterval={1}
+            chartConfig={{
+              backgroundColor: '#ffffff',
+              backgroundGradientFrom: '#ffffff',
+              backgroundGradientTo: '#ffffff',
+              decimalPlaces: 0,
+              color: (opacity = 1) => (totalPnl >= 0 ? `rgba(16, 185, 129, ${opacity})` : `rgba(239, 68, 68, ${opacity})`),
+              labelColor: (opacity = 1) => `rgba(148, 163, 184, ${opacity})`,
+              propsForDots: {
+                r: '3',
+                strokeWidth: '2',
+                stroke: totalPnl >= 0 ? '#10b981' : '#ef4444',
+              },
+              propsForBackgroundLines: {
+                strokeDasharray: '4 4',
+                stroke: '#F1F5F9',
+              },
+            }}
+            bezier
+            style={{ marginVertical: 4, borderRadius: 16 }}
+          />
         </View>
 
         {/* Institutional Academic Card */}
@@ -275,13 +520,251 @@ export default function ProfileScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAFC' },
   topBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 12,
     backgroundColor: '#FFFFFF',
     borderBottomWidth: 1,
     borderBottomColor: '#F1F5F9',
   },
-  topBarTitle: { fontSize: 20, fontWeight: '700', color: colors.text },
+  topBarTitle: { fontSize: 18, fontWeight: '800', color: colors.text },
+  paperBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 2,
+  },
+  liveBeacon: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#059669',
+  },
+  paperBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#059669',
+    letterSpacing: 0.5,
+  },
+  headerIconBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: '#F1F5F9',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  notifBadge: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    backgroundColor: colors.loss,
+    borderRadius: 8,
+    minWidth: 16,
+    height: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 3,
+  },
+  notifBadgeText: {
+    color: '#fff',
+    fontSize: 9,
+    fontWeight: '800',
+  },
+
+  riskBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  riskBannerWarning: {
+    backgroundColor: '#fffbeb',
+    borderColor: '#fde68a',
+  },
+  riskBannerDanger: {
+    backgroundColor: '#fef2f2',
+    borderColor: '#fecaca',
+  },
+  riskBannerText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+
+  heroCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 16,
+  },
+  heroHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 14,
+  },
+  heroSub: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  heroBalance: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: colors.text,
+    letterSpacing: -0.5,
+    marginTop: 2,
+  },
+  fundsPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#f0f9ff',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  fundsPillText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0284c7',
+  },
+
+  pnlRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 14,
+  },
+  pnlCol: {
+    flex: 1,
+  },
+  pnlDivider: {
+    width: 1,
+    height: 32,
+    backgroundColor: '#E2E8F0',
+    marginHorizontal: 12,
+  },
+  pnlLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  pnlValue: {
+    fontSize: 16,
+    fontWeight: '800',
+  },
+
+  marginWrap: {
+    marginBottom: 14,
+  },
+  marginLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  marginPct: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  marginBarTrack: {
+    height: 6,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  marginBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+
+  quickStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  quickStatCol: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  quickStatDivider: {
+    width: 1,
+    height: 28,
+    backgroundColor: '#F1F5F9',
+    marginHorizontal: 10,
+  },
+  quickStatIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  quickStatLabel: {
+    fontSize: 10,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  quickStatValue: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.text,
+  },
+
+  chartCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 16,
+  },
+  chartCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  chartSectionTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  chartSectionSub: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    marginTop: 1,
+  },
+  chartFullBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: '#eff6ff',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  chartFullText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.primary,
+  },
 
   scrollContent: { padding: 16, paddingBottom: 40, gap: 14 },
 

@@ -389,8 +389,15 @@ app.get('/portfolio', async (req, res) => {
 
         const allOpenPositions = [...enrichedEq, ...enrichedOpt, ...enrichedHoldings];
         const totalPnl = Math.round((realizedPnl + unrealizedPnl) * 100) / 100;
-        const todayStr = new Date().toISOString().slice(0, 10);
-        const todayClosed = closedPositions.filter(c => c.dateStr === todayStr);
+        const todayIst = require('./marketRules').istDateStr();
+        const todayClosed = safeClosedPositions.filter(c => {
+            if (c.dateStr === todayIst) return true;
+            if (c.closedAt) {
+                const cDate = new Date(c.closedAt).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+                return cDate === todayIst;
+            }
+            return false;
+        });
         const todayRealized = todayClosed.reduce((sum, c) => sum + (c.pnl || 0), 0);
         const todayPnl = Math.round((todayRealized + unrealizedPnl) * 100) / 100;
 
@@ -442,11 +449,12 @@ app.get('/dashboard-summary', async (req, res) => {
         const { NotificationModel } = require('./model/NotificationModel');
         const { PLRecordModel } = require('./model/PLRecordModel');
 
-        const [wallet, closedTrades, eqPositions, optPositions, notifs, plRecords] = await Promise.all([
-            WalletModel.findOne({ userId }).lean(),
-            ClosedPositionModel.find({ userId }).sort({ closedAt: -1 }).limit(50).lean(),
-            PositionsModel.find({ userId }).lean(),
-            OptionPositionsModel.find({ userId }).lean(),
+        const [wallet, closedTrades, eqPositions, optPositions, holdings, notifs, plRecords] = await Promise.all([
+            WalletModel.findOne({ userId }).lean().catch(() => null),
+            ClosedPositionModel.find({ userId }).sort({ closedAt: -1 }).lean().catch(() => []),
+            PositionsModel.find({ userId }).lean().catch(() => []),
+            OptionPositionsModel.find({ userId }).lean().catch(() => []),
+            HoldingsModel.find({ userId }).lean().catch(() => []),
             NotificationModel ? NotificationModel.find({ userId }).sort({ createdAt: -1 }).limit(20).lean() : [],
             PLRecordModel ? PLRecordModel.find({ userId }).sort({ date: -1 }).limit(7).lean() : []
         ]);
@@ -460,33 +468,97 @@ app.get('/dashboard-summary', async (req, res) => {
             : Math.max(0, balance - totalUsedMargin - blockedMargin);
         const usedMargin = totalUsedMargin;
 
-        let realizedPnl = closedTrades.reduce((sum, c) => sum + (c.pnl || 0), 0);
-        const todayClosed = closedTrades.filter(c => c.dateStr === dateStr || (c.closedAt && new Date(c.closedAt).toISOString().slice(0, 10) === dateStr));
+        const safeClosedPositions = Array.isArray(closedTrades) ? closedTrades : [];
+        let realizedPnl = safeClosedPositions.reduce((sum, c) => sum + (c?.pnl || 0), 0);
+        const todayIst = require('./marketRules').istDateStr();
+        const todayClosed = safeClosedPositions.filter(c => {
+            if (c.dateStr === todayIst) return true;
+            if (c.closedAt) {
+                const cDate = new Date(c.closedAt).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+                return cDate === todayIst;
+            }
+            return false;
+        });
         const todayRealized = todayClosed.reduce((sum, c) => sum + (c.pnl || 0), 0);
 
-        let winCount = closedTrades.filter(c => (c.pnl || 0) > 0).length;
-        const winRate = closedTrades.length > 0 ? Math.round((winCount / closedTrades.length) * 100) : 0;
+        let winCount = safeClosedPositions.filter(c => (c?.pnl || 0) > 0).length;
+        const winRate = safeClosedPositions.length > 0 ? Math.round((winCount / safeClosedPositions.length) * 100) : 0;
 
         let unrealizedPnl = 0;
-        for (const p of eqPositions) {
+        const enrichedEq = (eqPositions || []).map(p => {
             const live = marketDataService.getStockPrice(p.stockSymbol);
             const avg = Number(p.avgPrice || 0);
-            const cur = Number(live?.ltp ?? p.ltp ?? avg);
-            const dir = (p.side || 'BUY').toUpperCase() === 'BUY' ? 1 : -1;
-            unrealizedPnl += Math.round((cur - avg) * (p.quantity || 1) * dir * 100) / 100;
-        }
-        for (const p of optPositions) {
-            let liveLtp = marketDataService.getOptionLTPSync ? marketDataService.getOptionLTPSync(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry) : null;
-            if (!liveLtp && marketDataService.getOptionLTP) {
-                try { liveLtp = await marketDataService.getOptionLTP(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry); } catch {}
+            const curPrice = Number(live?.ltp ?? (typeof p.ltp === 'number' ? p.ltp : avg));
+            const side = p.side || (p.quantity >= 0 ? 'BUY' : 'SELL');
+            const dir = side.toUpperCase() === 'BUY' ? 1 : -1;
+            const posPnl = Math.round((curPrice - avg) * (p.quantity || 1) * dir * 100) / 100;
+            unrealizedPnl += (isNaN(posPnl) ? 0 : posPnl);
+            const pnlPct = avg > 0 ? Math.round(((curPrice - avg) / avg) * dir * 10000) / 100 : 0;
+            return {
+                ...(p.toObject ? p.toObject() : p),
+                kind: 'equity',
+                side,
+                symbol: p.stockSymbol,
+                avgPrice: avg,
+                ltp: curPrice,
+                pnl: isNaN(posPnl) ? 0 : posPnl,
+                pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
+            };
+        });
+
+        const enrichedOpt = await Promise.all((optPositions || []).map(async p => {
+            let rawLtp = null;
+            if (marketDataService.getOptionLTPSync && p.underlyingSymbol) {
+                rawLtp = marketDataService.getOptionLTPSync(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry);
+            }
+            if (!rawLtp && marketDataService.getOptionLTP && p.underlyingSymbol) {
+                try { rawLtp = await marketDataService.getOptionLTP(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry); } catch {}
             }
             const avg = Number(p.avgPremium || p.avgPrice || 100);
-            const cur = Number(typeof liveLtp === 'number' ? liveLtp : (liveLtp?.ltp ?? (typeof p.ltp === 'number' ? p.ltp : avg)));
-            const dir = (p.side || 'BUY').toUpperCase() === 'BUY' ? 1 : -1;
-            const diff = Math.round((cur - avg) * (p.quantity || 1) * dir * 100) / 100;
-            unrealizedPnl += isNaN(diff) ? 0 : diff;
-        }
+            const curPrice = Number(typeof rawLtp === 'number' ? rawLtp : (rawLtp?.ltp ?? (typeof p.ltp === 'number' && p.ltp > 0 ? p.ltp : avg)));
+            const side = p.side || (p.quantity >= 0 ? 'BUY' : 'SELL');
+            const dir = side.toUpperCase() === 'BUY' ? 1 : -1;
+            const posPnl = Math.round((curPrice - avg) * (p.quantity || 1) * dir * 100) / 100;
+            unrealizedPnl += (isNaN(posPnl) ? 0 : posPnl);
+            const pnlPct = avg > 0 ? Math.round(((curPrice - avg) / avg) * dir * 10000) / 100 : 0;
+            return {
+                ...(p.toObject ? p.toObject() : p),
+                kind: 'option',
+                side,
+                symbol: `${p.underlyingSymbol || 'OPTION'} ${p.strikePrice || ''} ${p.optionType || ''}`.trim(),
+                contractSymbol: p.symbol,
+                stockSymbol: p.symbol,
+                productType: p.productType || 'NRML',
+                avgPrice: avg,
+                avgPremium: avg,
+                ltp: curPrice,
+                pnl: isNaN(posPnl) ? 0 : posPnl,
+                pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
+            };
+        }));
 
+        const enrichedHoldings = (holdings || []).map(h => {
+            const live = marketDataService.getStockPrice(h.stockSymbol);
+            const avg = Number(h.avgPrice || 0);
+            const curPrice = Number(live?.ltp ?? (typeof h.ltp === 'number' ? h.ltp : avg));
+            const posPnl = Math.round((curPrice - avg) * (h.quantity || 1) * 100) / 100;
+            unrealizedPnl += (isNaN(posPnl) ? 0 : posPnl);
+            const pnlPct = avg > 0 ? Math.round(((curPrice - avg) / avg) * 10000) / 100 : 0;
+            return {
+                ...(h.toObject ? h.toObject() : h),
+                kind: 'holding',
+                side: 'BUY',
+                symbol: h.stockSymbol,
+                stockSymbol: h.stockSymbol,
+                productType: 'CNC',
+                avgPrice: avg,
+                ltp: curPrice,
+                pnl: isNaN(posPnl) ? 0 : posPnl,
+                pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
+            };
+        });
+
+        const allOpenPositions = [...enrichedEq, ...enrichedOpt, ...enrichedHoldings];
         const totalPnl = Math.round((realizedPnl + unrealizedPnl) * 100) / 100;
         const todayPnl = Math.round((todayRealized + unrealizedPnl) * 100) / 100;
 
@@ -507,18 +579,27 @@ app.get('/dashboard-summary', async (req, res) => {
             usedMargin,
             blockedMargin,
             totalPnl,
+            pnl: totalPnl,
             todayPnl,
+            realizedPnl: Math.round(realizedPnl * 100) / 100,
+            unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
             winRate,
-            openPositionsCount: eqPositions.length + optPositions.length,
+            openPositionsCount: allOpenPositions.length,
+            positions: allOpenPositions,
+            holdings: enrichedHoldings,
             portfolio: {
                 balance,
                 availableMargin,
                 usedMargin,
                 blockedMargin,
                 totalPnl,
+                pnl: totalPnl,
                 todayPnl,
+                realizedPnl: Math.round(realizedPnl * 100) / 100,
+                unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
                 winRate,
-                openPositionsCount: eqPositions.length + optPositions.length,
+                openPositionsCount: allOpenPositions.length,
+                positions: allOpenPositions,
             },
             indexes,
             unreadNotifs,
@@ -3623,8 +3704,16 @@ async function trackPortfolioSymbols() {
     // Establish LTP anchors (reliable) BEFORE the quote snapshot, so a
     // wrong-instrument quote value can't seed a symbol as a stuck bad anchor.
     await marketDataService.fastRefresh();
+    if (marketDataService.repairChangeFields) {
+        await marketDataService.repairChangeFields().catch(() => {});
+    }
     await broadcastMarketData();
 })();
+setInterval(() => {
+    if (marketDataService.repairChangeFields) {
+        marketDataService.repairChangeFields().catch(() => {});
+    }
+}, 5 * 60 * 1000);
 // Dhan-only, two-tier (no Groww/Yahoo):
 //  • fast tick every 1s → LTP endpoint (light, safely sustains 1 req/s) for
 //    live price movement + the order engine.

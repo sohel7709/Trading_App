@@ -85,16 +85,29 @@ const SocketClient = {
     }
 
     _socket = io(BASE_URL, {
-      auth: { token },
+      auth: token ? { token } : {},
       transports: ['websocket', 'polling'],
+      extraHeaders: {
+        'ngrok-skip-browser-warning': 'true',
+      },
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
-      reconnectionDelayMax: 8000,
-      timeout: 12000,
+      reconnectionDelayMax: 6000,
+      timeout: 10000,
     });
 
     _attachCoreListeners(_socket);
+    return _socket;
+  },
+
+  /**
+   * Returns the underlying socket instance, initializing it if not yet started.
+   */
+  getSocket() {
+    if (!_socket) {
+      this.connect();
+    }
     return _socket;
   },
 

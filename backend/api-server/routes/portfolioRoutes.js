@@ -167,11 +167,12 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
 
         const dateStr = require('../../marketRules').istDateStr();
 
-        const [wallet, closedTrades, eqPositions, optPositions, notifs, plRecords] = await Promise.all([
-            WalletModel.findOne({ userId }).lean(),
-            ClosedPositionModel.find({ userId }).sort({ closedAt: -1 }).limit(50).lean(),
-            PositionsModel.find({ userId }).lean(),
-            OptionPositionsModel.find({ userId }).lean(),
+        const [wallet, closedTrades, eqPositions, optPositions, holdings, notifs, plRecords] = await Promise.all([
+            WalletModel.findOne({ userId }).lean().catch(() => null),
+            ClosedPositionModel.find({ userId }).sort({ closedAt: -1 }).lean().catch(() => []),
+            PositionsModel.find({ userId }).lean().catch(() => []),
+            OptionPositionsModel.find({ userId }).lean().catch(() => []),
+            HoldingsModel.find({ userId }).lean().catch(() => []),
             NotificationModel ? NotificationModel.find({ userId }).sort({ createdAt: -1 }).limit(20).lean() : [],
             PLRecordModel ? PLRecordModel.find({ userId }).sort({ date: -1 }).limit(7).lean() : []
         ]);
@@ -184,37 +185,98 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
         const blockedMargin = wallet?.blockedMarginPaise ? wallet.blockedMarginPaise / 100 : (wallet?.blockedMargin || 0);
 
         // Realized & Win rate
-        let realizedPnl = closedTrades.reduce((sum, c) => sum + (c.pnl || 0), 0);
-        const todayClosed = closedTrades.filter(c => c.dateStr === dateStr || (c.closedAt && new Date(c.closedAt).toISOString().slice(0, 10) === dateStr));
+        const safeClosedPositions = Array.isArray(closedTrades) ? closedTrades : [];
+        let realizedPnl = safeClosedPositions.reduce((sum, c) => sum + (c?.pnl || 0), 0);
+        const todayIst = require('../../marketRules').istDateStr();
+        const todayClosed = safeClosedPositions.filter(c => {
+            if (c.dateStr === todayIst) return true;
+            if (c.closedAt) {
+                const cDate = new Date(c.closedAt).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+                return cDate === todayIst;
+            }
+            return false;
+        });
         const todayRealized = todayClosed.reduce((sum, c) => sum + (c.pnl || 0), 0);
 
-        let winCount = closedTrades.filter(c => (c.pnl || 0) > 0).length;
-        const winRate = closedTrades.length > 0 ? Math.round((winCount / closedTrades.length) * 100) : 0;
+        let winCount = safeClosedPositions.filter(c => (c?.pnl || 0) > 0).length;
+        const winRate = safeClosedPositions.length > 0 ? Math.round((winCount / safeClosedPositions.length) * 100) : 0;
 
-        // Unrealized PnL from Redis price cache
+        // Unrealized PnL
         let unrealizedPnl = 0;
-        for (const p of eqPositions) {
-            const cachedPrice = await redis.getPrice(p.stockSymbol);
+        const enrichedEq = (eqPositions || []).map(p => {
+            const live = marketDataService.getStockPrice(p.stockSymbol);
             const avg = Number(p.avgPrice || 0);
-            const cur = Number(cachedPrice?.ltp ?? p.ltp ?? avg);
-            const dir = (p.side || 'BUY').toUpperCase() === 'BUY' ? 1 : -1;
-            unrealizedPnl += Math.round((cur - avg) * (p.quantity || 1) * dir * 100) / 100;
-        }
-        for (const p of optPositions) {
+            const cur = Number(live?.ltp ?? (typeof p.ltp === 'number' ? p.ltp : avg));
+            const side = p.side || (p.quantity >= 0 ? 'BUY' : 'SELL');
+            const dir = side.toUpperCase() === 'BUY' ? 1 : -1;
+            const posPnl = Math.round((cur - avg) * (p.quantity || 1) * dir * 100) / 100;
+            unrealizedPnl += (isNaN(posPnl) ? 0 : posPnl);
+            const pnlPct = avg > 0 ? Math.round(((cur - avg) / avg) * dir * 10000) / 100 : 0;
+            return {
+                ...(p.toObject ? p.toObject() : p),
+                kind: 'equity',
+                side,
+                symbol: p.stockSymbol,
+                avgPrice: avg,
+                ltp: cur,
+                pnl: isNaN(posPnl) ? 0 : posPnl,
+                pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
+            };
+        });
+
+        const enrichedOpt = await Promise.all((optPositions || []).map(async p => {
             let liveLtp = null;
-            if (marketDataService.getOptionLTPSync) {
+            if (marketDataService.getOptionLTPSync && p.underlyingSymbol) {
                 liveLtp = marketDataService.getOptionLTPSync(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry);
             }
-            if (!liveLtp && marketDataService.getOptionLTP) {
+            if (!liveLtp && marketDataService.getOptionLTP && p.underlyingSymbol) {
                 try { liveLtp = await marketDataService.getOptionLTP(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry); } catch {}
             }
             const avg = Number(p.avgPremium || p.avgPrice || 100);
-            const cur = Number(typeof liveLtp === 'number' ? liveLtp : (liveLtp?.ltp ?? (typeof p.ltp === 'number' ? p.ltp : avg)));
-            const dir = (p.side || 'BUY').toUpperCase() === 'BUY' ? 1 : -1;
+            const cur = Number(typeof liveLtp === 'number' ? liveLtp : (liveLtp?.ltp ?? (typeof p.ltp === 'number' && p.ltp > 0 ? p.ltp : avg)));
+            const side = p.side || (p.quantity >= 0 ? 'BUY' : 'SELL');
+            const dir = side.toUpperCase() === 'BUY' ? 1 : -1;
             const diff = Math.round((cur - avg) * (p.quantity || 1) * dir * 100) / 100;
             unrealizedPnl += isNaN(diff) ? 0 : diff;
-        }
+            const pnlPct = avg > 0 ? Math.round(((cur - avg) / avg) * dir * 10000) / 100 : 0;
+            return {
+                ...(p.toObject ? p.toObject() : p),
+                kind: 'option',
+                side,
+                symbol: `${p.underlyingSymbol || 'OPTION'} ${p.strikePrice || ''} ${p.optionType || ''}`.trim(),
+                contractSymbol: p.symbol,
+                stockSymbol: p.symbol,
+                productType: p.productType || 'NRML',
+                avgPrice: avg,
+                avgPremium: avg,
+                ltp: cur,
+                pnl: isNaN(diff) ? 0 : diff,
+                pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
+            };
+        }));
 
+        const enrichedHoldings = (holdings || []).map(h => {
+            const live = marketDataService.getStockPrice(h.stockSymbol);
+            const avg = Number(h.avgPrice || 0);
+            const cur = Number(live?.ltp ?? (typeof h.ltp === 'number' ? h.ltp : avg));
+            const posPnl = Math.round((cur - avg) * (h.quantity || 1) * 100) / 100;
+            unrealizedPnl += (isNaN(posPnl) ? 0 : posPnl);
+            const pnlPct = avg > 0 ? Math.round(((cur - avg) / avg) * 10000) / 100 : 0;
+            return {
+                ...(h.toObject ? h.toObject() : h),
+                kind: 'holding',
+                side: 'BUY',
+                symbol: h.stockSymbol,
+                stockSymbol: h.stockSymbol,
+                productType: 'CNC',
+                avgPrice: avg,
+                ltp: cur,
+                pnl: isNaN(posPnl) ? 0 : posPnl,
+                pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
+            };
+        });
+
+        const allOpenPositions = [...enrichedEq, ...enrichedOpt, ...enrichedHoldings];
         const totalPnl = Math.round((realizedPnl + unrealizedPnl) * 100) / 100;
         const todayPnl = Math.round((todayRealized + unrealizedPnl) * 100) / 100;
 
@@ -235,18 +297,27 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
             usedMargin,
             blockedMargin,
             totalPnl,
+            pnl: totalPnl,
             todayPnl,
+            realizedPnl: Math.round(realizedPnl * 100) / 100,
+            unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
             winRate,
-            openPositionsCount: eqPositions.length + optPositions.length,
+            openPositionsCount: allOpenPositions.length,
+            positions: allOpenPositions,
+            holdings: enrichedHoldings,
             portfolio: {
                 balance,
                 availableMargin,
                 usedMargin,
                 blockedMargin,
                 totalPnl,
+                pnl: totalPnl,
                 todayPnl,
+                realizedPnl: Math.round(realizedPnl * 100) / 100,
+                unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
                 winRate,
-                openPositionsCount: eqPositions.length + optPositions.length,
+                openPositionsCount: allOpenPositions.length,
+                positions: allOpenPositions,
             },
             indexes,
             unreadNotifs,
