@@ -186,49 +186,76 @@ export default function DashboardScreen({ navigation }) {
     }));
   });
 
-  const handlePositionTick = (data) => {
-    if (!data) return;
-    const eq = Array.isArray(data.positions) ? data.positions : (Array.isArray(data.equityPositions) ? data.equityPositions : []);
-    const opt = Array.isArray(data.optionPositions) ? data.optionPositions : [];
-    const hld = Array.isArray(data.holdings) ? data.holdings : [];
-    const combined = [...eq, ...opt, ...hld];
-    if (combined.length > 0) {
-      setPositions(combined);
-    }
-    setPortfolio(prev => {
-      const next = { ...prev };
-      if (typeof data.totalPnl === 'number') next.totalPnl = data.totalPnl;
-      if (typeof data.todayPnl === 'number') next.todayPnl = data.todayPnl;
-      else if (typeof data.totalPnl === 'number' && next.todayPnl === undefined) next.todayPnl = data.totalPnl;
+    // ── Batched Position Ticks (250ms flush to prevent thread blocking) ──
+    const posBufferRef = useRef(null);
 
-      if (data.wallet) {
-        if (typeof data.wallet.balance === 'number') next.balance = data.wallet.balance;
-        if (typeof data.wallet.availableMargin === 'number') next.availableMargin = data.wallet.availableMargin;
-        const used = data.wallet.totalUsedMargin ?? data.wallet.usedMargin;
-        if (typeof used === 'number') next.usedMargin = used;
-        if (typeof data.wallet.blockedMargin === 'number') next.blockedMargin = data.wallet.blockedMargin;
+    const applyPositionTick = (data) => {
+      if (!data) return;
+      const eq = Array.isArray(data.positions) ? data.positions : (Array.isArray(data.equityPositions) ? data.equityPositions : []);
+      const opt = Array.isArray(data.optionPositions) ? data.optionPositions : [];
+      const hld = Array.isArray(data.holdings) ? data.holdings : [];
+      const combined = [...eq, ...opt, ...hld];
+      if (combined.length > 0) {
+        setPositions(combined);
       }
-      return next;
+      setPortfolio(prev => {
+        const next = { ...prev };
+        if (typeof data.totalPnl === 'number') next.totalPnl = data.totalPnl;
+        if (typeof data.todayPnl === 'number') next.todayPnl = data.todayPnl;
+        else if (typeof data.totalPnl === 'number' && next.todayPnl === undefined) next.todayPnl = data.totalPnl;
+
+        if (data.wallet) {
+          if (typeof data.wallet.balance === 'number') next.balance = data.wallet.balance;
+          if (typeof data.wallet.availableMargin === 'number') next.availableMargin = data.wallet.availableMargin;
+          const used = data.wallet.totalUsedMargin ?? data.wallet.usedMargin;
+          if (typeof used === 'number') next.usedMargin = used;
+          if (typeof data.wallet.blockedMargin === 'number') next.blockedMargin = data.wallet.blockedMargin;
+        }
+        return next;
+      });
+    };
+
+    useEffect(() => {
+      const timer = setInterval(() => {
+        if (posBufferRef.current) {
+          const snapshot = posBufferRef.current;
+          posBufferRef.current = null;
+          applyPositionTick(snapshot);
+        }
+      }, 250);
+      return () => clearInterval(timer);
+    }, []);
+
+    const handlePositionTick = (data) => {
+      posBufferRef.current = data;
+    };
+
+    useSocket(SOCKET_EVENTS.POSITION_TICK, handlePositionTick);
+    useSocket('positionsTick', handlePositionTick);
+
+    // Debounced refresh for trade executions (prevents duplicate bursts)
+    const fetchDebounceRef = useRef(null);
+    const debouncedFetchAll = useCallback(() => {
+      if (fetchDebounceRef.current) clearTimeout(fetchDebounceRef.current);
+      fetchDebounceRef.current = setTimeout(() => {
+        fetchAll();
+      }, 300);
+    }, [fetchAll]);
+
+    useSocket('orderExecuted', debouncedFetchAll);
+    useSocket('optionOrderExecuted', debouncedFetchAll);
+    useSocket('trade_update', debouncedFetchAll);
+    useSocket('walletUpdated', (data) => {
+      if (data?.wallet) {
+        setPortfolio(prev => ({
+          ...prev,
+          balance: data.wallet.balance ?? prev?.balance,
+          availableMargin: data.wallet.availableMargin ?? prev?.availableMargin,
+          usedMargin: (data.wallet.totalUsedMargin ?? data.wallet.usedMargin) ?? prev?.usedMargin,
+          blockedMargin: data.wallet.blockedMargin ?? prev?.blockedMargin,
+        }));
+      }
     });
-  };
-
-  useSocket(SOCKET_EVENTS.POSITION_TICK, handlePositionTick);
-  useSocket('positionsTick', handlePositionTick);
-
-  useSocket('orderExecuted', () => { fetchAll(); });
-  useSocket('optionOrderExecuted', () => { fetchAll(); });
-  useSocket('trade_update', () => { fetchAll(); });
-  useSocket('walletUpdated', (data) => {
-    if (data?.wallet) {
-      setPortfolio(prev => ({
-        ...prev,
-        balance: data.wallet.balance ?? prev?.balance,
-        availableMargin: data.wallet.availableMargin ?? prev?.availableMargin,
-        usedMargin: (data.wallet.totalUsedMargin ?? data.wallet.usedMargin) ?? prev?.usedMargin,
-        blockedMargin: data.wallet.blockedMargin ?? prev?.blockedMargin,
-      }));
-    }
-  });
 
   useSocket('notification', (notif) => {
     setUnreadNotifs(prev => prev + 1);
@@ -411,43 +438,6 @@ export default function DashboardScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
-        {/* ── F&O OPTION CHAIN DIRECT ACCESS BANNER ─────────────────── */}
-        <TouchableOpacity
-          style={styles.optionChainBanner}
-          onPress={() => navigation.navigate('OptionChain', { indexName: 'NIFTY 50' })}
-          activeOpacity={0.88}
-        >
-          <View style={styles.optionChainHeader}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-              <View style={styles.optionChainIconBox}>
-                <Ionicons name="git-network-outline" size={20} color="#6366f1" />
-              </View>
-              <View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Text style={styles.optionChainTitle}>Option Chain & F&O</Text>
-                  <View style={styles.livePill}>
-                    <Text style={styles.livePillText}>STRIKES</Text>
-                  </View>
-                </View>
-                <Text style={styles.optionChainSub}>Live Greek IV, Call/Put chain & 1-tap trade</Text>
-              </View>
-            </View>
-            <Ionicons name="arrow-forward-circle" size={26} color="#6366f1" />
-          </View>
-
-          {/* Quick Index Buttons */}
-          <View style={styles.optionIndicesRow}>
-            {['NIFTY 50', 'BANK NIFTY', 'FINNIFTY', 'SENSEX'].map((idx) => (
-              <TouchableOpacity
-                key={idx}
-                style={styles.optionIndexBtn}
-                onPress={() => navigation.navigate('OptionChain', { indexName: idx })}
-              >
-                <Text style={styles.optionIndexBtnText}>{idx}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </TouchableOpacity>
 
         {/* ── BOTTOM SECTION: Mini 7-Day PnL Chart 📈 ──────────────── */}
         <View style={styles.chartCard}>
@@ -528,23 +518,6 @@ export default function DashboardScreen({ navigation }) {
           </ScrollView>
         </View>
 
-        {/* ── Quick Trade CTA ───────────────────────────────────────── */}
-        <TouchableOpacity
-          style={styles.tradeCtaBtn}
-          onPress={() => navigation.navigate('Chain')}
-          activeOpacity={0.88}
-        >
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            <View style={styles.tradeCtaIcon}>
-              <Ionicons name="trending-up" size={22} color="#fff" />
-            </View>
-            <View>
-              <Text style={styles.tradeCtaTitle}>Open Options & Trade</Text>
-              <Text style={styles.tradeCtaSub}>NIFTY · BANKNIFTY live options chain</Text>
-            </View>
-          </View>
-          <Ionicons name="arrow-forward" size={20} color="#fff" />
-        </TouchableOpacity>
       </ScrollView>
 
       {/* ── HARD STOP RISK ALERT MODAL ──────────────────────────────── */}

@@ -202,27 +202,8 @@ export const api = {
   getIpos: () => get('/market/ipos'),
 };
 
-let socketInstance = null;
-
 export const getSocket = () => {
-  if (!socketInstance) {
-    socketInstance = io(BASE_URL, {
-      // Prefer websocket, but ALLOW polling fallback. websocket-only meant
-      // that if the raw WS handshake failed on the device's network (common
-      // on mobile carriers / proxies / some wifi), socket.io never connected
-      // and no marketData ticks arrived — REST kept working so holdings
-      // loaded, but the LTP sat frozen at the last fetched value. Polling
-      // almost always gets through and upgrades to ws when possible.
-      transports: ['websocket', 'polling'],
-      extraHeaders: {
-        'ngrok-skip-browser-warning': 'true',
-      },
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      timeout: 10000,
-    });
-  }
-  return socketInstance;
+  // Use the single global socket instance from SocketClient to eliminate duplicate socket connections
+  const SocketClient = require('../socket/socketClient').default;
+  return SocketClient.getSocket();
 };

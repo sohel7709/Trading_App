@@ -11,26 +11,39 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors } from '../theme/colors';
 import { api } from '../api/client';
 import useThrottledSocket from '../hooks/useThrottledSocket';
+import { useLiveSymbol, marketStore } from '../store/marketStore';
 import OrderBottomSheet from '../components/order/OrderBottomSheet';
 import RejectionReasonModal from '../components/order/RejectionReasonModal';
 import SkeletonLoader from '../components/SkeletonLoader';
 
 const fmt = (n) => '₹' + Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const InstrumentRow = React.memo(function InstrumentRow({ item, onPress, onRemove }) {
-  const chg = Number(item.change || 0);
-  const chgPct = Number(item.changePercent || 0);
+const InstrumentRow = React.memo(function InstrumentRow({ symbol, name, initialLtp, initialChange, initialChangePercent, onPress, onRemove }) {
+  const live = useLiveSymbol(symbol);
+  const ltp = live?.ltp ?? initialLtp ?? 0;
+  const chg = Number(live?.change ?? initialChange ?? 0);
+  const chgPct = Number(live?.changePercent ?? initialChangePercent ?? 0);
   const isGain = chg >= 0;
+
+  const handlePress = useCallback(() => {
+    onPress?.(symbol);
+  }, [onPress, symbol]);
+
+  const handleRemove = useCallback((e) => {
+    e.stopPropagation();
+    onRemove?.(symbol);
+  }, [onRemove, symbol]);
+
   return (
-    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.75}>
+    <TouchableOpacity style={styles.card} onPress={handlePress} activeOpacity={0.75}>
       <View style={styles.cardLeft}>
-        <Text style={styles.symbolText}>{item.symbol}</Text>
-        {item.name && item.name !== item.symbol && (
-          <Text style={styles.companyText} numberOfLines={1}>{item.name}</Text>
+        <Text style={styles.symbolText}>{symbol}</Text>
+        {name && name !== symbol && (
+          <Text style={styles.companyText} numberOfLines={1}>{name}</Text>
         )}
       </View>
       <View style={styles.cardRight}>
-        <Text style={styles.priceText}>{fmt(item.ltp || 0)}</Text>
+        <Text style={styles.priceText}>{fmt(ltp)}</Text>
         <Text style={[styles.changeText, { color: isGain ? colors.gain : colors.loss }]}>
           {isGain ? '+' : ''}{chg.toFixed(2)} ({isGain ? '+' : ''}{chgPct.toFixed(2)}%)
         </Text>
@@ -38,10 +51,7 @@ const InstrumentRow = React.memo(function InstrumentRow({ item, onPress, onRemov
       {onRemove && (
         <TouchableOpacity
           style={styles.removeBtn}
-          onPress={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
+          onPress={handleRemove}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
         >
           <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
@@ -120,6 +130,7 @@ export default function WatchlistScreen({ navigation }) {
       const liveData = await api.getLiveMarket().catch(() => null);
       if (liveData?.prices) {
         setLivePrices(liveData.prices);
+        marketStore.seed(liveData.prices, liveData.indexes);
       }
     } catch (e) {
       console.warn('Watchlist fetch error:', e.message);
@@ -224,7 +235,7 @@ export default function WatchlistScreen({ navigation }) {
   };
 
   // Direct remove stock from watchlist main view
-  const handleRemoveStock = async (symbol) => {
+  const handleRemoveStock = useCallback(async (symbol) => {
     if (!activeWatchlist) return;
     const symUpper = symbol.toUpperCase();
     
@@ -243,7 +254,7 @@ export default function WatchlistScreen({ navigation }) {
       Alert.alert('Error', e.message || 'Failed to remove script');
       fetchWatchlists(true, activeWatchlist._id);
     }
-  };
+  }, [activeWatchlist, fetchWatchlists]);
 
   const handleCreateWatchlist = () => {
     setNewListName(`Watchlist ${watchlists.length + 1}`);
@@ -314,8 +325,8 @@ export default function WatchlistScreen({ navigation }) {
     );
   };
 
-  const openOrderSheet = (symbol) => {
-    const p = livePrices[symbol] || { ltp: 0 };
+  const openOrderSheet = useCallback((symbol) => {
+    const p = marketStore.getPrice(symbol) || livePrices[symbol] || { ltp: 0 };
     setSheetInstrument({
       underlyingSymbol: symbol,
       strikePrice: null,
@@ -325,9 +336,9 @@ export default function WatchlistScreen({ navigation }) {
       lotSize: 1,
     });
     setSheetVisible(true);
-  };
+  }, [livePrices]);
 
-  const handleOrderResult = ({ success, result, error }) => {
+  const handleOrderResult = useCallback(({ success, result, error }) => {
     if (!success) {
       setRejectionReason(typeof error === 'string' ? error : (error?.message || 'Order was rejected'));
       setRejectionOrderInfo(sheetInstrument ? {
@@ -337,17 +348,22 @@ export default function WatchlistScreen({ navigation }) {
       } : null);
       setRejectionVisible(true);
     }
-  };
+  }, [sheetInstrument]);
 
-  const watchItems = activeStocks.map(sym => {
-    const live = livePrices[sym] || {};
-    return {
-      symbol: sym,
-      ltp: live.ltp || 0,
-      change: live.change || 0,
-      changePercent: live.changePercent || 0,
-    };
-  });
+  const renderWatchItem = useCallback(({ item }) => {
+    const sym = typeof item === 'string' ? item : item.symbol;
+    const initial = livePrices[sym];
+    return (
+      <InstrumentRow 
+        symbol={sym}
+        initialLtp={initial?.ltp}
+        initialChange={initial?.change}
+        initialChangePercent={initial?.changePercent}
+        onPress={openOrderSheet} 
+        onRemove={handleRemoveStock}
+      />
+    );
+  }, [openOrderSheet, handleRemoveStock, livePrices]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -519,7 +535,7 @@ export default function WatchlistScreen({ navigation }) {
              <View style={{ padding: 16, gap: 12 }}>
                  {[...Array(6)].map((_, i) => <SkeletonLoader key={i} width="100%" height={72} borderRadius={8} />)}
              </View>
-          ) : watchItems.length === 0 ? (
+          ) : activeStocks.length === 0 ? (
             <View style={styles.emptyState}>
               <View style={styles.emptyIconCircle}>
                 <Ionicons name="list-outline" size={42} color={colors.primary} />
@@ -540,16 +556,11 @@ export default function WatchlistScreen({ navigation }) {
             </View>
           ) : (
             <FlatList
-              data={watchItems}
-              keyExtractor={item => item.symbol}
-              renderItem={({ item }) => (
-                <InstrumentRow 
-                  item={item} 
-                  onPress={() => openOrderSheet(item.symbol)} 
-                  onRemove={() => handleRemoveStock(item.symbol)}
-                />
-              )}
-              initialNumToRender={12}
+              data={activeStocks}
+              keyExtractor={(item) => (typeof item === 'string' ? item : item.symbol)}
+              renderItem={renderWatchItem}
+              getItemLayout={(_, index) => ({ length: 68, offset: 68 * index, index })}
+              initialNumToRender={10}
               maxToRenderPerBatch={10}
               windowSize={5}
               removeClippedSubviews={Platform.OS !== 'web'}

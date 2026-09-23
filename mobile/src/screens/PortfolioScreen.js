@@ -11,8 +11,8 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  RefreshControl, StatusBar, Modal, Pressable,
+  View, Text, StyleSheet, ScrollView, FlatList, TouchableOpacity,
+  RefreshControl, StatusBar, Modal, Pressable, Platform,
   ActivityIndicator, Alert, Dimensions,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -661,55 +661,76 @@ export default function PortfolioScreen({ navigation }) {
           <SkeletonLoader width="100%" height={96} borderRadius={12} />
         </View>
       ) : (
-        <ScrollView
-          contentContainerStyle={[
-            styles.scrollContent,
-            (activeTab === 'OPEN'
-              ? safePositions.length === 0
-              : safeClosedTrades.length === 0) && styles.emptyContainer,
-          ]}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => {
-                setRefreshing(true);
-                fetchPortfolioData();
-              }}
-              colors={[colors.primary]}
-            />
-          }
-        >
-          {activeTab === 'OPEN' ? (
-            <>
-              {/* Positions List */}
-              {safePositions.length === 0 ? (
-                <View style={styles.emptyState}>
-                  <Ionicons name="pie-chart-outline" size={56} color="#CBD5E1" />
-                  <Text style={styles.emptyTitle}>No open positions</Text>
-                  <Text style={styles.emptySubtitle}>
-                    You have no running trades. Tap below to view option chain or instruments.
-                  </Text>
-                  <TouchableOpacity
-                    style={styles.goTradeBtn}
-                    onPress={() => navigation.navigate('Chain')}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={styles.goTradeBtnText}>Explore Option Chain</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                safePositions.map((pos) => (
-                  <PositionCard
-                    key={pos._id || pos.symbol}
-                    position={pos}
-                    onTradeAction={handlePositionPress}
-                    onSquareOff={setSquareOffTarget}
-                  />
-                ))
-              )}
-            </>
-          ) : (
-            safeClosedTrades.length === 0 ? (
+        activeTab === 'OPEN' ? (
+          <FlatList
+            data={safePositions}
+            keyExtractor={(item, index) => item._id || item.symbol || String(index)}
+            renderItem={({ item }) => (
+              <PositionCard
+                position={item}
+                onTradeAction={handlePositionPress}
+                onSquareOff={setSquareOffTarget}
+              />
+            )}
+            initialNumToRender={8}
+            maxToRenderPerBatch={10}
+            windowSize={5}
+            removeClippedSubviews={Platform.OS !== 'web'}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={() => {
+                  setRefreshing(true);
+                  fetchPortfolioData();
+                }}
+                colors={[colors.primary]}
+              />
+            }
+            contentContainerStyle={[
+              styles.scrollContent,
+              safePositions.length === 0 && styles.emptyContainer,
+            ]}
+            ListEmptyComponent={
+              <View style={styles.emptyState}>
+                <Ionicons name="pie-chart-outline" size={56} color="#CBD5E1" />
+                <Text style={styles.emptyTitle}>No open positions</Text>
+                <Text style={styles.emptySubtitle}>
+                  You have no running trades. Tap below to view option chain or instruments.
+                </Text>
+                <TouchableOpacity
+                  style={styles.goTradeBtn}
+                  onPress={() => navigation.navigate('Chain')}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.goTradeBtnText}>Explore Option Chain</Text>
+                </TouchableOpacity>
+              </View>
+            }
+          />
+        ) : (
+          <FlatList
+            data={safeClosedTrades}
+            keyExtractor={(item, index) => item._id || String(index)}
+            renderItem={({ item }) => <ClosedTradeCard trade={item} />}
+            initialNumToRender={10}
+            maxToRenderPerBatch={10}
+            windowSize={5}
+            removeClippedSubviews={Platform.OS !== 'web'}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={() => {
+                  setRefreshing(true);
+                  fetchPortfolioData();
+                }}
+                colors={[colors.primary]}
+              />
+            }
+            contentContainerStyle={[
+              styles.scrollContent,
+              safeClosedTrades.length === 0 && styles.emptyContainer,
+            ]}
+            ListEmptyComponent={
               <View style={styles.emptyState}>
                 <Ionicons name="documents-outline" size={56} color="#CBD5E1" />
                 <Text style={styles.emptyTitle}>No closed trades</Text>
@@ -717,13 +738,9 @@ export default function PortfolioScreen({ navigation }) {
                   Completed trades for this batch session will be archived here.
                 </Text>
               </View>
-            ) : (
-              safeClosedTrades.map((trade, idx) => (
-                <ClosedTradeCard key={trade._id || idx} trade={trade} />
-              ))
-            )
-          )}
-        </ScrollView>
+            }
+          />
+        )
       )}
 
       {/* Square-off modal */}

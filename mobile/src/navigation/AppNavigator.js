@@ -224,6 +224,7 @@ const tabStyles = StyleSheet.create({
 export default function AppNavigator() {
   return (
     <Tab.Navigator
+      initialRouteName="Watchlist"
       screenOptions={{
         headerShown: false,
         tabHideOnKeyboard: true,
@@ -244,21 +245,21 @@ export default function AppNavigator() {
       }}
     >
       <Tab.Screen
-        name="Home"
-        component={HomeStack}
-        options={{
-          tabBarIcon: ({ focused }) => (
-            <TabIcon icon="home" iconOutline="home-outline" focused={focused} label="Home" />
-          ),
-        }}
-      />
-
-      <Tab.Screen
         name="Watchlist"
         component={WatchlistStack}
         options={{
           tabBarIcon: ({ focused }) => (
             <TabIcon icon="bookmark" iconOutline="bookmark-outline" focused={focused} label="Watchlist" />
+          ),
+        }}
+      />
+
+      <Tab.Screen
+        name="Options"
+        component={TradeStack}
+        options={{
+          tabBarIcon: ({ focused }) => (
+            <TabIcon icon="trending-up" iconOutline="trending-up-outline" focused={focused} label="Options" />
           ),
         }}
       />
@@ -274,7 +275,7 @@ export default function AppNavigator() {
       />
 
       <Tab.Screen
-        name="Positions"
+        name="Portfolio"
         component={PortfolioStack}
         options={{
           tabBarIcon: ({ focused }) => (
@@ -284,12 +285,42 @@ export default function AppNavigator() {
       />
 
       <Tab.Screen
-        name="ProfileTab"
+        name="Profile"
         component={ProfileStack}
         options={{
           tabBarIcon: ({ focused }) => (
             <TabIcon icon="person" iconOutline="person-outline" focused={focused} label="Profile" />
           ),
+        }}
+      />
+
+      {/* Hidden Aliases for backward-compatibility with existing stack routes */}
+      <Tab.Screen
+        name="Positions"
+        component={PortfolioStack}
+        options={{
+          tabBarItemStyle: { display: 'none' },
+        }}
+      />
+      <Tab.Screen
+        name="Trade"
+        component={TradeStack}
+        options={{
+          tabBarItemStyle: { display: 'none' },
+        }}
+      />
+      <Tab.Screen
+        name="ProfileTab"
+        component={ProfileStack}
+        options={{
+          tabBarItemStyle: { display: 'none' },
+        }}
+      />
+      <Tab.Screen
+        name="Home"
+        component={HomeStack}
+        options={{
+          tabBarItemStyle: { display: 'none' },
         }}
       />
     </Tab.Navigator>
