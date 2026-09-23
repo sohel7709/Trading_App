@@ -54,6 +54,39 @@ Har commit message clean aur standardized format me hona chahiye:
 
 ---
 
+## 🌱 Interactive Branch Creation Protocol (Whenever user says "create branch")
+
+Jab bhi user kahe: *"create branch"*, *"naya branch banao"*, ya nayi branch create karne ko bole, to agent ko ye strict protocol follow karna hoga:
+
+### 1. 🔍 Context & Work Check
+- Chat history, active open files, aur recent changes ko analyze karke samjho ki user abhi kis topic par kaam kar raha hai (e.g. New feature, bug fix, staging/testing, ya hotfix).
+- Current branch verify karein: `git branch --show-current`.
+
+### 2. ❓ Interactive Questions Puchen (Pehle confirm karein)
+Directly branch banane se pehle user se questions puchen:
+1. **Work Category**: Yeh kis type ka task hai?
+   - 🟢 `feature/<name>` (Naya feature banana hai)
+   - 🐞 `bugfix/<name>` (Koi bug solve karna hai)
+   - 🧪 `testing / staging` (Testing/QA deployment ke liye)
+   - 🚨 `hotfix/<name>` (Production par urgent fix)
+2. **Suggested Branch Name**: Chat context ke hisaab se ready-made suggested name offer karein (e.g. `feature/dhan-token-refresh`) aur user se confirmation lein.
+3. **Branching & Merge Plan Confirm Karein**:
+   - Kis branch se nikalna hai (e.g. `develop` se).
+   - Kaam complete hone ke baad kis branch me merge hoga (e.g. `develop` me).
+
+### 3. 🚀 Safe Execution
+Confirmation milne par:
+```bash
+# Clean working state confirm karein
+git status
+# Base branch se latest pull lein
+git checkout develop && git pull origin develop
+# Nayi branch create karein
+git checkout -b <approved-branch-name>
+```
+
+---
+
 ## 🤖 AI Agent Push Protocol (Whenever user says "push the code")
 
 Jab bhi user kahe: *"push the code"*, *"commit and push"*, ya code save/upload karne ko bole:
