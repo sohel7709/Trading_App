@@ -91,7 +91,15 @@ export default function DashboardScreen({ navigation }) {
       // 1. Try ultra-fast combined endpoint (1 single network call)
       const summary = await api.getDashboardSummary().catch(() => null);
       if (summary && summary.success) {
-        if (summary.portfolio) setPortfolio(summary.portfolio);
+        if (summary.portfolio) {
+          setPortfolio(summary.portfolio);
+          if (Array.isArray(summary.portfolio.positions)) {
+            setPositions(summary.portfolio.positions);
+          }
+        }
+        if (Array.isArray(summary.positions)) {
+          setPositions(summary.positions);
+        }
         if (summary.indexes) setIndexes(summary.indexes);
         if (typeof summary.unreadNotifs === 'number') setUnreadNotifs(summary.unreadNotifs);
         if (summary.riskAlert) setRiskAlert(summary.riskAlert);
@@ -168,29 +176,24 @@ export default function DashboardScreen({ navigation }) {
     const targetUid = (data.studentId || data.userId)?.toString();
     if (!targetUid || !currentUid || targetUid !== currentUid) return;
 
-    // Only apply targeted updates with margin/wallet data (e.g. from admin capital assignment)
-    if (data.availableMargin !== undefined || data.wallet) {
-      setPortfolio(prev => ({
-        ...prev,
-        ...(typeof data.todayPnl === 'number' ? { todayPnl: data.todayPnl } : {}),
-        ...(typeof data.totalPnl === 'number' ? { totalPnl: data.totalPnl } : {}),
-        ...(typeof data.balance === 'number' ? { balance: data.balance } : {}),
-        ...(typeof data.availableMargin === 'number' ? { availableMargin: data.availableMargin } : {}),
-        ...(typeof (data.totalUsedMargin ?? data.usedMargin) === 'number' ? { usedMargin: data.totalUsedMargin ?? data.usedMargin } : {}),
-      }));
-    }
+    setPortfolio(prev => ({
+      ...prev,
+      ...(typeof data.todayPnl === 'number' ? { todayPnl: data.todayPnl } : {}),
+      ...(typeof data.totalPnl === 'number' ? { totalPnl: data.totalPnl } : {}),
+      ...(typeof data.balance === 'number' ? { balance: data.balance } : {}),
+      ...(typeof data.availableMargin === 'number' ? { availableMargin: data.availableMargin } : {}),
+      ...(typeof (data.totalUsedMargin ?? data.usedMargin) === 'number' ? { usedMargin: data.totalUsedMargin ?? data.usedMargin } : {}),
+    }));
   });
 
   const handlePositionTick = (data) => {
     if (!data) return;
-    const eq = Array.isArray(data.positions) ? data.positions : [];
+    const eq = Array.isArray(data.positions) ? data.positions : (Array.isArray(data.equityPositions) ? data.equityPositions : []);
     const opt = Array.isArray(data.optionPositions) ? data.optionPositions : [];
-    const combined = [...eq, ...opt];
-    if (combined.length > 0 || (Array.isArray(data.positions) && Array.isArray(data.optionPositions))) {
-      setPositions(prev => {
-        const holdings = (prev || []).filter(p => p.kind === 'holding');
-        return [...combined, ...holdings];
-      });
+    const hld = Array.isArray(data.holdings) ? data.holdings : [];
+    const combined = [...eq, ...opt, ...hld];
+    if (combined.length > 0) {
+      setPositions(combined);
     }
     setPortfolio(prev => {
       const next = { ...prev };
@@ -503,7 +506,12 @@ export default function DashboardScreen({ navigation }) {
               </View>
             ) : (
               Object.values(indexes || {}).map((idx) => {
-                const isGain = (idx.change ?? 0) >= 0;
+                const chgVal = Number(idx.change ?? 0);
+                const pc = Number(idx.previousClose ?? 0);
+                const chgPct = (typeof idx.changePercent === 'number' && idx.changePercent !== 0)
+                  ? idx.changePercent
+                  : (pc > 0 && chgVal !== 0 ? (chgVal / pc) * 100 : (idx.changePercent ?? 0));
+                const isGain = chgVal >= 0 && chgPct >= 0;
                 return (
                   <View key={idx.name || idx.symbol} style={styles.indexPill}>
                     <Text style={styles.indexName}>{idx.name || idx.symbol}</Text>
@@ -511,7 +519,7 @@ export default function DashboardScreen({ navigation }) {
                       {Number(idx.ltp || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
                     </Text>
                     <Text style={[styles.indexPct, { color: isGain ? colors.gain : colors.loss }]}>
-                      {isGain ? '+' : ''}{Number(idx.changePercent ?? 0).toFixed(2)}%
+                      {isGain ? '+' : ''}{Number(chgPct).toFixed(2)}%
                     </Text>
                   </View>
                 );

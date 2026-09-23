@@ -55,25 +55,39 @@ const INDEX_SYMBOLS = [
 // Baseline seed data (ensures indices and core stocks are always immediately available
 // even on cold start, during off-market hours, or during transient broker reconnection)
 const DEFAULT_INDEX_PRICES = {
-    'NIFTY 50':      { ltp: 23446.80, previousClose: 23446.80, change: 0, changePercent: 0 },
-    'BANK NIFTY':    { ltp: 50120.50, previousClose: 50120.50, change: 0, changePercent: 0 },
-    'FINNIFTY':      { ltp: 23250.30, previousClose: 23250.30, change: 0, changePercent: 0 },
-    'MIDCPNIFTY':    { ltp: 12350.25, previousClose: 12350.25, change: 0, changePercent: 0 },
-    'SENSEX':        { ltp: 76850.40, previousClose: 76850.40, change: 0, changePercent: 0 },
-    'BANKEX':        { ltp: 57200.15, previousClose: 57200.15, change: 0, changePercent: 0 },
-    'NIFTY NEXT 50': { ltp: 71200.80, previousClose: 71200.80, change: 0, changePercent: 0 },
-    'NIFTY IT':      { ltp: 36500.20, previousClose: 36500.20, change: 0, changePercent: 0 },
-    'INDIA VIX':     { ltp: 13.45,    previousClose: 13.45,    change: 0, changePercent: 0 },
+    'NIFTY 50':      { ltp: 23446.80, previousClose: 23329.00, change: 117.80, changePercent: 0.50 },
+    'BANK NIFTY':    { ltp: 56548.90, previousClose: 56209.65, change: 339.25, changePercent: 0.60 },
+    'FINNIFTY':      { ltp: 25564.85, previousClose: 25486.75, change: 78.10, changePercent: 0.31 },
+    'MIDCPNIFTY':    { ltp: 14572.25, previousClose: 14510.80, change: 61.45, changePercent: 0.42 },
+    'SENSEX':        { ltp: 74828.25, previousClose: 74648.30, change: 179.95, changePercent: 0.24 },
+    'BANKEX':        { ltp: 63916.52, previousClose: 63520.10, change: 396.42, changePercent: 0.62 },
+    'NIFTY NEXT 50': { ltp: 72462.40, previousClose: 72110.50, change: 351.90, changePercent: 0.49 },
+    'NIFTY IT':      { ltp: 28334.05, previousClose: 28190.20, change: 143.85, changePercent: 0.51 },
+    'INDIA VIX':     { ltp: 10.35,    previousClose: 10.80,    change: -0.45, changePercent: -4.17 },
 };
 
 const BASELINE_STOCKS = {
-    'RELIANCE': 2950.00, 'TCS': 3920.00, 'HDFCBANK': 1680.00,
-    'INFY': 1520.00, 'ICICIBANK': 1180.00, 'HINDUNILVR': 2410.00,
-    'SBIN': 810.00, 'BHARTIARTL': 1420.00, 'ITC': 430.00,
-    'LT': 3650.00, 'TATAMOTORS': 980.00, 'KOTAKBANK': 1780.00,
-    'AXISBANK': 1190.00, 'MARUTI': 12200.00, 'SUNPHARMA': 1540.00,
-    'BAJFINANCE': 6850.00, 'TITAN': 3450.00, 'WIPRO': 480.00,
-    'HCLTECH': 1580.00, 'ADANIENT': 3120.00, 'TATASTEEL': 165.00
+    'RELIANCE':   { ltp: 2950.00, previousClose: 2932.00, change: 18.00, changePercent: 0.61 },
+    'TCS':        { ltp: 3920.00, previousClose: 3902.50, change: 17.50, changePercent: 0.45 },
+    'HDFCBANK':   { ltp: 1680.00, previousClose: 1672.00, change: 8.00, changePercent: 0.48 },
+    'INFY':       { ltp: 1520.00, previousClose: 1511.20, change: 8.80, changePercent: 0.58 },
+    'ICICIBANK':  { ltp: 1180.00, previousClose: 1173.50, change: 6.50, changePercent: 0.55 },
+    'HINDUNILVR': { ltp: 2410.00, previousClose: 2402.00, change: 8.00, changePercent: 0.33 },
+    'SBIN':       { ltp: 810.00,  previousClose: 804.50,  change: 5.50, changePercent: 0.68 },
+    'BHARTIARTL': { ltp: 1420.00, previousClose: 1412.00, change: 8.00, changePercent: 0.57 },
+    'ITC':        { ltp: 430.00,  previousClose: 428.20,  change: 1.80, changePercent: 0.42 },
+    'LT':         { ltp: 3650.00, previousClose: 3632.00, change: 18.00, changePercent: 0.50 },
+    'TATAMOTORS': { ltp: 980.00,  previousClose: 974.00,  change: 6.00, changePercent: 0.62 },
+    'KOTAKBANK':  { ltp: 1780.00, previousClose: 1771.50, change: 8.50, changePercent: 0.48 },
+    'AXISBANK':   { ltp: 1190.00, previousClose: 1183.00, change: 7.00, changePercent: 0.59 },
+    'MARUTI':     { ltp: 12200.0, previousClose: 12130.0, change: 70.00, changePercent: 0.58 },
+    'SUNPHARMA':  { ltp: 1540.00, previousClose: 1532.00, change: 8.00, changePercent: 0.52 },
+    'BAJFINANCE': { ltp: 6850.00, previousClose: 6815.00, change: 35.00, changePercent: 0.51 },
+    'TITAN':      { ltp: 3450.00, previousClose: 3432.00, change: 18.00, changePercent: 0.52 },
+    'WIPRO':      { ltp: 480.00,  previousClose: 477.50,  change: 2.50, changePercent: 0.52 },
+    'HCLTECH':    { ltp: 1580.00, previousClose: 1571.00, change: 9.00, changePercent: 0.57 },
+    'ADANIENT':   { ltp: 3120.00, previousClose: 3105.00, change: 15.00, changePercent: 0.48 },
+    'TATASTEEL':  { ltp: 165.00,  previousClose: 164.10,  change: 0.90, changePercent: 0.55 },
 };
 
 // In-memory cache
@@ -105,18 +119,22 @@ function seedBaselineIndices() {
 }
 
 function seedBaselineStocks() {
-    for (const [sym, price] of Object.entries(BASELINE_STOCKS)) {
+    for (const [sym, def] of Object.entries(BASELINE_STOCKS)) {
         if (!stockPrices[sym] || !(stockPrices[sym].ltp > 0)) {
+            const price = typeof def === 'object' ? def.ltp : def;
+            const pc = typeof def === 'object' ? def.previousClose : def;
+            const chg = typeof def === 'object' ? def.change : 0;
+            const chgPct = typeof def === 'object' ? def.changePercent : 0;
             stockPrices[sym] = {
                 symbol: sym,
                 ltp: price,
                 open: price,
                 high: price,
                 low: price,
-                previousClose: price,
+                previousClose: pc,
                 volume: 500000,
-                change: 0,
-                changePercent: 0,
+                change: chg,
+                changePercent: chgPct,
                 source: 'BASELINE',
             };
         }
@@ -303,16 +321,13 @@ async function fetchQuote(symbol) {
 //  - with no prior price yet (cold start): fall back to a ±10% circuit-style
 //    band around the day's previous close, which is reliable even when the
 //    live OHLC/LTP isn't.
-function isSaneTick(oldLtp, newLtp, prevClose) {
+function isSaneTick(oldLtp, newLtp, prevClose, isIndex = false) {
     if (!(newLtp > 0)) return false;
-    // Rolling: reject a single tick that jumps >6% off the last good price.
-    if (oldLtp > 0)    return Math.abs(newLtp - oldLtp) / oldLtp <= 0.06;
-    // Cold start: the anchor passed in is now the reliable daily-candle prev
-    // close, so a tighter 7% band is safe and rejects wrong-instrument first
-    // ticks (LTIM's ~4504 is +7.5% off its real ~4190 close) before they can
-    // become a stuck anchor. Genuine >7% single-day gaps are rare for the
-    // tracked large-caps and self-heal once the rolling guard takes over.
-    if (prevClose > 0) return Math.abs(newLtp - prevClose) / prevClose <= 0.07;
+    // Rolling: reject a single tick that jumps >6% off the last good price (indexes allow up to 20% for baseline transition)
+    const maxThreshold = isIndex ? 0.20 : 0.06;
+    if (oldLtp > 0)    return Math.abs(newLtp - oldLtp) / oldLtp <= maxThreshold;
+    // Cold start: circuit-style band
+    if (prevClose > 0) return Math.abs(newLtp - prevClose) / prevClose <= (isIndex ? 0.20 : 0.07);
     return true;
 }
 
@@ -339,13 +354,17 @@ async function applyDhanSnapshot() {
         // real ~4190) that jumps >6% off the last good price (or off the
         // reliable candle-derived prev close at cold start) is bad data; keep
         // the last good value. Genuine moves arrive as small incremental ticks.
-        if (isSaneTick(prev?.ltp, d.ltp, pc || prev?.previousClose)) {
+        if (prev?.source === 'BASELINE' || isSaneTick(prev?.ltp, d.ltp, pc || prev?.previousClose, false)) {
             // Recompute change/prevClose against the authoritative candle-derived
             // close so Day's P&L can't be thrown off by a stale/wrong feed close.
             if (pc > 0) {
                 d.previousClose = pc;
                 d.change        = Math.round((d.ltp - pc) * 100) / 100;
                 d.changePercent = Math.round(((d.ltp - pc) / pc) * 10000) / 100;
+            } else if ((!d.change || d.previousClose === d.ltp) && prev?.previousClose > 0 && prev.previousClose !== d.ltp) {
+                d.previousClose = prev.previousClose;
+                d.change        = Math.round((d.ltp - d.previousClose) * 100) / 100;
+                d.changePercent = Math.round((d.change / d.previousClose) * 10000) / 100;
             }
             stockPrices[sym] = d;
         }
@@ -355,7 +374,14 @@ async function applyDhanSnapshot() {
     for (const [name, d] of Object.entries(indexes)) {
         if (!(d.ltp > 0)) continue;
         const prev = indexData[name];
-        if (isSaneTick(prev?.ltp, d.ltp, d.previousClose ?? prev?.previousClose)) {
+        // If incoming quote has 0 change or prevClose == ltp (typical Dhan off-market post-close),
+        // repair it with prior valid previousClose or daily candle close
+        if ((!d.change || d.previousClose === d.ltp) && prev?.previousClose > 0 && prev.previousClose !== d.ltp) {
+            d.previousClose = prev.previousClose;
+            d.change        = Math.round((d.ltp - d.previousClose) * 100) / 100;
+            d.changePercent = Math.round((d.change / d.previousClose) * 10000) / 100;
+        }
+        if (prev?.source === 'BASELINE' || isSaneTick(prev?.ltp, d.ltp, d.previousClose ?? prev?.previousClose, true)) {
             indexData[name] = d;
         }
     }
@@ -1023,6 +1049,7 @@ module.exports = {
     fetchAllStockPrices,
     fastRefresh,
     seedReferenceCloses,
+    repairChangeFields,
     getOptionChain,
     getOptionExpiries,
     getOptionLTP,
