@@ -206,15 +206,33 @@ async function getActiveToken(tenantId = 'ADMIN') {
     return tokenObj;
 }
 
+const _lastTokenGenTime = new Map();
+
 /**
  * Renew token for a specific institute / tenant using stored encrypted credentials
  */
 async function renewInstituteToken(tenantId) {
+    const lastGen = _lastTokenGenTime.get(tenantId) || 0;
+    const elapsed = Date.now() - lastGen;
+    if (elapsed < 125000) {
+        const remSec = Math.ceil((125000 - elapsed) / 1000);
+        console.log(`[DhanAuth] ⏳ Token renewal cooldown active for ${tenantId} (${remSec}s remaining). Serving active token.`);
+        const active = await getActiveToken(tenantId);
+        if (active && active.accessToken) return active;
+    }
+
     console.log(`[DhanAuth] 🔄 Renewing Dhan token for tenant: ${tenantId}...`);
 
     const cred = await BrokerCredentialModel.findOne({ tenantId, provider: 'DHAN' });
     if (!cred) {
         throw new Error(`No Dhan credential found for tenant ${tenantId}`);
+    }
+
+    if (cred.lastAutoRenewAt && (Date.now() - new Date(cred.lastAutoRenewAt).getTime() < 125000) && cred.lastAutoRenewStatus === 'SUCCESS') {
+        const remSec = Math.ceil((125000 - (Date.now() - new Date(cred.lastAutoRenewAt).getTime())) / 1000);
+        console.log(`[DhanAuth] ⏳ Token renewal cooldown active from DB for ${tenantId} (${remSec}s remaining). Serving active token.`);
+        const active = await getActiveToken(tenantId);
+        if (active && active.accessToken) return active;
     }
 
     const decrypted = cred.getDecrypted();
@@ -228,6 +246,8 @@ async function renewInstituteToken(tenantId) {
             pin: decrypted.pin,
             totpSecret: decrypted.totpSecret,
         });
+
+        _lastTokenGenTime.set(tenantId, Date.now());
 
         // Update database credential
         cred.accessToken = result.accessToken;
@@ -262,6 +282,14 @@ async function renewInstituteToken(tenantId) {
 
     } catch (err) {
         console.error(`[DhanAuth] ❌ Failed to renew token for ${tenantId}:`, err.message);
+
+        const is2MinRateLimit = err.message.includes('once every 2 minutes');
+        const hasValidExistingToken = cred.accessToken && cred.expiresAt && new Date(cred.expiresAt) > new Date();
+
+        if (is2MinRateLimit && hasValidExistingToken) {
+            console.log(`[DhanAuth] ℹ️ 2-minute rate limit hit, but existing token is still active until ${new Date(cred.expiresAt).toISOString()}. Preserving active status.`);
+            return await getActiveToken(tenantId);
+        }
 
         cred.lastAutoRenewAt = new Date();
         cred.lastAutoRenewStatus = 'FAILED';
