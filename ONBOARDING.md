@@ -18,7 +18,7 @@ Top MCP Servers:
 ## Your Setup Checklist
 
 ### Codebases
-- [ ] zerodha — github.com/anishghanwat/zerodha
+- [ ] trading-app — github.com/sohel7709/Trading_App
 
 ### MCP Servers to Activate
 - [ ] visualize — generates visual diagrams or previews from code/data. Check with your team lead for the server URL and credentials to activate it in your Claude Code settings.
