@@ -19,9 +19,10 @@ async function refreshCachedDhanConfig() {
             cred = await BrokerCredentialModel.findOne({ provider: 'DHAN' }).sort({ updatedAt: -1 });
         }
         if (cred && cred.apiKey && cred.accessToken) {
-            cachedDhanConfig = { clientId: cred.apiKey, accessToken: cred.accessToken };
-            process.env.DHAN_CLIENT_ID = cred.apiKey;
-            process.env.DHAN_ACCESS_TOKEN = cred.accessToken;
+            const dec = typeof cred.getDecrypted === 'function' ? cred.getDecrypted() : { apiKey: cred.apiKey, accessToken: cred.accessToken };
+            cachedDhanConfig = { clientId: dec.apiKey, accessToken: dec.accessToken };
+            process.env.DHAN_CLIENT_ID = dec.apiKey;
+            process.env.DHAN_ACCESS_TOKEN = dec.accessToken;
         }
     } catch (_) {}
 }
@@ -256,8 +257,8 @@ function getHeaders(creds) {
  * Fetch full OHLCV quotes for a list of NSE symbols via Dhan API.
  * Returns: { [symbol]: { ltp, open, high, low, previousClose, volume, change, changePercent, source } }
  */
-async function fetchDhanStockQuotes(symbols) {
-    if (!isConfigured()) {
+async function fetchDhanStockQuotes(symbols, creds = null) {
+    if (!isConfigured(creds)) {
         console.log('[Dhan] Credentials not set — skipping');
         return {};
     }
@@ -290,7 +291,7 @@ async function fetchDhanStockQuotes(symbols) {
         try {
             const res = await fetch(`${DHAN_BASE}/v2/marketfeed/quote`, {
                 method: 'POST',
-                headers: getHeaders(),
+                headers: getHeaders(creds),
                 body: JSON.stringify({ NSE_EQ: batch }),
                 signal: AbortSignal.timeout(10000),
             });
