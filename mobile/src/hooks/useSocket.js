@@ -24,6 +24,10 @@ export default function useSocket(event, handler, deps = []) {
   handlerRef.current = handler;
 
   useEffect(() => {
+    if (!event || typeof event !== 'string') {
+      console.warn('[useSocket] Attempted to subscribe to invalid or undefined event:', event);
+      return;
+    }
     const stableHandler = (data) => handlerRef.current(data);
     const off = SocketClient.on(event, stableHandler);
     return off;

@@ -1,4 +1,4 @@
-const { AuditLogModel } = require('../schema/AuditLogSchema');
+const AuditLogModel = require('../model/AuditLogModel');
 
 /**
  * Log an audit event.

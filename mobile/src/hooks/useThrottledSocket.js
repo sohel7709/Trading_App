@@ -54,6 +54,10 @@ export default function useThrottledSocket(event, onBatchCallback, throttleMs = 
         pendingRef.current = incoming;
       }
     };
+    if (!event || typeof event !== 'string') {
+      console.warn('[useThrottledSocket] Attempted to subscribe to invalid or undefined event:', event);
+      return;
+    }
 
     const off = SocketClient.on(event, handler);
 

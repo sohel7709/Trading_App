@@ -122,12 +122,18 @@ const SocketClient = {
    *   off();
    */
   on(event, handler) {
+    if (!event || typeof event !== 'string') {
+      console.warn('[SocketClient] Attempted to subscribe to invalid or undefined event:', event);
+      return () => {};
+    }
+    if (typeof handler !== 'function') return () => {};
     if (!_listeners.has(event)) _listeners.set(event, new Set());
     _listeners.get(event).add(handler);
     return () => SocketClient.off(event, handler);
   },
 
   off(event, handler) {
+    if (!event || typeof event !== 'string') return;
     _listeners.get(event)?.delete(handler);
   },
 

@@ -22,6 +22,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { api } from '../api/client';
 import useSocket from '../hooks/useSocket';
+import { SOCKET_EVENTS } from '../socket/socketEvents';
 import SkeletonLoader from '../components/SkeletonLoader';
 import OrderBottomSheet from '../components/order/OrderBottomSheet';
 import { useAuth } from '../context/AuthContext';

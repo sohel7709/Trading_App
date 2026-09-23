@@ -3256,7 +3256,8 @@ io.on('connection', async (socket) => {
         }
     });
 
-    socket.on('joinBatch', async (batchId) => {
+    const handleJoinBatch = async (payload) => {
+        const batchId = (typeof payload === 'object' && payload !== null) ? payload.batchId : payload;
         if (!batchId) return;
         // Verify user is permitted to join this batch room
         if (socket.user) {
@@ -3270,27 +3271,61 @@ io.on('connection', async (socket) => {
         } else {
             socket.join(`batch:${batchId}`);
         }
+    };
+
+    socket.on('joinBatch', handleJoinBatch);
+    socket.on('join-batch', handleJoinBatch);
+    socket.on('join_batch', handleJoinBatch);
+
+    socket.on('join_room', (room) => {
+        if (typeof room === 'string' && room.trim()) {
+            socket.join(room.trim());
+        }
     });
 
-
     // Live Chat & Announcements
-    socket.on('chatMessage', async (data) => {
+    const handleChat = async (data) => {
+        if (!data) return;
         const { username, message, room, messageType } = data;
-        if (!message || !message.trim()) return;
-        const chatRoom = room || 'general';
-        const chatMsg = new ChatModel({
-            userId,
-            username: username || 'Trader',
-            message: message.trim(),
-            room: chatRoom,
-            messageType: messageType || 'CHAT'
-        });
-        await chatMsg.save();
-        
-        if (chatRoom !== 'general') {
-            io.to(chatRoom).emit('chatMessage', chatMsg);
-        } else {
-            io.emit('chatMessage', chatMsg);
+        const text = message || data.text;
+        if (!text || !text.trim()) return;
+        const chatRoom = room || (data.batchId ? `batch:${data.batchId}` : 'general');
+        try {
+            const chatMsg = new ChatModel({
+                userId,
+                username: username || socket.user?.name || 'Trader',
+                message: text.trim(),
+                room: chatRoom,
+                messageType: messageType || 'CHAT'
+            });
+            await chatMsg.save();
+            
+            if (chatRoom !== 'general') {
+                io.to(chatRoom).emit('chatMessage', chatMsg);
+                io.to(chatRoom).emit('chat', chatMsg);
+            } else {
+                io.emit('chatMessage', chatMsg);
+                io.emit('chat', chatMsg);
+            }
+        } catch (err) {
+            console.warn('[Socket] Chat error:', err.message);
+        }
+    };
+
+    socket.on('chatMessage', handleChat);
+    socket.on('chat', handleChat);
+
+    socket.on('announcement', (data) => {
+        if (!data) return;
+        const batchId = data.batchId;
+        const msg = data.message || data.msg;
+        if (batchId && msg) {
+            io.to(`batch:${batchId}`).emit('announcement', {
+                batchId,
+                message: msg,
+                from: socket.user?.name || 'Instructor',
+                timestamp: new Date().toISOString(),
+            });
         }
     });
 
