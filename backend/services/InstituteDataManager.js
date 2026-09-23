@@ -167,8 +167,10 @@ class InstituteDataManager {
             activeToken = await dhanAuthService.getActiveToken(instituteCode);
         } catch (_) {}
 
-        const effectiveApiKey = cred?.apiKey;
-        const effectiveAccessToken = activeToken || (cred && typeof cred.getDecrypted === 'function' ? cred.getDecrypted().accessToken : cred?.accessToken);
+        const tokenString = (activeToken && typeof activeToken === 'object') ? activeToken.accessToken : activeToken;
+        const decryptedCred = (cred && typeof cred.getDecrypted === 'function') ? cred.getDecrypted() : null;
+        const effectiveApiKey = decryptedCred?.apiKey || cred?.apiKey;
+        const effectiveAccessToken = tokenString || decryptedCred?.accessToken || cred?.accessToken;
 
         if (effectiveApiKey && effectiveAccessToken) {
             credentials = { clientId: effectiveApiKey, accessToken: effectiveAccessToken };
