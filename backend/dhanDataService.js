@@ -548,8 +548,8 @@ const INDEX_SECURITY_IDS = {
  * Fetch live index prices from Dhan IDX_I segment.
  * Returns: { [indexName]: { name, ltp, change, changePercent, source } }
  */
-async function fetchDhanIndices() {
-    if (!isConfigured()) return {};
+async function fetchDhanIndices(creds = null) {
+    if (!isConfigured(creds)) return {};
 
     const idToName = Object.fromEntries(
         Object.entries(INDEX_SECURITY_IDS).map(([name, id]) => [String(id), name])
@@ -559,7 +559,7 @@ async function fetchDhanIndices() {
     try {
         const res = await fetch(`${DHAN_BASE}/v2/marketfeed/quote`, {
             method: 'POST',
-            headers: getHeaders(),
+            headers: getHeaders(creds),
             body: JSON.stringify({ IDX_I: secIds }),
             signal: AbortSignal.timeout(8000),
         });
@@ -610,8 +610,8 @@ async function fetchDhanIndices() {
  * Fast LTP-only refresh for stocks during market hours (single batch call).
  * Merges into existing stockPrices cache — only updates ltp, change, changePercent.
  */
-async function fetchDhanLTPAll(symbols) {
-    if (!isConfigured() || Date.now() < _dhanGlobalRateLimitedUntil) return {};
+async function fetchDhanLTPAll(symbols, creds = null) {
+    if (!isConfigured(creds) || Date.now() < _dhanGlobalRateLimitedUntil) return {};
 
     const reqSecIds = [];
     const idToSym   = {};
@@ -625,7 +625,7 @@ async function fetchDhanLTPAll(symbols) {
     try {
         const res = await fetch(`${DHAN_BASE}/v2/marketfeed/ltp`, {
             method: 'POST',
-            headers: getHeaders(),
+            headers: getHeaders(creds),
             body: JSON.stringify({ NSE_EQ: reqSecIds, IDX_I: Object.values(INDEX_SECURITY_IDS) }),
             signal: AbortSignal.timeout(6000),
         });
@@ -694,7 +694,7 @@ async function fetchDhanSnapshot(symbols, creds = null) {
         try {
             const res = await fetch(`${DHAN_BASE}/v2/marketfeed/quote`, {
                 method: 'POST',
-                headers: getHeaders(),
+                headers: getHeaders(creds),
                 body: JSON.stringify(body),
                 signal: AbortSignal.timeout(8000),
             });
