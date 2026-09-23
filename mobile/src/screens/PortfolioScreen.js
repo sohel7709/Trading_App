@@ -26,6 +26,7 @@ import { SOCKET_EVENTS } from '../socket/socketEvents';
 import SkeletonLoader from '../components/SkeletonLoader';
 import OrderBottomSheet from '../components/order/OrderBottomSheet';
 import { useAuth } from '../context/AuthContext';
+import IndexTicker from '../components/IndexTicker';
 
 const { width } = Dimensions.get('window');
 
@@ -572,6 +573,12 @@ export default function PortfolioScreen({ navigation }) {
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+
+      {/* Live Index Ticker — same as Orders screen */}
+      <IndexTicker
+        indexes={{}}
+        onIndexPress={(name) => navigation.navigate('OptionChain', { indexName: name })}
+      />
 
       {/* Header */}
       <View style={styles.header}>

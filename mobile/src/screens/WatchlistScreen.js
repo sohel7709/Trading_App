@@ -15,6 +15,44 @@ import { useLiveSymbol, marketStore } from '../store/marketStore';
 import OrderBottomSheet from '../components/order/OrderBottomSheet';
 import RejectionReasonModal from '../components/order/RejectionReasonModal';
 import SkeletonLoader from '../components/SkeletonLoader';
+import IndexTicker from '../components/IndexTicker';
+
+// ── Option pattern parser ─────────────────────────────────────────────────────
+// Matches queries like: "NIFTY 23450 CE", "BANKNIFTY 48000 PE", "NIFTY 50 23450 CE"
+// Returns { underlyingSymbol, strikePrice, optionType, compositeSymbol } or null
+function parseOptionQuery(q) {
+  if (!q) return null;
+  const raw = q.trim().toUpperCase();
+
+  // Pattern: UNDERLYING STRIKE CE|PE  (e.g. NIFTY 23450 CE)
+  const strict = raw.match(/^([A-Z\s]+?)\s+(\d{3,6})(?:\.\d+)?\s+(CE|PE)$/);
+  if (strict) {
+    const underlying = strict[1].trim();
+    const strike = parseInt(strict[2], 10);
+    const optType = strict[3];
+    return {
+      underlyingSymbol: underlying,
+      strikePrice: strike,
+      optionType: optType,
+      compositeSymbol: `${underlying} ${strike} ${optType}`,
+      name: `${underlying} ${strike} ${optType} Option`,
+      isOption: true,
+    };
+  }
+  return null;
+}
+
+// Build search results fused with option pattern
+function buildSearchResults(apiResults, query) {
+  const optionHit = parseOptionQuery(query);
+  if (!optionHit) return apiResults || [];
+
+  // Prepend the parsed option contract as a top result
+  const filtered = (apiResults || []).filter(
+    (r) => r.symbol.toUpperCase() !== optionHit.compositeSymbol
+  );
+  return [optionHit, ...filtered];
+}
 
 const fmt = (n) => '₹' + Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -157,13 +195,21 @@ export default function WatchlistScreen({ navigation }) {
       setSearchResults([]);
       return;
     }
+    // Immediately show parsed option result (no network round-trip needed)
+    const optionHit = parseOptionQuery(searchQuery);
+    if (optionHit) {
+      setSearchResults([optionHit]);
+    }
+
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
         const res = await api.searchInstruments(searchQuery);
-        setSearchResults(res || []);
+        setSearchResults(buildSearchResults(res, searchQuery));
       } catch (e) {
         console.warn('Search error', e);
+        // If API fails but we have an option match, keep it
+        if (optionHit) setSearchResults([optionHit]);
       } finally {
         setSearching(false);
       }
@@ -368,7 +414,13 @@ export default function WatchlistScreen({ navigation }) {
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-      
+
+      {/* Live Index Ticker — same as Orders screen */}
+      <IndexTicker
+        indexes={{}}
+        onIndexPress={(name) => navigation.navigate('OptionChain', { indexName: name })}
+      />
+
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Watchlist</Text>
@@ -438,7 +490,7 @@ export default function WatchlistScreen({ navigation }) {
         <TextInput
           ref={searchInputRef}
           style={styles.searchInput}
-          placeholder="Search stocks to add (e.g. RELIANCE, TCS)..."
+          placeholder="Stock or option (e.g. RELIANCE, NIFTY 23450 CE)..."
           placeholderTextColor={colors.textMuted}
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -484,32 +536,46 @@ export default function WatchlistScreen({ navigation }) {
             ) : (
               <FlatList
                 data={searchResults}
-                keyExtractor={(item) => item.symbol}
+                keyExtractor={(item) => item.compositeSymbol || item.symbol}
                 renderItem={({ item }) => {
-                  const symUpper = item.symbol.toUpperCase();
-                  const isAdded = activeStocks.includes(symUpper);
-                  const live = livePrices[symUpper] || {};
+                  // Options have compositeSymbol; stocks just have symbol
+                  const sym = item.compositeSymbol || item.symbol;
+                  const symUpper = sym.toUpperCase();
+                  const isAdded = activeStocks.map(s => (typeof s === 'string' ? s : s.symbol).toUpperCase()).includes(symUpper);
+                  const live = livePrices[symUpper] || livePrices[item.symbol?.toUpperCase()] || {};
                   return (
                     <View style={styles.searchRow}>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.searchSymbol}>{item.symbol}</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <Text style={styles.searchSymbol}>{sym}</Text>
+                          {item.isOption && (
+                            <View style={[styles.optionBadge, { backgroundColor: item.optionType === 'CE' ? '#DCFCE7' : '#FEE2E2' }]}>
+                              <Text style={[styles.optionBadgeText, { color: item.optionType === 'CE' ? '#16A34A' : '#DC2626' }]}>
+                                {item.optionType}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
                         {item.name && <Text style={styles.searchName} numberOfLines={1}>{item.name}</Text>}
+                        {item.isOption && (
+                          <Text style={styles.searchOptionMeta}>Strike {item.strikePrice} • {item.underlyingSymbol}</Text>
+                        )}
                         {live.ltp ? (
                           <Text style={styles.searchLtp}>LTP: {fmt(live.ltp)}</Text>
                         ) : null}
                       </View>
-                      
+
                       {/* Multi-Add Toggle Button */}
                       <TouchableOpacity
                         style={[
                           styles.addScriptToggleBtn,
                           isAdded ? styles.addScriptToggleBtnAdded : styles.addScriptToggleBtnAdd
                         ]}
-                        onPress={() => handleToggleStockInSearch(item.symbol)}
+                        onPress={() => handleToggleStockInSearch(sym)}
                         activeOpacity={0.7}
                       >
                         <Ionicons
-                          name={isAdded ? "checkmark-circle" : "add"}
+                          name={isAdded ? 'checkmark-circle' : 'add'}
                           size={16}
                           color={isAdded ? colors.gain : '#FFFFFF'}
                         />
@@ -817,6 +883,13 @@ const styles = StyleSheet.create({
   searchSymbol: { fontSize: 15, fontWeight: '700', color: colors.text },
   searchName: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
   searchLtp: { fontSize: 12, color: colors.primary, fontWeight: '600', marginTop: 3 },
+  searchOptionMeta: { fontSize: 11, color: '#6366f1', fontWeight: '600', marginTop: 2 },
+  optionBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  optionBadgeText: { fontSize: 10, fontWeight: '800' },
   
   addScriptToggleBtn: {
     flexDirection: 'row',
