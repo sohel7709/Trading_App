@@ -1,16 +1,49 @@
 import { io } from 'socket.io-client';
-import Constants from 'expo-constants';
+import { getAccessToken, refreshAccessToken, clearTokens } from '../services/authService';
+import { BASE_URL } from './baseUrl';
 
-// Production: set EXPO_PUBLIC_API_URL in eas.json env or .env
-// Local dev: set to your machine's IP
-export const BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL ||
-  Constants.expoConfig?.extra?.apiUrl ||
-  'http://10.101.64.71:8080';
+export { BASE_URL };
+
+// ── Auth-aware fetch wrapper ──────────────────────────────────────────────────
+let _refreshing = null; // dedupe concurrent refresh attempts
+
+async function authFetch(path, options = {}, retry = true) {
+  const token = await getAccessToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    'ngrok-skip-browser-warning': 'true',
+    'bypass-tunnel-reminder': 'true',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(options.headers || {}),
+  };
+
+  const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+
+  if (res.status === 401 && retry) {
+    // Try to refresh once
+    try {
+      if (!_refreshing) _refreshing = refreshAccessToken().finally(() => { _refreshing = null; });
+      await _refreshing;
+      return authFetch(path, options, false); // retry once with new token
+    } catch {
+      await clearTokens();
+      throw new Error('SESSION_EXPIRED');
+    }
+  }
+
+  return res;
+}
 
 const get = async (path) => {
-  const res = await fetch(`${BASE_URL}${path}`);
+  const res = await authFetch(path);
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
+  // Guard: if the server returns HTML or Expo manifest instead of JSON API response,
+  // it means BASE_URL is pointing to the wrong server (e.g. Expo bundler not backend).
+  const ct = res.headers.get('content-type') || '';
+  if (!ct.includes('application/json')) {
+    console.error(`[API] GET ${path} returned non-JSON (${ct}). Check BASE_URL:`, BASE_URL);
+    throw new Error(`GET ${path} returned non-JSON. BASE_URL may be wrong.`);
+  }
   return res.json();
 };
 
@@ -34,9 +67,8 @@ const cachedGet = (path, ttl = 2000) => {
 };
 
 const post = async (path, body) => {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await authFetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -47,15 +79,14 @@ const post = async (path, body) => {
 };
 
 const del = async (path) => {
-  const res = await fetch(`${BASE_URL}${path}`, { method: 'DELETE' });
+  const res = await authFetch(path, { method: 'DELETE' });
   if (!res.ok) throw new Error(`DELETE ${path} failed: ${res.status}`);
   return res.json();
 };
 
 const patch = async (path, body) => {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await authFetch(path, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -66,6 +97,15 @@ const patch = async (path, body) => {
 };
 
 export const api = {
+  // Global Market State & Circuit Breaker
+  getMarketState: () => get('/market/state'),
+
+  // Combined Dashboard & Fast Home Summary
+  getDashboardSummary: () => get('/dashboard-summary'),
+
+  // Unified Portfolio & Overview
+  getPortfolio: () => get('/portfolio'),
+
   // Holdings
   getHoldings: () => get('/allHoldings'),
 
@@ -73,13 +113,22 @@ export const api = {
   getPositions: () => get('/allPositions'),
   getDayPositions: () => get('/positions/day'),
   getDayPnl: () => get('/positions/dayPnl'),
-  getClosedPositions: () => get('/closedPositions'),
   squareOffPosition: (id, quantity) => post(`/positions/${id}/squareoff`, quantity ? { quantity } : {}),
+  squareOffTrade: (positionId, lotsOrQty) => post('/trade/square-off', { positionId, quantity: lotsOrQty, lots: lotsOrQty }),
 
-  // Orders
+  // Student Analytics & Activity
+  getStudentPnlHistory: (studentId) => get(`/student/${studentId}/pnl-history`),
+  getStudentActivity: (studentId) => get(`/student/${studentId}/activity`),
+
+  // Notifications & Alerts
+  getNotifications: () => get('/notifications'),
+  markNotificationsRead: () => patch('/notifications/mark-read', {}),
+
+  // Orders & Unified Trade
   getOrders: () => get('/allOrders'),
   cancelOrder: (id) => del(`/orders/${id}`),
   placeOrder: (order) => post('/newOrder', order),
+  placeTrade: (order) => post('/trade', order),
   modifyOrder: (id, changes) => patch(`/orders/${id}`, changes),
   placeCoverOrder: (order) => post('/newCoverOrder', order),
 
@@ -94,7 +143,7 @@ export const api = {
   applyCorporateActions: () => post('/corporate-actions/apply', {}),
 
   // Trades
-  getTrades: () => get('/trades'),
+  getTrades: (query = '') => get(`/trades${query}`),
 
   // Wallet
   getWallet: () => get('/wallet'),
@@ -107,14 +156,15 @@ export const api = {
   // Watchlist
   getWatchlists: () => get('/watchlists'),
   createWatchlist: (name) => post('/watchlists', { name }),
-  addStock: (id, stockSymbol) => post(`/watchlists/${id}/stock`, { stockSymbol }),
-  removeStock: (id, symbol) => del(`/watchlists/${id}/stock/${symbol}`),
+  addStockToWatchlist: (id, symbol) => post(`/watchlists/${id}/stock`, { symbol, stockSymbol: symbol }),
+  removeStockFromWatchlist: (id, symbol) => del(`/watchlists/${id}/stock/${encodeURIComponent(symbol)}`),
   deleteWatchlist: (id) => del(`/watchlists/${id}`),
 
   // Market
-  searchStocks: (q) => get(`/market/search?q=${encodeURIComponent(q)}`),
+  searchInstruments: (query) => get(`/market/search?q=${encodeURIComponent(query)}`),
   getAllStocks: () => get('/market/stocks'),
   getLiveMarket: () => cachedGet('/market/live', 2000),
+  getMarketData: () => cachedGet('/market/live', 2000),
   getIndexes: () => cachedGet('/market/indexes', 2000),
   getMovers: () => cachedGet('/market/movers', 5000),
   getQuote: (symbol, exchange) => get(`/market/quote/${symbol}${exchange ? `?exchange=${exchange}` : ''}`),
@@ -164,6 +214,9 @@ export const getSocket = () => {
       // loaded, but the LTP sat frozen at the last fetched value. Polling
       // almost always gets through and upgrades to ws when possible.
       transports: ['websocket', 'polling'],
+      extraHeaders: {
+        'ngrok-skip-browser-warning': 'true',
+      },
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,

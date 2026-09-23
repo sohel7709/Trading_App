@@ -4,6 +4,7 @@ const ChatSchema = new Schema({
     username: { type: String, default: 'User' },
     message: { type: String, required: true },
     room: { type: String, default: 'general' },
+    messageType: { type: String, enum: ['CHAT', 'ANNOUNCEMENT'], default: 'CHAT' },
     timestamp: { type: Date, default: Date.now },
 }, { timestamps: true });
 

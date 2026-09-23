@@ -1,6 +1,8 @@
 const { Schema } = require('mongoose');
 
 const TradeSchema = new Schema({
+    userId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    instituteId: { type: Schema.Types.ObjectId, ref: 'Institute', index: true },
     stockSymbol: { type: String, required: true, uppercase: true },
     quantity: { type: Number, required: true },
     price: { type: Number, required: true },
@@ -14,5 +16,7 @@ const TradeSchema = new Schema({
     // idempotent (never re-summed / never double-counted) across restarts.
     archived: { type: Boolean, default: false },
 }, { timestamps: true });
+
+TradeSchema.index({ instituteId: 1, userId: 1, createdAt: -1 });
 
 module.exports = { TradeSchema };

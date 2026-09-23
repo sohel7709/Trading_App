@@ -1,7 +1,10 @@
 const { Schema } = require('mongoose');
 
 const WalletSchema = new Schema({
+    userId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+
     balance: { type: Number, default: 0 },
+    balancePaise: { type: Number, default: 0 },
     // CNC (delivery) holdings cost basis only. Recomputed fresh from
     // HoldingsModel on every equity fill — see orderEngine.js executeOrder().
     usedMargin: { type: Number, default: 0 },
@@ -20,6 +23,7 @@ const WalletSchema = new Schema({
     // spent, but not available for a new order either. Recomputed from the
     // live pending-order book, same pattern as usedMargin/holdings.
     blockedMargin: { type: Number, default: 0 },
+    blockedMarginPaise: { type: Number, default: 0 },
     availableMargin: { type: Number, default: 0 },
 }, { timestamps: true });
 

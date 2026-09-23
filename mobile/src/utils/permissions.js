@@ -2,7 +2,6 @@ import { Alert, Linking, Platform } from 'react-native';
 import * as Camera from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
-import * as Notifications from 'expo-notifications';
 
 // Permissions are requested at the moment a feature needs them (Android 6+ /
 // iOS runtime model). Each helper returns true if granted, false otherwise,
@@ -11,7 +10,7 @@ import * as Notifications from 'expo-notifications';
 function offerSettings(label) {
   Alert.alert(
     `${label} permission needed`,
-    `Zerodha Kite needs ${label.toLowerCase()} access for this feature. You can enable it in Settings.`,
+    `TradeLab needs ${label.toLowerCase()} access for this feature. You can enable it in Settings.`,
     [
       { text: 'Not now', style: 'cancel' },
       { text: 'Open Settings', onPress: () => Linking.openSettings() },
@@ -44,14 +43,9 @@ export async function ensureMediaLibraryPermission() {
   return false;
 }
 
-// Notifications — price alerts, order fills (Android 13+ requires a runtime ask)
+// Notifications stub (expo-notifications is not supported in Expo Go)
 export async function ensureNotificationPermission() {
-  const { status } = await Notifications.getPermissionsAsync();
-  if (status === 'granted') return true;
-  const req = await Notifications.requestPermissionsAsync();
-  if (req.status === 'granted') return true;
-  if (!req.canAskAgain) offerSettings('Notifications');
-  return false;
+  return true;
 }
 
 // NOTE on SMS / OTP autofill:

@@ -5,6 +5,40 @@
 
 const DHAN_BASE = 'https://api.dhan.co';
 const SCRIP_MASTER_URL = 'https://images.dhan.co/api-data/api-scrip-master.csv';
+const BrokerCredentialModel = require('./model/BrokerCredentialModel');
+
+let cachedDhanConfig = null;
+
+async function refreshCachedDhanConfig() {
+    try {
+        let cred = await BrokerCredentialModel.findOne({ isActiveProvider: true, provider: 'DHAN' }).sort({ updatedAt: -1 });
+        if (!cred || !cred.apiKey || !cred.accessToken) {
+            cred = await BrokerCredentialModel.findOne({ tenantId: 'ADMIN', provider: 'DHAN' });
+        }
+        if (!cred || !cred.apiKey || !cred.accessToken) {
+            cred = await BrokerCredentialModel.findOne({ provider: 'DHAN' }).sort({ updatedAt: -1 });
+        }
+        if (cred && cred.apiKey && cred.accessToken) {
+            cachedDhanConfig = { clientId: cred.apiKey, accessToken: cred.accessToken };
+            process.env.DHAN_CLIENT_ID = cred.apiKey;
+            process.env.DHAN_ACCESS_TOKEN = cred.accessToken;
+        }
+    } catch (_) {}
+}
+
+function setCachedConfig(cfg) {
+    if (cfg && cfg.clientId && cfg.accessToken) {
+        cachedDhanConfig = { clientId: cfg.clientId, accessToken: cfg.accessToken };
+        process.env.DHAN_CLIENT_ID = cfg.clientId;
+        process.env.DHAN_ACCESS_TOKEN = cfg.accessToken;
+    }
+}
+
+// Immediate eager execution + interval
+refreshCachedDhanConfig();
+setTimeout(refreshCachedDhanConfig, 1000);
+setInterval(refreshCachedDhanConfig, 10000);
+let _dhanGlobalRateLimitedUntil = 0;
 
 // Verified from Dhan scrip master CSV (NSE EQ series, July 2026)
 // TATAMOTORS maps to TMCV (759782) — Tata Motors after commercial vehicle demerger
@@ -37,31 +71,56 @@ const FALLBACK_SECURITY_IDS = {
     'MPHASIS':     4503,   'TATACONSUM':  3432,
 };
 
+// Fallback MCX Commodity security IDs (verified Dhan instruments)
+const MCX_FALLBACK_SECURITY_IDS = {
+    'CRUDEOIL':    114,
+    'CRUDEOILM':   125,
+    'NATURALGAS':  115,
+    'NATGASMINI':  126,
+    'GOLD':        111,
+    'GOLDM':       112,
+    'GOLDPETAL':   127,
+    'GOLDGUINEA':  128,
+    'SILVER':      113,
+    'SILVERM':     116,
+    'SILVERMIC':   129,
+    'COPPER':      117,
+    'COPPERM':     130,
+    'ZINC':        118,
+    'ZINCM':       131,
+    'LEAD':        119,
+    'LEADM':       132,
+    'ALUMINIUM':   120,
+    'ALUMINI':     133,
+    'NICKEL':      121,
+    'COTTON':      122,
+    'MENTHAOIL':   123,
+    'MCXBULLDEX':  124,
+};
+
 // symbol → integer securityId (starts with fallbacks, scrip master overwrites on load)
 let securityIdMap = { ...FALLBACK_SECURITY_IDS };
-// BSE_EQ symbol → securityId — populated from the scrip master only (no
-// curated fallback since BSE quotes are a secondary/best-effort feature)
+let mcxSecurityIdMap = { ...MCX_FALLBACK_SECURITY_IDS };
+// BSE_EQ symbol → securityId
 let bseSecurityIdMap = {};
-// Short-lived cache so rapid repeat calls (e.g. exchange toggle in the UI)
-// don't hammer Dhan; BSE quotes are fetched on demand, not on the tick loop.
-const bseQuoteCache = {}; // symbol -> { at, data }
+const bseQuoteCache = {};
 const BSE_QUOTE_TTL = 3000;
+
 // string(securityId) → symbol (reverse lookup)
 let securityIdToSymbol = Object.fromEntries(
     Object.entries(FALLBACK_SECURITY_IDS).map(([s, id]) => [String(id), s])
 );
+let mcxSecurityIdToSymbol = Object.fromEntries(
+    Object.entries(MCX_FALLBACK_SECURITY_IDS).map(([s, id]) => [String(id), s])
+);
+
 let scripMasterLoaded = false;
 let scripMasterLoading = false;
-let scripMasterLoadPromise = null; // shared by every caller that arrives while a load is in-flight
-// symbol → company name (from scrip master, for full-universe search)
+let scripMasterLoadPromise = null;
 let symbolNames = {};
 
 // ─── Scrip Master ────────────────────────────────────────────────────────────
 
-// Public entry point — callers that arrive while a load is already in-flight
-// share the SAME promise instead of getting an immediately-resolved no-op,
-// which previously meant "loaded" data callers saw could be empty depending
-// on exactly when they called in relative to the auto-triggered background load.
 function loadScripMaster() {
     if (scripMasterLoaded) return Promise.resolve();
     if (scripMasterLoading) return scripMasterLoadPromise;
@@ -101,11 +160,30 @@ async function _doLoadScripMaster() {
             const cols = lines[i].split(',');
             if (!cols[iExch]) continue;
             const exch = cols[iExch].trim();
+
+            // MCX Commodity parsing
+            if (exch === 'MCX') {
+                const customSym = (iCustom >= 0 && cols[iCustom]?.trim()) || '';
+                const tradingSym = cols[iSymbol]?.trim();
+                const secId = parseInt(cols[iSecId], 10);
+                if (!isNaN(secId) && secId > 0) {
+                    if (customSym) {
+                        mcxSecurityIdMap[customSym] = secId;
+                        mcxSecurityIdToSymbol[String(secId)] = customSym;
+                    }
+                    if (tradingSym) {
+                        mcxSecurityIdMap[tradingSym] = secId;
+                        if (!customSym) mcxSecurityIdToSymbol[String(secId)] = tradingSym;
+                    }
+                    const name = (iName >= 0 && cols[iName]?.trim()) || customSym || tradingSym || '';
+                    if (name && customSym) symbolNames[customSym] = name;
+                }
+                continue;
+            }
+
             if (exch !== 'NSE' && exch !== 'BSE') continue;
             if (iSeg >= 0 && cols[iSeg].trim() !== 'E') continue;
-            // NSE main-board equity uses series "EQ"; BSE uses group "A"/"B"
-            // (BSE has no "EQ" series at all — its group classification is
-            // by liquidity/settlement type instead).
+
             const series = iSeries >= 0 ? cols[iSeries].trim() : '';
             if (exch === 'NSE' && series !== 'EQ') continue;
             if (exch === 'BSE' && series !== 'A' && series !== 'B') continue;
@@ -115,7 +193,7 @@ async function _doLoadScripMaster() {
             if (!symbol || isNaN(secId) || secId <= 0) continue;
 
             if (exch === 'NSE') {
-                securityIdMap[symbol]         = secId;
+                securityIdMap[symbol]             = secId;
                 securityIdToSymbol[String(secId)] = symbol;
                 const name = (iName >= 0 && cols[iName]?.trim()) || (iCustom >= 0 && cols[iCustom]?.trim()) || '';
                 if (name) symbolNames[symbol] = name;
@@ -126,7 +204,7 @@ async function _doLoadScripMaster() {
 
         scripMasterLoaded = Object.keys(securityIdMap).length > 0;
         if (scripMasterLoaded) {
-            console.log(`[Dhan] Scrip master loaded — ${Object.keys(securityIdMap).length} NSE EQ + ${Object.keys(bseSecurityIdMap).length} BSE EQ symbols`);
+            console.log(`[Dhan] Scrip master loaded — ${Object.keys(securityIdMap).length} NSE EQ + ${Object.keys(bseSecurityIdMap).length} BSE EQ + ${Object.keys(mcxSecurityIdMap).length} MCX symbols`);
         } else {
             console.warn('[Dhan] Scrip master parsed but no symbols found — check CSV format');
         }
@@ -137,16 +215,36 @@ async function _doLoadScripMaster() {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-function isConfigured() {
-    const cid = process.env.DHAN_CLIENT_ID;
-    const tok = process.env.DHAN_ACCESS_TOKEN;
+/**
+ * Check if Dhan is configured. Accepts optional per-institute credentials.
+ * @param {Object} [creds] - { clientId, accessToken } for per-institute override
+ */
+function isConfigured(creds) {
+    const cid = creds?.clientId || cachedDhanConfig?.clientId || process.env.DHAN_CLIENT_ID;
+    const tok = creds?.accessToken || cachedDhanConfig?.accessToken || process.env.DHAN_ACCESS_TOKEN;
     return !!(cid && tok && cid !== 'YOUR_DHAN_CLIENT_ID' && tok !== 'YOUR_DHAN_ACCESS_TOKEN');
 }
 
-function getHeaders() {
+/**
+ * Get the global fallback credentials if set and configured.
+ */
+function getGlobalCredentials() {
+    const cid = cachedDhanConfig?.clientId || process.env.DHAN_CLIENT_ID;
+    const tok = cachedDhanConfig?.accessToken || process.env.DHAN_ACCESS_TOKEN;
+    if (cid && tok && cid !== 'YOUR_DHAN_CLIENT_ID' && tok !== 'YOUR_DHAN_ACCESS_TOKEN') {
+        return { clientId: cid, accessToken: tok };
+    }
+    return null;
+}
+
+/**
+ * Build Dhan API headers. Accepts optional per-institute credentials.
+ * @param {Object} [creds] - { clientId, accessToken } for per-institute override
+ */
+function getHeaders(creds) {
     return {
-        'client-id':     process.env.DHAN_CLIENT_ID || '',
-        'access-token':  process.env.DHAN_ACCESS_TOKEN || '',
+        'client-id':     creds?.clientId || cachedDhanConfig?.clientId || process.env.DHAN_CLIENT_ID || '',
+        'access-token':  creds?.accessToken || cachedDhanConfig?.accessToken || process.env.DHAN_ACCESS_TOKEN || '',
         'Content-Type':  'application/json',
         'Accept':        'application/json',
     };
@@ -512,7 +610,7 @@ async function fetchDhanIndices() {
  * Merges into existing stockPrices cache — only updates ltp, change, changePercent.
  */
 async function fetchDhanLTPAll(symbols) {
-    if (!isConfigured()) return {};
+    if (!isConfigured() || Date.now() < _dhanGlobalRateLimitedUntil) return {};
 
     const reqSecIds = [];
     const idToSym   = {};
@@ -530,7 +628,13 @@ async function fetchDhanLTPAll(symbols) {
             body: JSON.stringify({ NSE_EQ: reqSecIds, IDX_I: Object.values(INDEX_SECURITY_IDS) }),
             signal: AbortSignal.timeout(6000),
         });
-        if (!res.ok) return {};
+        if (!res.ok) {
+            if (res.status === 429) {
+                _dhanGlobalRateLimitedUntil = Date.now() + 15000;
+                console.warn('[Dhan] ⚠️ 429 on /v2/marketfeed/ltp — backing off for 15s');
+            }
+            return {};
+        }
         const json = await res.json();
 
         // Stock LTPs
@@ -560,8 +664,13 @@ async function fetchDhanLTPAll(symbols) {
 // body (Dhan accepts NSE_EQ + IDX_I together); only if >100 stocks are tracked
 // do we spill into extra stock-only batches.
 // Returns: { stocks: { [sym]: fullQuote }, indexes: { [name]: fullQuote } }
-async function fetchDhanSnapshot(symbols) {
-    if (!isConfigured()) return { stocks: {}, indexes: {} };
+let lastSnapshotCache = null;
+
+async function fetchDhanSnapshot(symbols, creds = null) {
+    if (!isConfigured(creds)) return { stocks: {}, indexes: {} };
+    if (!creds && lastSnapshotCache && (Date.now() - lastSnapshotCache.timestamp < 3000)) {
+        return lastSnapshotCache.data;
+    }
     if (!scripMasterLoaded) await loadScripMaster();
 
     const idToSym = {};
@@ -643,37 +752,57 @@ async function fetchDhanSnapshot(symbols) {
             console.warn(`[Dhan] snapshot batch error: ${e.message}`);
         }
     }
+    if (Object.keys(stocks).length > 0 || Object.keys(indexes).length > 0) {
+        lastSnapshotCache = { timestamp: Date.now(), data: { stocks, indexes } };
+    }
     return { stocks, indexes };
 }
 
 // ─── Option Chain (real NFO data) ─────────────────────────────────────────────
 // Docs: https://dhanhq.co/docs/v2/option-chain/
-// Rate limit: 1 option-chain request per ~3s per underlying — callers must cache.
+// Rate limit: 1 option-chain request per ~1-2s — callers must cache.
+
+const dhanExpiryCache = {}; // secId -> { at, list }
+const DHAN_EXPIRY_TTL = 60 * 60 * 1000; // 1 hour TTL
+let _dhanOptionChainRateLimitedUntil = 0;
 
 /**
  * Expiry list for an index underlying.
  * Returns ['YYYY-MM-DD', ...] or null on failure.
  */
-async function fetchDhanExpiryList(underlyingScrip) {
-    if (!isConfigured()) return null;
+async function fetchDhanExpiryList(underlyingScrip, creds = null) {
+    if (!isConfigured(creds)) return null;
+    const cacheKey = String(underlyingScrip);
+    const hit = dhanExpiryCache[cacheKey];
+    if (hit && Date.now() - hit.at < DHAN_EXPIRY_TTL && hit.list?.length > 0) {
+        return hit.list;
+    }
+
     try {
         const res = await fetch(`${DHAN_BASE}/v2/optionchain/expirylist`, {
             method: 'POST',
-            headers: getHeaders(),
+            headers: getHeaders(creds),
             body: JSON.stringify({ UnderlyingScrip: underlyingScrip, UnderlyingSeg: 'IDX_I' }),
             signal: AbortSignal.timeout(8000),
         });
         if (!res.ok) {
             const body = await res.text().catch(() => '');
             console.warn(`[Dhan] Expiry list error ${res.status}: ${body.slice(0, 100)}`);
-            return null;
+            if (res.status === 429) {
+                _dhanOptionChainRateLimitedUntil = Date.now() + 20000;
+            }
+            return hit?.list || null;
         }
         const json = await res.json();
         const list = json?.data;
-        return Array.isArray(list) && list.length > 0 ? list : null;
+        if (Array.isArray(list) && list.length > 0) {
+            dhanExpiryCache[cacheKey] = { at: Date.now(), list };
+            return list;
+        }
+        return hit?.list || null;
     } catch (e) {
         console.warn('[Dhan] fetchDhanExpiryList error:', e.message);
-        return null;
+        return hit?.list || null;
     }
 }
 
@@ -681,18 +810,26 @@ async function fetchDhanExpiryList(underlyingScrip) {
  * Full option chain for an index underlying + expiry.
  * Returns { underlyingPrice, rows: [{ strike, ce: {...}, pe: {...} }] } or null.
  */
-async function fetchDhanOptionChain(underlyingScrip, expiry) {
-    if (!isConfigured() || !expiry) return null;
+async function fetchDhanOptionChain(underlyingScrip, expiry, creds = null) {
+    if (!isConfigured(creds) || !expiry) return null;
+    if (Date.now() < _dhanOptionChainRateLimitedUntil) {
+        console.warn('[Dhan] Option chain fetch skipped due to active 429 backoff');
+        return null;
+    }
+
     try {
         const res = await fetch(`${DHAN_BASE}/v2/optionchain`, {
             method: 'POST',
-            headers: getHeaders(),
+            headers: getHeaders(creds),
             body: JSON.stringify({ UnderlyingScrip: underlyingScrip, UnderlyingSeg: 'IDX_I', Expiry: expiry }),
             signal: AbortSignal.timeout(8000),
         });
         if (!res.ok) {
             const body = await res.text().catch(() => '');
             console.warn(`[Dhan] Option chain error ${res.status}: ${body.slice(0, 100)}`);
+            if (res.status === 429) {
+                _dhanOptionChainRateLimitedUntil = Date.now() + 20000;
+            }
             return null;
         }
         const json = await res.json();
@@ -700,7 +837,7 @@ async function fetchDhanOptionChain(underlyingScrip, expiry) {
         if (!oc || Object.keys(oc).length === 0) return null;
 
         const normalizeSide = (s) => {
-            if (!s) return null;
+            if (!s) return { oi: 0, oiChange: 0, volume: 0, iv: 0, ltp: 0, change: 0, delta: 0, bid: 0, ask: 0 };
             const ltp       = s.last_price ?? 0;
             const prevClose = s.previous_close_price ?? 0;
             const oi        = s.oi ?? 0;
@@ -717,20 +854,44 @@ async function fetchDhanOptionChain(underlyingScrip, expiry) {
             };
         };
 
-        const rows = Object.entries(oc)
+        const rawRows = Object.entries(oc)
             .map(([strikeStr, sides]) => ({
                 strike: Math.round(parseFloat(strikeStr)),
-                ce: normalizeSide(sides.ce),
-                pe: normalizeSide(sides.pe),
+                ce: normalizeSide(sides?.ce),
+                pe: normalizeSide(sides?.pe),
             }))
-            .filter(r => r.ce && r.pe)
+            .filter(r => (r.ce?.ltp > 0 || r.pe?.ltp > 0 || r.ce?.oi > 0 || r.pe?.oi > 0))
             .sort((a, b) => a.strike - b.strike);
 
-        return { underlyingPrice: json?.data?.last_price ?? 0, rows };
+        const underlyingPrice = json?.data?.last_price ?? 0;
+        const rows = windowStrikesATM(rawRows, underlyingPrice, 18);
+
+        return { underlyingPrice, rows, source: 'BROKER_LIVE' };
     } catch (e) {
         console.warn('[Dhan] fetchDhanOptionChain error:', e.message);
         return null;
     }
+}
+
+/**
+ * Window strikes to ATM ± N strikes around underlying price to minimize payload size
+ */
+function windowStrikesATM(rows, underlyingPrice, windowRange = 18) {
+    if (!Array.isArray(rows) || rows.length <= windowRange * 2 + 1 || underlyingPrice <= 0) {
+        return rows;
+    }
+    let closestIdx = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < rows.length; i++) {
+        const diff = Math.abs(rows[i].strike - underlyingPrice);
+        if (diff < minDiff) {
+            minDiff = diff;
+            closestIdx = i;
+        }
+    }
+    const startIdx = Math.max(0, closestIdx - windowRange);
+    const endIdx = Math.min(rows.length, closestIdx + windowRange + 1);
+    return rows.slice(startIdx, endIdx);
 }
 
 // ─── Full-universe search over the scrip master ──────────────────────────────
@@ -755,23 +916,266 @@ function getAllEquitySymbols() {
 // Kick off scrip master download at module load (non-blocking)
 loadScripMaster().catch(() => {});
 
+async function testCredentials({ clientId, accessToken }) {
+    if (!clientId || !accessToken) return false;
+    try {
+        const res = await fetch(`${DHAN_BASE}/v2/fundlimit`, {
+            method: 'GET',
+            headers: {
+                'access-token': accessToken,
+                'client-id': clientId,
+                'Content-Type': 'application/json',
+            },
+            signal: AbortSignal.timeout(8000),
+        });
+        return res.ok;
+    } catch {
+        return false;
+    }
+}
+
+// ─── Per-Institute Snapshot (multi-tenant) ────────────────────────────────────
+// Same as fetchDhanSnapshot but uses per-institute credentials instead of global.
+// This is the main function called by InstituteDataManager for isolated data feeds.
+
+/**
+ * Fetch full OHLCV snapshot for stocks, indices, and MCX commodities using per-institute credentials.
+ * @param {string[]} symbols - NSE equity and MCX commodity symbols to fetch
+ * @param {{ clientId: string, accessToken: string }} creds - Per-institute Dhan credentials
+ * @returns {{ stocks: Object, indexes: Object, commodities: Object }}
+ */
+async function fetchDhanSnapshotForInstitute(symbols, creds) {
+    if (!isConfigured(creds)) return { stocks: {}, indexes: {}, commodities: {} };
+    if (!scripMasterLoaded) await loadScripMaster();
+
+    const idToSym = {};
+    const stockIds = [];
+    const mcxIdToSym = {};
+    const mcxIds = [];
+
+    for (const sym of symbols) {
+        const uSym = String(sym).toUpperCase().trim();
+        const mcxId = mcxSecurityIdMap[uSym];
+        if (mcxId) {
+            mcxIds.push(mcxId);
+            mcxIdToSym[String(mcxId)] = uSym;
+            continue;
+        }
+        const id = securityIdMap[uSym];
+        if (id) {
+            stockIds.push(id);
+            idToSym[String(id)] = uSym;
+        }
+    }
+
+    const idxIdToName = Object.fromEntries(
+        Object.entries(INDEX_SECURITY_IDS).map(([n, id]) => [String(id), n])
+    );
+    const idxIds = Object.values(INDEX_SECURITY_IDS);
+
+    const stocks = {}, indexes = {}, commodities = {};
+    const BATCH = 100;
+    const maxItems = Math.max(stockIds.length, mcxIds.length, 1);
+
+    for (let i = 0; i < maxItems; i += BATCH) {
+        const body = {};
+        const nseBatch = stockIds.slice(i, i + BATCH);
+        const mcxBatch = mcxIds.slice(i, i + BATCH);
+
+        if (nseBatch.length > 0) body.NSE_EQ = nseBatch;
+        if (mcxBatch.length > 0) body.MCX_COMM = mcxBatch;
+        if (i === 0 && idxIds.length > 0) body.IDX_I = idxIds;
+
+        if (Object.keys(body).length === 0) break;
+
+        try {
+            const res = await fetch(`${DHAN_BASE}/v2/marketfeed/quote`, {
+                method: 'POST',
+                headers: getHeaders(creds),
+                body: JSON.stringify(body),
+                signal: AbortSignal.timeout(8000),
+            });
+            if (!res.ok) {
+                const b = await res.text().catch(() => '');
+                throw new Error(`Dhan API ${res.status}: ${b.slice(0, 100)}`);
+            }
+            const json = await res.json();
+
+            // NSE Equities
+            for (const [secIdStr, q] of Object.entries(json?.data?.NSE_EQ || {})) {
+                const sym = idToSym[secIdStr];
+                if (!sym) continue;
+                const ltp       = q.last_price ?? 0;
+                const prevClose = q.ohlc?.close ?? 0;
+                const change    = q.net_change ?? (ltp - prevClose);
+                stocks[sym] = {
+                    symbol:        sym,
+                    ltp:           Math.round(ltp * 100) / 100,
+                    open:          q.ohlc?.open ?? 0,
+                    high:          q.ohlc?.high ?? 0,
+                    low:           q.ohlc?.low  ?? 0,
+                    previousClose: prevClose,
+                    volume:        q.volume ?? 0,
+                    change:        Math.round(change * 100) / 100,
+                    changePercent: prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0,
+                    high52w:       q['52_week_high'] ?? 0,
+                    low52w:        q['52_week_low']  ?? 0,
+                    currency:      'INR',
+                    segment:       'EQUITY',
+                    exchange:      'NSE',
+                    source:        'DHAN_LIVE',
+                };
+            }
+
+            // MCX Commodities
+            for (const [secIdStr, q] of Object.entries(json?.data?.MCX_COMM || {})) {
+                const sym = mcxIdToSym[secIdStr];
+                if (!sym) continue;
+                const ltp       = q.last_price ?? 0;
+                const prevClose = q.ohlc?.close ?? 0;
+                const change    = q.net_change ?? (ltp - prevClose);
+                const commQuote = {
+                    symbol:        sym,
+                    ltp:           Math.round(ltp * 100) / 100,
+                    open:          q.ohlc?.open ?? 0,
+                    high:          q.ohlc?.high ?? 0,
+                    low:           q.ohlc?.low  ?? 0,
+                    previousClose: prevClose,
+                    volume:        q.volume ?? 0,
+                    change:        Math.round(change * 100) / 100,
+                    changePercent: prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0,
+                    currency:      'INR',
+                    segment:       'COMMODITY',
+                    exchange:      'MCX',
+                    source:        'DHAN_LIVE',
+                };
+                commodities[sym] = commQuote;
+                stocks[sym] = commQuote; // available for seamless ticker lookups
+            }
+
+            // Indices
+            for (const [secIdStr, q] of Object.entries(json?.data?.IDX_I || {})) {
+                const name = idxIdToName[secIdStr];
+                if (!name) continue;
+                const ltp       = q.last_price ?? 0;
+                const prevClose = q.ohlc?.close ?? 0;
+                const change    = q.net_change ?? (ltp - prevClose);
+                indexes[name] = {
+                    name,
+                    ltp:           Math.round(ltp * 100) / 100,
+                    open:          q.ohlc?.open ?? 0,
+                    high:          q.ohlc?.high ?? 0,
+                    low:           q.ohlc?.low  ?? 0,
+                    previousClose: prevClose,
+                    change:        Math.round(change * 100) / 100,
+                    changePercent: prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0,
+                    symbol:        name.replace(/ /g, '_'),
+                    segment:       'INDEX',
+                    source:        'DHAN_LIVE',
+                };
+            }
+
+            if (i + BATCH < maxItems) await new Promise(r => setTimeout(r, 200));
+        } catch (e) {
+            // Re-throw so InstituteDataManager can catch and handle fallback
+            throw e;
+        }
+    }
+    return { stocks, indexes, commodities };
+}
+
+/**
+ * Fetch option chain using per-institute credentials.
+ */
+async function fetchDhanOptionChainForInstitute(underlyingScrip, expiry, creds) {
+    if (!isConfigured(creds) || !expiry) return null;
+    try {
+        const res = await fetch(`${DHAN_BASE}/v2/optionchain`, {
+            method: 'POST',
+            headers: getHeaders(creds),
+            body: JSON.stringify({ UnderlyingScrip: underlyingScrip, UnderlyingSeg: 'IDX_I', Expiry: expiry }),
+            signal: AbortSignal.timeout(8000),
+        });
+        if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            console.warn(`[Dhan] Option chain error ${res.status}: ${body.slice(0, 100)}`);
+            return null;
+        }
+        const json = await res.json();
+        const oc = json?.data?.oc;
+        if (!oc || Object.keys(oc).length === 0) return null;
+
+        const normalizeSide = (s) => {
+            if (!s) return { oi: 0, oiChange: 0, volume: 0, iv: 0, ltp: 0, change: 0, delta: 0, bid: 0, ask: 0 };
+            const ltp       = s.last_price ?? 0;
+            const prevClose = s.previous_close_price ?? 0;
+            const oi        = s.oi ?? 0;
+            return {
+                oi,
+                oiChange: oi - (s.previous_oi ?? oi),
+                volume:   s.volume ?? 0,
+                iv:       Math.round((s.implied_volatility ?? 0) * 100) / 100,
+                ltp:      Math.round(ltp * 100) / 100,
+                change:   Math.round((ltp - prevClose) * 100) / 100,
+                delta:    Math.round((s.greeks?.delta ?? 0) * 100) / 100,
+                bid:      s.top_bid_price ?? 0,
+                ask:      s.top_ask_price ?? 0,
+            };
+        };
+
+        const rawRows = Object.entries(oc)
+            .map(([strikeStr, sides]) => ({
+                strike: Math.round(parseFloat(strikeStr)),
+                ce: normalizeSide(sides?.ce),
+                pe: normalizeSide(sides?.pe),
+            }))
+            .filter(r => (r.ce?.ltp > 0 || r.pe?.ltp > 0 || r.ce?.oi > 0 || r.pe?.oi > 0))
+            .sort((a, b) => a.strike - b.strike);
+
+        const underlyingPrice = json?.data?.last_price ?? 0;
+        const rows = windowStrikesATM(rawRows, underlyingPrice, 18);
+
+        return { underlyingPrice, rows, source: 'BROKER_LIVE' };
+    } catch (e) {
+        console.warn('[Dhan] fetchDhanOptionChainForInstitute error:', e.message);
+        return null;
+    }
+}
+
+function getAllCommoditySymbols() {
+    return Object.keys(mcxSecurityIdMap);
+}
+
+function isCommoditySymbol(sym) {
+    return !!mcxSecurityIdMap[String(sym).toUpperCase().trim()];
+}
+
 module.exports = {
     fetchDhanStockQuotes,
     fetchDhanLTP,
     fetchDhanIndices,
     fetchDhanLTPAll,
     fetchDhanSnapshot,
+    fetchDhanSnapshotForInstitute,
+    fetchDhanOptionChainForInstitute,
     isConfigured,
+    getGlobalCredentials,
+    testCredentials,
     loadScripMaster,
-    getSecurityId: (sym) => securityIdMap[sym] ?? null,
-    getSymbolFromId: (id) => securityIdToSymbol[String(id)] ?? null,
+    getSecurityId: (sym) => securityIdMap[sym] ?? mcxSecurityIdMap[sym] ?? null,
+    getSymbolFromId: (id) => securityIdToSymbol[String(id)] ?? mcxSecurityIdToSymbol[String(id)] ?? null,
     getSymbolName: (sym) => symbolNames[sym] ?? null,
     searchScrips,
     getAllEquitySymbols,
+    getAllCommoditySymbols,
+    isCommoditySymbol,
     fetchDhanExpiryList,
     fetchDhanOptionChain,
     fetchDhanBseQuote,
     fetchDhanHistoricalDaily,
     fetchDhanChart,
+    setCachedConfig,
+    refreshCachedDhanConfig,
     INDEX_SECURITY_IDS,
 };
+

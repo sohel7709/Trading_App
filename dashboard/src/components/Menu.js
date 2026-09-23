@@ -18,7 +18,25 @@ const Menu = () => {
 
   return (
     <div className="menu-container">
-      <img src="logo.png" style={{ width: "50px" }} />
+      <Link to="/" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: 8, marginRight: 24 }}>
+        <div style={{
+          width: 32,
+          height: 32,
+          borderRadius: 8,
+          background: "linear-gradient(135deg, #1A73E8, #3b82f6)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#fff",
+          fontWeight: 800,
+          fontSize: 16
+        }}>
+          T
+        </div>
+        <span style={{ fontWeight: 800, fontSize: 16, color: "#1e293b", letterSpacing: "-0.5px" }}>
+          TradeLab
+        </span>
+      </Link>
       <div className="menus">
         <ul>
           <li>

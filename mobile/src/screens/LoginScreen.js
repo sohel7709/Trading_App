@@ -1,163 +1,304 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   Alert, KeyboardAvoidingView, Platform, ScrollView,
+  ActivityIndicator, Switch,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { login as apiLogin } from '../services/authService';
 
-// Prefilled credentials
-const PREFILLED_USER_ID = 'TG3140';
-const VALID_PASSWORD = 'Ashok@123';
+const REMEMBER_KEY = 'saved_credentials';
 
 export default function LoginScreen({ onLogin }) {
   const insets = useSafeAreaInsets();
-  const [userId, setUserId] = useState(PREFILLED_USER_ID);
-  const [password, setPassword] = useState(VALID_PASSWORD);
-  const [showPwd, setShowPwd] = useState(false);
+  const [instituteCode, setInstituteCode] = useState('');
+  const [userId, setUserId]               = useState('');
+  const [password, setPassword]           = useState('');
+  const [showPwd, setShowPwd]             = useState(false);
+  const [rememberMe, setRememberMe]       = useState(false);
+  const [loading, setLoading]             = useState(false);
+  const [focusedField, setFocusedField]   = useState(null);
 
-  const handleLogin = () => {
-    if (!userId.trim()) {
-      return Alert.alert('Login', 'Please enter your Phone or User ID');
+  const userIdRef   = useRef(null);
+  const passwordRef = useRef(null);
+
+  // ── Load saved credentials on mount ────────────────────────────────────────
+  useEffect(() => {
+    AsyncStorage.getItem(REMEMBER_KEY)
+      .then(raw => {
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (saved.instituteCode) setInstituteCode(saved.instituteCode);
+        if (saved.userId)        setUserId(saved.userId);
+        if (saved.password)      setPassword(saved.password);
+        setRememberMe(true);
+      })
+      .catch(() => {});
+  }, []);
+
+  // ── Login handler ───────────────────────────────────────────────────────────
+  const handleLogin = async () => {
+    const trimmedId = userId.trim();
+    const isEmail = trimmedId.includes('@');
+
+    if (!isEmail && !instituteCode.trim()) {
+      Alert.alert('Institute Code Required', 'Enter the code given by your instructor (or log in directly using your registered Email).\n\nExample: SRM-2026');
+      return;
     }
-    if (password !== VALID_PASSWORD) {
-      return Alert.alert('Login failed', 'Invalid user ID or password. Please try again.');
+    if (!trimmedId) {
+      Alert.alert('Email or User ID Required', 'Enter your email address or User ID created by your instructor/admin.');
+      return;
     }
-    onLogin?.();
+    if (!password) {
+      Alert.alert('Password Required', 'Enter your password.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const data = await apiLogin(trimmedId, password, instituteCode.trim().toUpperCase());
+
+      // Save or clear credentials based on Remember Me toggle
+      if (rememberMe) {
+        await AsyncStorage.setItem(REMEMBER_KEY, JSON.stringify({
+          instituteCode: instituteCode.trim().toUpperCase(),
+          userId: trimmedId,
+          password,
+        }));
+      } else {
+        await AsyncStorage.removeItem(REMEMBER_KEY);
+      }
+
+      onLogin?.(data.user);
+    } catch (err) {
+      Alert.alert(
+        'Login Failed',
+        err.message?.includes('Invalid') || err.message?.includes('credentials')
+          ? 'Wrong Email/User ID or password. Please check and try again.'
+          : err.message || 'Unable to connect. Make sure your phone is on the same Wi-Fi as the server.'
+      );
+    } finally {
+      setLoading(false);
+    }
   };
+
+
+  const inputStyle = (field) => [
+    st.inputBox,
+    focusedField === field && st.inputBoxFocused,
+  ];
 
   return (
     <KeyboardAvoidingView
-      style={styles.flex}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={st.flex}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
     >
       <ScrollView
-        style={[styles.flex, { paddingTop: insets.top }]}
-        contentContainerStyle={styles.scroll}
+        style={st.flex}
+        contentContainerStyle={[st.scroll, { paddingTop: insets.top + 32, paddingBottom: insets.bottom + 40 }]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
+        bounces={false}
       >
-        {/* Top bar: back + kite logo */}
-        <View style={styles.topBar}>
-          <TouchableOpacity hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="chevron-back" size={26} color="#444" />
-          </TouchableOpacity>
-          <View style={styles.kiteLogo}>
-            <View style={styles.kiteLogoDark} />
+        {/* Logo */}
+        <View style={st.logoRow}>
+          <View style={st.logoBadge}>
+            <Text style={st.logoBadgeText}>T</Text>
           </View>
+          <Text style={st.logoName}>Trade Lab</Text>
         </View>
 
-        {/* Title */}
-        <Text style={styles.title}>Login</Text>
+        <Text style={st.title}>Sign in</Text>
+        <Text style={st.subtitle}>
+          Use the credentials provided by your instructor.
+        </Text>
 
-        {/* Phone or User ID — floating label */}
-        <View style={styles.fieldOuter}>
-          <View style={styles.labelChip}>
-            <Text style={styles.labelChipText}>Phone or User ID</Text>
-          </View>
-          <View style={styles.inputBox}>
+        {/* ── Institute Code ─────────────────────────────────────────── */}
+        <View style={st.formGroup}>
+          <Text style={st.label}>Institute Code</Text>
+          <View style={inputStyle('institute')}>
+            <Text style={st.inputPrefix}>🏫</Text>
             <TextInput
-              style={styles.input}
-              value={userId}
-              onChangeText={setUserId}
+              style={st.input}
+              value={instituteCode}
+              onChangeText={setInstituteCode}
+              onFocus={() => setFocusedField('institute')}
+              onBlur={() => setFocusedField(null)}
+              placeholder="e.g. SRM-2026"
+              placeholderTextColor="#c0c8d4"
               autoCapitalize="characters"
               autoCorrect={false}
+              returnKeyType="next"
+              onSubmitEditing={() => userIdRef.current?.focus()}
             />
-            <Ionicons name="person-outline" size={20} color="#9aa3ab" />
+          </View>
+          <Text style={st.hint}>Ask your instructor for this code</Text>
+        </View>
+
+        {/* ── User ID ───────────────────────────────────────────────── */}
+        <View style={st.formGroup}>
+          <Text style={st.label}>User ID or Email</Text>
+          <View style={inputStyle('userid')}>
+            <Text style={st.inputPrefix}>👤</Text>
+            <TextInput
+              ref={userIdRef}
+              style={st.input}
+              value={userId}
+              onChangeText={setUserId}
+              onFocus={() => setFocusedField('userid')}
+              onBlur={() => setFocusedField(null)}
+              placeholder="STUD123 or email"
+              placeholderTextColor="#c0c8d4"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+              returnKeyType="next"
+              onSubmitEditing={() => passwordRef.current?.focus()}
+            />
           </View>
         </View>
 
-        {/* Password */}
-        <View style={[styles.inputBox, { marginTop: 18 }]}>
-          <TextInput
-            style={styles.input}
-            placeholder="Password"
-            placeholderTextColor="#9aa3ab"
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry={!showPwd}
-            autoCapitalize="none"
-            autoCorrect={false}
+        {/* ── Password ──────────────────────────────────────────────── */}
+        <View style={st.formGroup}>
+          <Text style={st.label}>Password</Text>
+          <View style={inputStyle('password')}>
+            <Text style={st.inputPrefix}>🔒</Text>
+            <TextInput
+              ref={passwordRef}
+              style={st.input}
+              value={password}
+              onChangeText={setPassword}
+              onFocus={() => setFocusedField('password')}
+              onBlur={() => setFocusedField(null)}
+              secureTextEntry={!showPwd}
+              placeholder="Your password"
+              placeholderTextColor="#c0c8d4"
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="done"
+              onSubmitEditing={handleLogin}
+              textContentType="password"
+            />
+            <TouchableOpacity
+              onPress={() => setShowPwd(v => !v)}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Text style={st.showHide}>{showPwd ? 'Hide' : 'Show'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* ── Remember Me ───────────────────────────────────────────── */}
+        <View style={st.rememberRow}>
+          <Switch
+            value={rememberMe}
+            onValueChange={setRememberMe}
+            trackColor={{ false: '#e2e8f0', true: '#bfdbfe' }}
+            thumbColor={rememberMe ? '#1A73E8' : '#94a3b8'}
+            ios_backgroundColor="#e2e8f0"
           />
-          <TouchableOpacity onPress={() => setShowPwd(s => !s)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Ionicons name={showPwd ? 'eye-off-outline' : 'eye-outline'} size={20} color="#9aa3ab" />
-          </TouchableOpacity>
+          <View style={{ flex: 1 }}>
+            <Text style={st.rememberLabel}>Remember me</Text>
+            <Text style={st.rememberSub}>
+              {rememberMe
+                ? 'Credentials saved — you will not be asked again'
+                : 'You will need to log in each time'}
+            </Text>
+          </View>
         </View>
 
-        {/* Login button */}
-        <TouchableOpacity style={styles.loginBtn} onPress={handleLogin} activeOpacity={0.9}>
-          <Text style={styles.loginBtnText}>LOGIN</Text>
+        {/* ── Sign In Button ────────────────────────────────────────── */}
+        <TouchableOpacity
+          style={[st.btn, loading && { opacity: 0.75 }]}
+          onPress={handleLogin}
+          activeOpacity={0.85}
+          disabled={loading}
+        >
+          {loading
+            ? <ActivityIndicator color="#fff" />
+            : <Text style={st.btnText}>Sign in</Text>
+          }
         </TouchableOpacity>
 
-        {/* Forgot link */}
-        <TouchableOpacity style={styles.forgotWrap}>
-          <Text style={styles.forgotText}>Forgot user ID or password?</Text>
-        </TouchableOpacity>
-
-        <View style={{ flex: 1 }} />
-
-        {/* Footer */}
-        <View style={[styles.footer, { paddingBottom: insets.bottom + 16 }]}>
-          <View style={styles.footerBrand}>
-            <Ionicons name="leaf" size={16} color="#9aa3ab" />
-            <Text style={styles.footerBrandText}>ZERODHA</Text>
-          </View>
-          <Text style={styles.footerLegal}>
-            Zerodha Broking Limited: Member of NSE, BSE, MCX - SEBI Reg. no. INZ000031633,
-            CDSL - SEBI Reg. no. IN-DP-431-2019  |  <Text style={styles.footerLink}>Smart Online Dispute Resolution</Text>  |  <Text style={styles.footerLink}>SEBI SCORES</Text>
+        {/* ── Info ─────────────────────────────────────────────────── */}
+        <View style={st.infoBox}>
+          <Text style={st.infoText}>
+            📊  TradeLab is a paper trading simulator.{'\n'}
+            No real money, no real orders.
           </Text>
         </View>
+
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
-const styles = StyleSheet.create({
-  flex: { flex: 1, backgroundColor: '#fff' },
-  scroll: { flexGrow: 1, paddingHorizontal: 24 },
+const st = StyleSheet.create({
+  flex:  { flex: 1, backgroundColor: '#FFFFFF' },
+  scroll: { paddingHorizontal: 26 },
 
-  topBar: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingTop: 8, paddingBottom: 40,
+  // Logo
+  logoRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 32 },
+  logoBadge: {
+    width: 40, height: 40, borderRadius: 12,
+    backgroundColor: '#1A73E8', justifyContent: 'center', alignItems: 'center',
   },
-  kiteLogo: {
-    width: 40, height: 30, justifyContent: 'center', alignItems: 'flex-end',
-  },
-  kiteLogoDark: {
-    width: 0, height: 0,
-    borderTopWidth: 15, borderBottomWidth: 15, borderLeftWidth: 26,
-    borderTopColor: '#E8543B', borderBottomColor: '#B5341F', borderLeftColor: '#E8543B',
-  },
+  logoBadgeText: { color: '#fff', fontSize: 20, fontWeight: '800' },
+  logoName: { fontSize: 20, fontWeight: '800', color: '#0f172a', letterSpacing: -0.4 },
 
-  title: { fontSize: 34, fontWeight: '700', color: '#1a1a1a', marginBottom: 60 },
+  // Heading
+  title: { fontSize: 26, fontWeight: '800', color: '#0f172a', letterSpacing: -0.5, marginBottom: 6 },
+  subtitle: { fontSize: 14, color: '#64748b', lineHeight: 20, marginBottom: 28 },
 
-  fieldOuter: { position: 'relative' },
-  labelChip: {
-    position: 'absolute', top: -9, left: 14, zIndex: 2,
-    backgroundColor: '#fff', paddingHorizontal: 6,
-  },
-  labelChipText: { fontSize: 13, color: '#8a929a' },
-
+  // Form
+  formGroup: { marginBottom: 18 },
+  label: { fontSize: 13, fontWeight: '700', color: '#0f172a', marginBottom: 8 },
   inputBox: {
     flexDirection: 'row', alignItems: 'center',
-    borderWidth: 1, borderColor: '#d9dde1', borderRadius: 6,
-    paddingHorizontal: 16, height: 64,
+    borderWidth: 1.5, borderColor: '#e2e8f0',
+    borderRadius: 12, paddingHorizontal: 14, height: 52,
+    backgroundColor: '#f8fafc',
   },
-  input: { flex: 1, fontSize: 18, color: '#1a1a1a', paddingVertical: 0 },
-
-  loginBtn: {
-    backgroundColor: '#4B7BEC', borderRadius: 8,
-    height: 60, justifyContent: 'center', alignItems: 'center',
-    marginTop: 28,
+  inputBoxFocused: {
+    borderColor: '#1A73E8',
+    backgroundColor: '#ffffff',
   },
-  loginBtnText: { color: '#fff', fontSize: 17, fontWeight: '700', letterSpacing: 0.5 },
+  inputPrefix: { fontSize: 16, marginRight: 10 },
+  input: {
+    flex: 1,
+    fontSize: 15,
+    color: '#0f172a',
+    paddingVertical: 0,
+  },
+  showHide: { fontSize: 13, fontWeight: '700', color: '#1A73E8', paddingLeft: 8 },
+  hint: { fontSize: 11, color: '#94a3b8', marginTop: 5 },
 
-  forgotWrap: { alignItems: 'flex-end', marginTop: 24 },
-  forgotText: { color: '#4B7BEC', fontSize: 16 },
+  // Remember Me
+  rememberRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    marginBottom: 24, marginTop: 4,
+    backgroundColor: '#f8fafc', borderRadius: 12,
+    padding: 12, borderWidth: 1, borderColor: '#f1f5f9',
+  },
+  rememberLabel: { fontSize: 14, fontWeight: '700', color: '#0f172a', marginBottom: 2 },
+  rememberSub:   { fontSize: 11, color: '#64748b' },
 
-  footer: { paddingTop: 30 },
-  footerBrand: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 },
-  footerBrandText: { fontSize: 16, color: '#9aa3ab', fontWeight: '600', letterSpacing: 1 },
-  footerLegal: { fontSize: 12.5, color: '#b5bcc2', lineHeight: 20 },
-  footerLink: { textDecorationLine: 'underline', color: '#b5bcc2' },
+  // Button
+  btn: {
+    backgroundColor: '#1A73E8', borderRadius: 14,
+    height: 54, justifyContent: 'center', alignItems: 'center',
+    marginBottom: 20,
+    shadowColor: '#1A73E8', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.28, shadowRadius: 10, elevation: 5,
+  },
+  btnText: { color: '#fff', fontSize: 16, fontWeight: '800' },
+
+  // Info
+  infoBox: {
+    backgroundColor: '#f8fafc', borderRadius: 12,
+    padding: 14, borderWidth: 1, borderColor: '#f1f5f9',
+  },
+  infoText: { fontSize: 12, color: '#94a3b8', lineHeight: 19, textAlign: 'center' },
 });

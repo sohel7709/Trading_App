@@ -1,0 +1,19 @@
+{
+  "env": {
+    "node": true,
+    "es2021": true
+  },
+  "extends": "eslint:recommended",
+  "parserOptions": {
+    "ecmaVersion": 12
+  },
+  "rules": {
+    "no-restricted-syntax": [
+      "error",
+      {
+        "selector": "NewExpression[callee.name='Date']",
+        "message": "Do not use 'new Date()' directly in the core engine. Use the Replay Clock or injected time to support Replay mode."
+      }
+    ]
+  }
+}

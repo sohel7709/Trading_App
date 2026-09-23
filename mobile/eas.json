@@ -14,13 +14,13 @@
       "distribution": "internal",
       "channel": "preview",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://zerodha-backend-production-58b3.up.railway.app"
+        "EXPO_PUBLIC_API_URL": "http://192.168.1.4:8080"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://zerodha-backend-production-58b3.up.railway.app"
+        "EXPO_PUBLIC_API_URL": "http://192.168.1.4:8080"
       }
     }
   },

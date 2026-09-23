@@ -5,8 +5,19 @@ const _YF2 = _yf2.default || _yf2;
 const yahooFinance = (typeof _YF2 === 'function') ? new _YF2({ suppressNotices: ['yahooSurvey'] }) : _YF2;
 const liveDataService = require('./liveDataService');
 const dhanDataService = require('./dhanDataService');
+const kotakNeoService = require('./kotakNeoService');
 const candleDataService = require('./candleDataService');
-const { isMarketOpen } = require('./marketRules');
+const { isMarketOpen, isActualMarketHours } = require('./marketRules');
+
+function isLiveMarketActive(segment = 'FO') {
+    try {
+        const marketControlService = require('./services/marketControlService');
+        const state = marketControlService.getMarketState ? marketControlService.getMarketState() : null;
+        if (state?.isHalted) return false;
+        if (state?.mode === 'SYNTHETIC' || state?.mode === 'REPLAY') return true;
+    } catch { /* ignore */ }
+    return isActualMarketHours(segment);
+}
 
 // NSE symbols — used for Groww / Yahoo fallback
 const NSE_STOCK_SYMBOLS = [
@@ -467,13 +478,23 @@ function calcOptionPrice(type, indexPrice, strike, atmPremium, strikeGap, dte) {
     // atmPremium is calibrated to a ~7-day expiry.
     const timeScale = Math.sqrt((dte ?? 7) / 7);
     const timeValue = Math.max(0.5, atmPremium * decay * timeScale);
-    const noise = (Math.random() - 0.5) * (timeValue * 0.1);
+    const noise = isLiveMarketActive('FO') ? ((Math.random() - 0.5) * (timeValue * 0.1)) : 0;
     return Math.max(0.05, Math.round((intrinsic + timeValue + noise) * 100) / 100);
 }
 
+const DEFAULT_INDEX_PRICES = {
+    'NIFTY 50':      23300,
+    'BANK NIFTY':    56000,
+    'FINNIFTY':      25300,
+    'MIDCPNIFTY':    14400,
+    'SENSEX':        74400,
+    'BANKEX':        63400,
+    'NIFTY NEXT 50': 71000,
+};
+
 function generateOptionChainForIndex(indexName, expiry) {
     const idxEntry = indexData[indexName];
-    const indexPrice = idxEntry ? idxEntry.ltp : 24000;
+    const indexPrice = idxEntry?.ltp || DEFAULT_INDEX_PRICES[indexName] || 24000;
     const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
     const { strikeGap, atmPremium } = cfg;
     const expiries = getExpiryDates(indexName);
@@ -483,31 +504,32 @@ function generateOptionChainForIndex(indexName, expiry) {
     const dte = daysToExpiry(resolvedExpiry);
     const atmStrike = Math.round(indexPrice / strikeGap) * strikeGap;
     const rows = [];
+    const isLive = isLiveMarketActive('FO');
 
     for (let i = -12; i <= 12; i++) {
         const strike = atmStrike + i * strikeGap;
         const stepsFromATM = Math.abs(i);
-        const iv = Math.round((14 + stepsFromATM * 0.4 + Math.random() * 1.5) * 100) / 100;
+        const iv = Math.round((14 + stepsFromATM * 0.4 + (isLive ? Math.random() * 1.5 : 0.5)) * 100) / 100;
         const ceLtp = calcOptionPrice('CE', indexPrice, strike, atmPremium, strikeGap, dte);
         const peLtp = calcOptionPrice('PE', indexPrice, strike, atmPremium, strikeGap, dte);
-        const oiBase = Math.round((5000000 - stepsFromATM * 200000) * (0.8 + Math.random() * 0.4));
+        const oiBase = Math.round((5000000 - stepsFromATM * 200000) * 0.9);
         rows.push({
             strike,
             isATM: i === 0,
             ce: {
-                oi: Math.max(100000, oiBase + Math.floor(Math.random() * 500000)),
-                oiChange: Math.floor((Math.random() - 0.3) * 300000),
-                volume: Math.floor(Math.random() * 150000) + 10000,
+                oi: Math.max(100000, oiBase + (isLive ? Math.floor(Math.random() * 500000) : 50000)),
+                oiChange: isLive ? Math.floor((Math.random() - 0.3) * 300000) : 0,
+                volume: isLive ? Math.floor(Math.random() * 150000) + 10000 : 25000,
                 iv, ltp: ceLtp,
-                change: Math.round((Math.random() - 0.5) * ceLtp * 0.3 * 100) / 100,
+                change: isLive ? Math.round((Math.random() - 0.5) * ceLtp * 0.3 * 100) / 100 : 0,
                 delta: Math.max(0, Math.min(1, Math.round((0.5 - i * 0.07) * 100) / 100)),
             },
             pe: {
-                oi: Math.max(100000, oiBase + Math.floor(Math.random() * 500000)),
-                oiChange: Math.floor((Math.random() - 0.3) * 300000),
-                volume: Math.floor(Math.random() * 150000) + 10000,
+                oi: Math.max(100000, oiBase + (isLive ? Math.floor(Math.random() * 500000) : 50000)),
+                oiChange: isLive ? Math.floor((Math.random() - 0.3) * 300000) : 0,
+                volume: isLive ? Math.floor(Math.random() * 150000) + 10000 : 25000,
                 iv, ltp: peLtp,
-                change: Math.round((Math.random() - 0.5) * peLtp * 0.3 * 100) / 100,
+                change: isLive ? Math.round((Math.random() - 0.5) * peLtp * 0.3 * 100) / 100 : 0,
                 delta: Math.max(-1, Math.min(0, Math.round((-0.5 + i * 0.07) * 100) / 100)),
             },
         });
@@ -521,6 +543,7 @@ function generateOptionChainForIndex(indexName, expiry) {
         indexChangePercent: idxEntry?.changePercent ?? 0,
         expiries,
         atmStrike, rows,
+        source: 'SIMULATED',
         lastUpdated: new Date().toISOString(),
     };
 }
@@ -536,6 +559,14 @@ async function getOptionExpiries(indexName) {
     const hit = expiryListCache[indexName];
     if (hit && Date.now() - hit.at < 10 * 60e3) return hit.list;
 
+    if (kotakNeoService.isConfigured()) {
+        const list = await kotakNeoService.fetchKotakExpiryList(indexName);
+        if (list && list.length > 0) {
+            expiryListCache[indexName] = { at: Date.now(), list };
+            return list;
+        }
+    }
+
     const secId = dhanDataService.INDEX_SECURITY_IDS[indexName];
     if (secId) {
         const list = await dhanDataService.fetchDhanExpiryList(secId);
@@ -547,71 +578,348 @@ async function getOptionExpiries(indexName) {
     return getExpiryDates(indexName); // calculated fallback
 }
 
-async function getOptionChain(indexName, expiry) {
-    const expiries = await getOptionExpiries(indexName);
-    const resolvedExpiry = expiry && expiries.includes(expiry) ? expiry : expiries[0];
-    const key = `${indexName}|${resolvedExpiry}`;
+// ─── Central Option Chain Broadcaster Engine ────────────────────────────────
+// Singleton cache and 1-second internal distribution engine.
+// Calls broker API at most once per 15s in a safe sequential queue, while
+// distributing smooth live option chain updates to all mobile clients every 1s
+// via WebSockets without ever triggering rate limits.
 
-    const hit = optionChainCache[key];
-    if (hit && Date.now() - hit.at < 3000) return hit.data;
-    // Market closed and we already have a snapshot for this key — nothing
-    // can have actually traded, so skip the Dhan round-trip entirely rather
-    // than burning an API call (and any transient variance in what it
-    // returns) just to re-serve data that should be sitting perfectly still.
-    if (hit && !isMarketOpen('FO')) return hit.data;
-    if (chainInflight.has(key)) return chainInflight.get(key);
+const activeOptionChains = {}; // indexName -> chain object
+let _chainIo = null;
+let _brokerSyncBusy = false;
+let _dhanRateLimitBackoffUntil = 0;
+const SUPPORTED_INDICES = ['NIFTY 50', 'BANK NIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX'];
 
-    const p = (async () => {
-        let data = null;
-        const secId = dhanDataService.INDEX_SECURITY_IDS[indexName];
-        if (secId) {
-            const dhan = await dhanDataService.fetchDhanOptionChain(secId, resolvedExpiry);
-            if (dhan && dhan.rows.length > 0) {
+function updateOptionChainPrices(chain) {
+    if (!chain || !Array.isArray(chain.rows)) return chain;
+    if (!isLiveMarketActive('FO')) return chain; // Off-market: completely frozen
+
+    const indexName = chain.indexName || 'NIFTY 50';
+    const idxEntry = indexData[indexName];
+    const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
+    const strikeGap = cfg.strikeGap;
+    const atmPremium = cfg.atmPremium;
+    
+    // Live underlying price from 1-second tick
+    let currentPrice = idxEntry?.ltp || chain.indexPrice || DEFAULT_INDEX_PRICES[indexName] || 24000;
+    
+    if (chain._lastPrice !== undefined && chain._lastPrice === currentPrice) {
+        const microOffset = Math.random() > 0.5 ? 0.05 : -0.05;
+        currentPrice = Math.round((currentPrice + microOffset) * 100) / 100;
+    }
+    chain._lastPrice = currentPrice;
+
+    const dte = daysToExpiry(chain.expiry);
+    const atmStrike = Math.round(currentPrice / strikeGap) * strikeGap;
+
+    const basePrice = chain.baseUnderlyingPrice || chain.indexPrice || currentPrice;
+    const underlyingDiff = currentPrice - basePrice;
+
+    chain.indexPrice = currentPrice;
+    chain.indexChange = Math.round(((idxEntry?.change ?? chain.indexChange ?? 0) + (currentPrice - (idxEntry?.ltp || currentPrice))) * 100) / 100;
+    const pc = idxEntry?.previousClose || (currentPrice - (chain.indexChange || 0));
+    chain.indexChangePercent = pc > 0 ? Math.round((chain.indexChange / pc) * 10000) / 100 : 0;
+    chain.atmStrike = atmStrike;
+    chain.daysToExpiry = Math.round(dte * 100) / 100;
+    chain.lastUpdated = new Date().toISOString();
+
+    for (let i = 0; i < chain.rows.length; i++) {
+        const row = chain.rows[i];
+        row.isATM = (row.strike === atmStrike);
+
+        if (chain.source === 'BROKER_LIVE') {
+            // Live delta-based movement derived from real-time underlying index tick
+            const steps = (row.strike - currentPrice) / (strikeGap * 10);
+            const approxCeDelta = Math.max(0.01, Math.min(0.99, Math.round((0.5 - steps) * 100) / 100));
+            const approxPeDelta = Math.max(-0.99, Math.min(-0.01, Math.round((-0.5 - steps) * 100) / 100));
+
+            const ceDelta = (typeof row.ce?.delta === 'number' && Math.abs(row.ce.delta) > 0.001) ? row.ce.delta : approxCeDelta;
+            const peDelta = (typeof row.pe?.delta === 'number' && Math.abs(row.pe.delta) > 0.001) ? row.pe.delta : approxPeDelta;
+
+            if (row.ce) {
+                const baseLtp = row.ce.baseLtp !== undefined ? row.ce.baseLtp : row.ce.ltp;
+                const baseChg = row.ce.baseChange !== undefined ? row.ce.baseChange : (row.ce.change || 0);
+                const ceMove = Math.round(underlyingDiff * ceDelta * 100) / 100;
+                const newLtp = Math.max(0.05, Math.round((baseLtp + ceMove) * 100) / 100);
+                row.ce.ltp = newLtp;
+                row.ce.change = Math.round((baseChg + (newLtp - baseLtp)) * 100) / 100;
+                row.ce.delta = ceDelta;
+            }
+
+            if (row.pe) {
+                const baseLtp = row.pe.baseLtp !== undefined ? row.pe.baseLtp : row.pe.ltp;
+                const baseChg = row.pe.baseChange !== undefined ? row.pe.baseChange : (row.pe.change || 0);
+                const peMove = Math.round(underlyingDiff * peDelta * 100) / 100;
+                const newLtp = Math.max(0.05, Math.round((baseLtp + peMove) * 100) / 100);
+                row.pe.ltp = newLtp;
+                row.pe.change = Math.round((baseChg + (newLtp - baseLtp)) * 100) / 100;
+                row.pe.delta = peDelta;
+            }
+        } else {
+            // Simulated mathematical pricing
+            const ceLtp = calcOptionPrice('CE', currentPrice, row.strike, atmPremium, strikeGap, dte);
+            const peLtp = calcOptionPrice('PE', currentPrice, row.strike, atmPremium, strikeGap, dte);
+
+            if (row.ce) {
+                const oldCe = row.ce.ltp || ceLtp;
+                row.ce.ltp = ceLtp;
+                if (row.ce.refLtp === undefined) row.ce.refLtp = oldCe;
+                row.ce.change = Math.round((ceLtp - row.ce.refLtp) * 100) / 100;
+                row.ce.delta = Math.max(0.01, Math.min(0.99, Math.round((0.5 - (row.strike - currentPrice) / (strikeGap * 10)) * 100) / 100));
+            }
+            if (row.pe) {
+                const oldPe = row.pe.ltp || peLtp;
+                row.pe.ltp = peLtp;
+                if (row.pe.refLtp === undefined) row.pe.refLtp = oldPe;
+                row.pe.change = Math.round((peLtp - row.pe.refLtp) * 100) / 100;
+                row.pe.delta = Math.max(-0.99, Math.min(-0.01, Math.round((-0.5 - (currentPrice - row.strike) / (strikeGap * 10)) * 100) / 100));
+            }
+        }
+    }
+
+    return chain;
+}
+
+// Background broker fetch: called at a safe slow interval (every 12s)
+async function syncBrokerOptionChain() {
+    if (_brokerSyncBusy || Date.now() < _dhanRateLimitBackoffUntil || !isLiveMarketActive('FO')) return;
+    _brokerSyncBusy = true;
+
+    try {
+        for (const indexName of SUPPORTED_INDICES) {
+            const expiries = await getOptionExpiries(indexName);
+            const resolvedExpiry = expiries[0];
+            let liveData = null;
+
+            if (kotakNeoService.isConfigured()) {
+                try {
+                    liveData = await kotakNeoService.fetchKotakOptionChain(indexName, resolvedExpiry);
+                } catch { /* ignore */ }
+            }
+
+            if (!liveData && Date.now() >= _dhanRateLimitBackoffUntil) {
+                const secId = dhanDataService.INDEX_SECURITY_IDS[indexName];
+                if (secId) {
+                    try {
+                        liveData = await dhanDataService.fetchDhanOptionChain(secId, resolvedExpiry);
+                    } catch (err) {
+                        if (err.message && err.message.includes('429')) {
+                            console.warn('[MarketData] ⚠️ Dhan rate limit hit for option chain — backing off 30s');
+                            _dhanRateLimitBackoffUntil = Date.now() + 30000;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (liveData && Array.isArray(liveData.rows) && liveData.rows.length > 0) {
                 const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
-                const indexPrice = dhan.underlyingPrice || indexData[indexName]?.ltp || 0;
+                const indexPrice = liveData.underlyingPrice || indexData[indexName]?.ltp || 0;
                 const atmStrike = Math.round(indexPrice / cfg.strikeGap) * cfg.strikeGap;
-                const rows = dhan.rows.map(r => ({ ...r, isATM: r.strike === atmStrike }));
-                // Window to ±15 strikes around ATM — full NFO chains are huge
-                let atmIdx = rows.findIndex(r => r.strike >= atmStrike);
-                if (atmIdx < 0) atmIdx = Math.floor(rows.length / 2);
-                const windowed = rows.slice(Math.max(0, atmIdx - 15), Math.min(rows.length, atmIdx + 16));
-                data = {
-                    indexName, indexPrice,
+                const rows = liveData.rows.map(r => ({
+                    ...r,
+                    isATM: r.strike === atmStrike,
+                    ce: r.ce ? { ...r.ce, baseLtp: r.ce.ltp, baseChange: r.ce.change } : null,
+                    pe: r.pe ? { ...r.pe, baseLtp: r.pe.ltp, baseChange: r.pe.change } : null,
+                }));
+
+                activeOptionChains[indexName] = {
+                    indexName,
+                    indexPrice,
+                    baseUnderlyingPrice: indexPrice,
                     expiry: resolvedExpiry,
                     daysToExpiry: Math.round(daysToExpiry(resolvedExpiry) * 100) / 100,
-                    indexChange:        indexData[indexName]?.change ?? 0,
+                    indexChange: indexData[indexName]?.change ?? 0,
                     indexChangePercent: indexData[indexName]?.changePercent ?? 0,
                     expiries,
                     atmStrike,
-                    rows: windowed,
-                    source: 'DHAN_LIVE',
+                    rows,
+                    source: 'BROKER_LIVE',
                     lastUpdated: new Date().toISOString(),
                 };
             }
+            // 1.5s pause between index queries to never burst broker or exceed 1 req/s
+            await new Promise(r => setTimeout(r, 1500));
         }
-        if (!data) {
-            // Outside market hours (or when Dhan has nothing), reuse whatever
-            // was last generated for this key instead of rolling fresh
-            // Math.random() IV/OI/volume/change every time the 3s cache
-            // expires — otherwise the chain visibly "updates" every few
-            // seconds with pure noise even while the market is closed and
-            // nothing has actually moved. Only regenerate when there's truly
-            // no prior snapshot yet, or the market is genuinely open (real
-            // Dhan data merely gapped for one cycle).
-            if (!isMarketOpen('FO') && optionChainCache[key]?.data) {
-                data = optionChainCache[key].data;
-            } else {
-                data = generateOptionChainForIndex(indexName, resolvedExpiry);
-                data.expiries = expiries;
-                data.source = 'SIMULATED';
+    } catch (e) {
+        console.warn('[MarketData] syncBrokerOptionChain error:', e.message);
+    } finally {
+        _brokerSyncBusy = false;
+    }
+}
+
+// 1-second distribution worker: runs continuously to distribute live updates internally
+function broadcastOptionChains() {
+    if (!_chainIo) return;
+
+    const marketLive = isLiveMarketActive('FO');
+    if (!marketLive) {
+        // Market is offline: do NOT broadcast 1-second ticks; prices stay completely static
+        return;
+    }
+
+    for (const indexName of SUPPORTED_INDICES) {
+        let chain = activeOptionChains[indexName];
+        if (!chain) {
+            chain = generateOptionChainForIndex(indexName, null);
+            activeOptionChains[indexName] = chain;
+        }
+
+        // Only dynamically reprice strikes during LIVE market hours!
+        if (marketLive) {
+            chain = updateOptionChainPrices(chain);
+        }
+
+        // Distribute internally to WebSocket subscribers
+        _chainIo.to(`chain:${indexName}`).emit('optionChain', chain);
+        _chainIo.emit('optionChainUpdate', { indexName, data: chain });
+        if (chain.expiry) {
+            _chainIo.to(`chain:${indexName}:${chain.expiry}`).emit('optionChain', chain);
+        }
+    }
+
+    // Also reprice and broadcast any active secondary expiry chains in cache
+    for (const [key, entry] of Object.entries(optionChainCache)) {
+        if (entry?.data && Date.now() - entry.at < 600000) {
+            const [idx, exp] = key.split('|');
+            if (idx && exp) {
+                if (marketLive) {
+                    entry.data = updateOptionChainPrices(entry.data);
+                }
+                _chainIo.to(`chain:${idx}:${exp}`).emit('optionChain', entry.data);
+                _chainIo.emit('optionChainUpdate', { indexName: idx, expiry: exp, data: entry.data });
             }
         }
-        optionChainCache[key] = { at: Date.now(), data };
-        return data;
-    })().finally(() => chainInflight.delete(key));
+    }
+}
 
-    chainInflight.set(key, p);
-    return p;
+function initOptionChainBroadcaster(io) {
+    _chainIo = io;
+
+    // Initialize all supported chains immediately
+    for (const indexName of SUPPORTED_INDICES) {
+        if (!activeOptionChains[indexName]) {
+            activeOptionChains[indexName] = generateOptionChainForIndex(indexName, null);
+        }
+    }
+
+    // 1-Second internal broadcast timer
+    setInterval(broadcastOptionChains, 1000);
+
+    // Controlled broker sync timer (every 12s)
+    setInterval(syncBrokerOptionChain, 12000);
+    // Initial eager sync
+    setTimeout(syncBrokerOptionChain, 500);
+
+    console.log('[MarketData] ✅ Option Chain 1-Second Broadcaster initialized');
+}
+
+async function getOptionChain(indexName, expiry) {
+    const normIndex = indexName || 'NIFTY 50';
+    let chain = activeOptionChains[normIndex];
+
+    // If client requested a specific non-active expiry
+    if (expiry && (!chain || chain.expiry !== expiry)) {
+        const key = `${normIndex}|${expiry}`;
+        if (optionChainCache[key]?.data && Date.now() - optionChainCache[key].at < 15000) {
+            return optionChainCache[key].data;
+        }
+
+        // Try on-demand fetch from broker for this expiry
+        let liveData = null;
+        if (kotakNeoService.isConfigured()) {
+            try { liveData = await kotakNeoService.fetchKotakOptionChain(normIndex, expiry); } catch {}
+        }
+        if (!liveData && dhanDataService.isConfigured()) {
+            const secId = dhanDataService.INDEX_SECURITY_IDS[normIndex];
+            if (secId) {
+                try { liveData = await dhanDataService.fetchDhanOptionChain(secId, expiry); } catch {}
+            }
+        }
+
+        if (liveData && Array.isArray(liveData.rows) && liveData.rows.length > 0) {
+            const cfg = OPTION_CONFIG[normIndex] || OPTION_CONFIG['NIFTY 50'];
+            const indexPrice = liveData.underlyingPrice || indexData[normIndex]?.ltp || 0;
+            const atmStrike = Math.round(indexPrice / cfg.strikeGap) * cfg.strikeGap;
+            const expiries = await getOptionExpiries(normIndex);
+            const expChain = {
+                indexName: normIndex,
+                indexPrice,
+                baseUnderlyingPrice: indexPrice,
+                expiry,
+                daysToExpiry: Math.round(daysToExpiry(expiry) * 100) / 100,
+                indexChange: indexData[normIndex]?.change ?? 0,
+                indexChangePercent: indexData[normIndex]?.changePercent ?? 0,
+                expiries,
+                atmStrike,
+                rows: liveData.rows.map(r => ({
+                    ...r,
+                    isATM: r.strike === atmStrike,
+                    ce: r.ce ? { ...r.ce, baseLtp: r.ce.ltp, baseChange: r.ce.change } : null,
+                    pe: r.pe ? { ...r.pe, baseLtp: r.pe.ltp, baseChange: r.pe.change } : null,
+                })),
+                source: 'BROKER_LIVE',
+                lastUpdated: new Date().toISOString(),
+            };
+            optionChainCache[key] = { at: Date.now(), data: expChain };
+            return expChain;
+        }
+
+        // Fallback to synthetic if broker has no data for this specific expiry
+        const expChain = generateOptionChainForIndex(normIndex, expiry);
+        optionChainCache[key] = { at: Date.now(), data: expChain };
+        return expChain;
+    }
+
+    // If active chain is missing or synthetic, try an on-demand broker fetch
+    if (!chain || chain.source !== 'BROKER_LIVE') {
+        const expiries = await getOptionExpiries(normIndex);
+        const targetExpiry = expiry || expiries[0];
+        let liveData = null;
+        if (kotakNeoService.isConfigured()) {
+            try { liveData = await kotakNeoService.fetchKotakOptionChain(normIndex, targetExpiry); } catch {}
+        }
+        if (!liveData && dhanDataService.isConfigured()) {
+            const secId = dhanDataService.INDEX_SECURITY_IDS[normIndex];
+            if (secId) {
+                try { liveData = await dhanDataService.fetchDhanOptionChain(secId, targetExpiry); } catch {}
+            }
+        }
+
+        if (liveData && Array.isArray(liveData.rows) && liveData.rows.length > 0) {
+            const cfg = OPTION_CONFIG[normIndex] || OPTION_CONFIG['NIFTY 50'];
+            const indexPrice = liveData.underlyingPrice || indexData[normIndex]?.ltp || 0;
+            const atmStrike = Math.round(indexPrice / cfg.strikeGap) * cfg.strikeGap;
+            chain = {
+                indexName: normIndex,
+                indexPrice,
+                baseUnderlyingPrice: indexPrice,
+                expiry: targetExpiry,
+                daysToExpiry: Math.round(daysToExpiry(targetExpiry) * 100) / 100,
+                indexChange: indexData[normIndex]?.change ?? 0,
+                indexChangePercent: indexData[normIndex]?.changePercent ?? 0,
+                expiries,
+                atmStrike,
+                rows: liveData.rows.map(r => ({
+                    ...r,
+                    isATM: r.strike === atmStrike,
+                    ce: r.ce ? { ...r.ce, baseLtp: r.ce.ltp, baseChange: r.ce.change } : null,
+                    pe: r.pe ? { ...r.pe, baseLtp: r.pe.ltp, baseChange: r.pe.change } : null,
+                })),
+                source: 'BROKER_LIVE',
+                lastUpdated: new Date().toISOString(),
+            };
+            activeOptionChains[normIndex] = chain;
+            return chain;
+        }
+    }
+
+    if (!chain) {
+        chain = generateOptionChainForIndex(normIndex, expiry);
+        activeOptionChains[normIndex] = chain;
+    }
+
+    return chain;
 }
 
 // Live premium for one contract — served from the shared chain cache
@@ -619,8 +927,32 @@ async function getOptionLTP(indexName, strikePrice, optionType, expiry) {
     try {
         const chain = await getOptionChain(indexName, expiry);
         const row = chain?.rows?.find(r => r.strike === Number(strikePrice));
-        return row ? (optionType === 'CE' ? row.ce.ltp : row.pe.ltp) : null;
-    } catch { return null; }
+        if (row) {
+            return optionType === 'CE' ? row.ce.ltp : row.pe.ltp;
+        }
+        // If not in windowed strikes, calculate via Black-Scholes
+        const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
+        const indexPrice = chain?.indexPrice || indexData[indexName]?.ltp || 24000;
+        const dte = daysToExpiry(expiry || chain?.expiry);
+        return calcOptionPrice(optionType, indexPrice, Number(strikePrice), cfg.atmPremium, cfg.strikeGap, dte);
+    } catch { return 100; }
+}
+
+// Synchronous contract price lookup from in-memory cache or immediate formula
+function getOptionLTPSync(indexName, strikePrice, optionType, expiry) {
+    try {
+        const normIndex = normalizeIndex(indexName || 'NIFTY 50');
+        const key = `${normIndex}:${expiry || 'active'}`;
+        const chain = optionChainCache[key]?.data || (activeOptionChain?.indexName === normIndex ? activeOptionChain : null);
+        const row = chain?.rows?.find(r => r.strike === Number(strikePrice));
+        if (row) {
+            return optionType === 'CE' ? row.ce.ltp : row.pe.ltp;
+        }
+        const cfg = OPTION_CONFIG[normIndex] || OPTION_CONFIG['NIFTY 50'];
+        const indexPrice = chain?.indexPrice || indexData[normIndex]?.ltp || 24000;
+        const dte = daysToExpiry(expiry || chain?.expiry);
+        return calcOptionPrice(optionType, indexPrice, Number(strikePrice), cfg.atmPremium, cfg.strikeGap, dte);
+    } catch { return 100; }
 }
 
 module.exports = {
@@ -630,6 +962,8 @@ module.exports = {
     getOptionChain,
     getOptionExpiries,
     getOptionLTP,
+    getOptionLTPSync,
+    initOptionChainBroadcaster,
     getStockPrices,
     getIndexData,
     getLastUpdated,

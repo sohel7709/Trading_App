@@ -4,6 +4,8 @@ const { Schema } = require('mongoose');
 // executed atomically (each leg still goes through the normal order engine —
 // MARKET legs fill immediately, LIMIT/SL/SL-M legs rest as PENDING).
 const BasketLegSchema = new Schema({
+    userId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+
     stockSymbol:  { type: String, required: true, uppercase: true },
     quantity:     { type: Number, required: true },
     price:        { type: Number, required: true },

@@ -51,7 +51,7 @@ export default function AppCodeSheet({ visible, onClose }) {
           <View style={styles.handle} />
 
           <Text style={styles.title}>App Code</Text>
-          <Text style={styles.subtitle}>Enter this code to login to Kite web</Text>
+          <Text style={styles.subtitle}>Enter this code to login to TradeLab web</Text>
 
           <Text style={styles.code}>
             {code.slice(0, 3)}{'  '}{code.slice(3, 6)}

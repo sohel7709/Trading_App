@@ -46,7 +46,7 @@ const MARKET_OPEN_MINS = 9 * 60 + 15; // 9:15 AM, unchanged for both segments
 const EQ_CLOSE_MINS = 15 * 60 + 30; // 3:30 PM, cash-equity close (unchanged)
 const FO_CLOSE_MINS = 15 * 60 + 40; // 3:40 PM, F&O close (was 15:30 before 2026-08-03)
 
-function isMarketOpen(segment = 'EQ') {
+function isActualMarketHours(segment = 'EQ') {
     const ist = istNow();
     const day = ist.getDay();
     if (day === 0 || day === 6) return false;
@@ -54,6 +54,11 @@ function isMarketOpen(segment = 'EQ') {
     const mins = ist.getHours() * 60 + ist.getMinutes();
     const close = segment === 'FO' ? FO_CLOSE_MINS : EQ_CLOSE_MINS;
     return mins >= MARKET_OPEN_MINS && mins <= close;
+}
+
+function isMarketOpen(segment = 'EQ') {
+    if (process.env.ENFORCE_MARKET_HOURS !== 'true') return true; // Default allow paper trading orders anytime during testing
+    return isActualMarketHours(segment);
 }
 
 // True during the ~10 min BOD window (9:00-9:15) or EOD window (15:30-15:45)
@@ -103,6 +108,7 @@ function approxOptionWriteMargin(underlyingPrice, quantity, premium) {
 }
 
 module.exports = {
+    isActualMarketHours,
     isMarketOpen,
     isHoliday,
     isPastMisSquareOffTime,

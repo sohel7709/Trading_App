@@ -8,6 +8,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '../api/client';
 import { isMarketOpen as checkMarketOpen } from '../utils/marketHours';
+import useMarketState from '../hooks/useMarketState';
 
 const BUY_COLOR  = '#387ED1';
 const SELL_COLOR = '#E64D3D';
@@ -34,6 +35,7 @@ export default function OptionOrderScreen({ route, navigation }) {
   const [wallet, setWallet] = useState(null);
   const [placing, setPlacing] = useState(false);
   const [marketOpen, setMarketOpen] = useState(checkMarketOpen());
+  const { isHalted, reason: haltReason } = useMarketState();
 
   const isBuy = side === 'BUY';
   const accent = isBuy ? BUY_COLOR : SELL_COLOR;
@@ -85,7 +87,7 @@ export default function OptionOrderScreen({ route, navigation }) {
   const slideX = useRef(new Animated.Value(0)).current;
   const trackW = useRef(0);
   const stateRef = useRef({});
-  stateRef.current = { lots, effPrice, side, marketOpen, placing };
+  stateRef.current = { lots, effPrice, side, marketOpen, isHalted, haltReason, placing };
 
   const resetSlider = useCallback(() => {
     Animated.spring(slideX, { toValue: 0, useNativeDriver: false, bounciness: 4 }).start();
@@ -94,6 +96,11 @@ export default function OptionOrderScreen({ route, navigation }) {
   const submitOrder = useCallback(async () => {
     const s = stateRef.current;
     if (s.placing) return;
+    if (s.isHalted) {
+      Alert.alert('Trading Halted', s.haltReason || 'Exchange Circuit Breaker Active. Orders paused.');
+      resetSlider();
+      return;
+    }
     if (!s.marketOpen) {
       Alert.alert('Market closed', 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.');
       resetSlider();
@@ -115,16 +122,18 @@ export default function OptionOrderScreen({ route, navigation }) {
         premium: s.effPrice,
         action: s.side,
       });
-      const pnlLine = s.side === 'SELL' && result.pnl != null
-        ? `\nP&L: ${result.pnl >= 0 ? '+' : ''}₹${result.pnl.toFixed(2)}`
+      const pnlNum = result?.pnl != null ? Number(result.pnl) : NaN;
+      const pnlLine = s.side === 'SELL' && !isNaN(pnlNum)
+        ? `\nP&L: ${pnlNum >= 0 ? '+' : ''}₹${pnlNum.toFixed(2)}`
         : '';
+      const effPriceNum = Number(s.effPrice || 0);
       Alert.alert(
         `${s.side} order executed`,
-        `${title} · ${s.lots} lot${s.lots > 1 ? 's' : ''} @ ₹${s.effPrice.toFixed(2)}${pnlLine}`,
+        `${title} · ${s.lots} lot${s.lots > 1 ? 's' : ''} @ ₹${effPriceNum.toFixed(2)}${pnlLine}`,
         [{ text: 'OK', onPress: () => navigation.goBack() }]
       );
     } catch (e) {
-      Alert.alert('Order failed', e.message);
+      Alert.alert('Order failed', e?.message || 'Order execution failed');
       resetSlider();
     } finally {
       setPlacing(false);
@@ -151,7 +160,7 @@ export default function OptionOrderScreen({ route, navigation }) {
     })
   ).current;
 
-  const sliderColor = marketOpen ? accent : '#9CA3AF';
+  const sliderColor = (!isHalted && marketOpen) ? accent : '#9CA3AF';
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -168,13 +177,13 @@ export default function OptionOrderScreen({ route, navigation }) {
       <View style={styles.ltpBanner}>
         <Text style={styles.ltpExch}>NFO</Text>
         <Text style={[styles.ltpPrice, { color: ltpColor }]}>
-          ₹ {liveLtp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          ₹ {Number(liveLtp || 0).toFixed(2)}
         </Text>
         <Text style={[styles.ltpChange, { color: ltpColor }]}>
-          {liveChange > 0 ? '+' : ''}{liveChange.toFixed(2)}
+          {Number(liveChange || 0) > 0 ? '+' : ''}{Number(liveChange || 0).toFixed(2)}
         </Text>
         <Text style={[styles.ltpChange, { color: ltpColor }]}>
-          {liveChange > 0 ? '+' : ''}{changePct.toFixed(2)}%
+          {Number(liveChange || 0) > 0 ? '+' : ''}{Number(changePct || 0).toFixed(2)}%
         </Text>
         {/* BUY / SELL flip */}
         <View style={{ flex: 1 }} />
@@ -235,7 +244,7 @@ export default function OptionOrderScreen({ route, navigation }) {
           />
           <TouchableOpacity
             style={styles.inputBtn}
-            onPress={() => setPrice(liveLtp.toFixed(2))}
+            onPress={() => setPrice(Number(liveLtp || 0).toFixed(2))}
           >
             <Ionicons name="swap-vertical" size={20} color={accent} />
           </TouchableOpacity>
@@ -272,23 +281,30 @@ export default function OptionOrderScreen({ route, navigation }) {
       <View style={styles.marginBar}>
         <Text style={styles.marginLabel}>Margin</Text>
         <Text style={[styles.marginValue, { color: accent }]}>
-          ₹{Math.round(margin).toLocaleString('en-IN')}
+          ₹{Math.round(Number(margin || 0)).toLocaleString('en-IN')}
         </Text>
         <Text style={styles.marginLabel}> + </Text>
-        <Text style={[styles.marginValue, { color: accent }]}>₹{charges.toFixed(2)}</Text>
+        <Text style={[styles.marginValue, { color: accent }]}>₹{Number(charges || 0).toFixed(2)}</Text>
         <View style={{ flex: 1 }} />
         <Text style={styles.marginLabel}>Avail. </Text>
         <Text style={[styles.marginValue, { color: accent }]}>
-          ₹{available.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+          ₹{Number(available || 0).toFixed(2)}
         </Text>
       </View>
 
-      {!marketOpen && (
+      {isHalted ? (
+        <View style={[styles.closedBanner, { backgroundColor: '#fee2e2' }]}>
+          <Ionicons name="alert-circle" size={14} color="#991b1b" />
+          <Text style={[styles.closedTxt, { color: '#991b1b', fontWeight: '700' }]}>
+            Trading Temporarily Halted: {haltReason || 'Circuit breaker active'}
+          </Text>
+        </View>
+      ) : !marketOpen ? (
         <View style={styles.closedBanner}>
           <Ionicons name="time-outline" size={14} color="#92400E" />
           <Text style={styles.closedTxt}>Market closed · Mon–Fri 9:15 AM – 3:30 PM IST</Text>
         </View>
-      )}
+      ) : null}
 
       {/* ── SWIPE TO BUY / SELL ── */}
       <View style={[styles.swipeWrap, { paddingBottom: insets.bottom + 14 }]}>
@@ -297,7 +313,7 @@ export default function OptionOrderScreen({ route, navigation }) {
           onLayout={e => { trackW.current = e.nativeEvent.layout.width; }}
         >
           <Text style={styles.swipeText}>
-            {placing ? 'PLACING ORDER…' : `SWIPE TO ${side}`}
+            {placing ? 'PLACING ORDER…' : isHalted ? 'TRADING HALTED' : `SWIPE TO ${side}`}
           </Text>
           <Animated.View
             style={[styles.swipeThumb, { transform: [{ translateX: slideX }] }]}

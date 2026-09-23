@@ -1,6 +1,7 @@
 const { Schema } = require('mongoose');
 
 const HoldingsSchema = new Schema({
+    userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     stockSymbol: { type: String, required: true, uppercase: true },
     quantity: { type: Number, required: true },
     avgPrice: { type: Number, required: true },

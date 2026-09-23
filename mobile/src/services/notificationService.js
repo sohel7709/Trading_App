@@ -1,26 +1,11 @@
-import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { ensureNotificationPermission } from '../utils/permissions';
 
 const SETTINGS_KEY = 'app_settings_v1';
-
-// Local (in-app) notifications for order fills, GTT/alert triggers, and
-// EOD square-offs — no remote push server involved, just surfaces socket
-// events as OS notifications so they're visible even if the app is backgrounded.
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-  }),
-});
 
 async function notificationsEnabled() {
   try {
     const raw = await AsyncStorage.getItem(SETTINGS_KEY);
-    if (!raw) return false; // matches the Settings screen's default (off)
+    if (!raw) return false;
     const settings = JSON.parse(raw);
     return !!settings.orderNotifications;
   } catch {
@@ -30,19 +15,17 @@ async function notificationsEnabled() {
 
 export async function notify(title, body) {
   if (!(await notificationsEnabled())) return;
-  const granted = await ensureNotificationPermission();
-  if (!granted) return;
-  try {
-    await Notifications.scheduleNotificationAsync({
-      content: { title, body },
-      trigger: null, // fire immediately
-    });
-  } catch (e) {
-    console.warn('[Notifications] schedule failed:', e.message);
-  }
+  console.log('[TradeLab Notification]', title, body);
 }
 
-const inr = (n) => Number(n ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const inr = (n) => {
+  const num = Number(n ?? 0);
+  try {
+    return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  } catch {
+    return num.toFixed(2);
+  }
+};
 
 // Socket-event → notification copy, kept in one place so every screen's
 // socket handler can stay focused on its own state updates.

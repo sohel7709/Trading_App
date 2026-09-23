@@ -1,24 +1,19 @@
 {
   "expo": {
-    "name": "Zerodha Kite",
-    "slug": "zerodha-kite",
+    "name": "Trade Lab",
+    "slug": "tradelab-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/Icon.png",
     "userInterfaceStyle": "light",
-    "splash": {
-      "image": "./assets/splash.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#FFFFFF"
-    },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.zerodha.kite",
+      "bundleIdentifier": "com.tradelab.mobile",
       "buildNumber": "1",
       "infoPlist": {
-        "NSCameraUsageDescription": "Allow Zerodha Kite to use the camera to scan KYC documents and capture your profile photo.",
-        "NSPhotoLibraryUsageDescription": "Allow Zerodha Kite to access your photos to upload KYC documents and your profile photo.",
-        "NSPhotoLibraryAddUsageDescription": "Allow Zerodha Kite to save downloaded statements and reports to your photo library."
+        "NSCameraUsageDescription": "Allow TradeLab to use the camera to scan KYC documents and capture your profile photo.",
+        "NSPhotoLibraryUsageDescription": "Allow TradeLab to access your photos to upload KYC documents and your profile photo.",
+        "NSPhotoLibraryAddUsageDescription": "Allow TradeLab to save downloaded statements and reports to your photo library."
       }
     },
     "android": {
@@ -26,7 +21,7 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#FFFFFF"
       },
-      "package": "com.zerodha.kite",
+      "package": "com.tradelab.mobile",
       "versionCode": 1,
       "permissions": [
         "android.permission.INTERNET",
@@ -45,43 +40,42 @@
         "android.permission.READ_MEDIA_VIDEO"
       ]
     },
-    "sdkVersion": "54.0.0",
+    "newArchEnabled": false,
     "plugins": [
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Zerodha Kite to use the camera to scan KYC documents and capture your profile photo."
+          "cameraPermission": "Allow TradeLab to use the camera to scan KYC documents and capture your profile photo."
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Zerodha Kite to access your photos to upload KYC documents and your profile photo."
+          "photosPermission": "Allow TradeLab to access your photos to upload KYC documents and your profile photo."
         }
       ],
       [
         "expo-media-library",
         {
-          "photosPermission": "Allow Zerodha Kite to access your media to upload and save statements.",
-          "savePhotosPermission": "Allow Zerodha Kite to save downloaded statements and reports.",
+          "photosPermission": "Allow TradeLab to access your media to upload and save statements.",
+          "savePhotosPermission": "Allow TradeLab to save downloaded statements and reports.",
           "isAccessMediaLocationEnabled": false
         }
       ],
-      "expo-notifications",
-      "expo-font"
+      "expo-font",
+      "expo-sharing",
+      "expo-status-bar"
     ],
     "extra": {
-      "apiUrl": "https://zerodha-backend-production-58b3.up.railway.app",
+      "apiUrl": "https://mascot-sneak-cranium.ngrok-free.dev",
       "eas": {
         "projectId": "f83a41b9-d1f9-4f56-8f0f-fea76d8c078f"
       }
     },
     "owner": "sohel9730",
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
     "updates": {
-      "url": "https://u.expo.dev/f83a41b9-d1f9-4f56-8f0f-fea76d8c078f"
+      "enabled": false,
+      "checkAutomatically": "NEVER"
     }
   }
 }

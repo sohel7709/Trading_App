@@ -25,7 +25,7 @@ const UPI_APPS = [
 ];
 
 const BANK = { name: 'Canara Bank', type: 'SAVINGS', last4: '9869' };
-const MERCHANT = { name: 'Zerodha Broking Ltd', vpa: 'zerodha.broking@ybl' };
+const MERCHANT = { name: 'TradeLab Simulator', vpa: 'tradelab.simulator@ybl' };
 
 const PIN_LEN = 6;
 const KEYPAD = [

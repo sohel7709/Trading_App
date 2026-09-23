@@ -1,6 +1,8 @@
 const { Schema } = require('mongoose');
 
 const PLRecordSchema = new Schema({
+    userId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+
     tradeDate:      { type: Date,   required: true },
     symbol:         { type: String, required: true, uppercase: true },
     quantity:       { type: Number, required: true },

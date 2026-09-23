@@ -37,11 +37,22 @@ const MenuRow = ({ icon, label, onPress, danger, last }) => (
 
 export default function AccountScreen({ navigation }) {
   const insets = useSafeAreaInsets();
-  const { logout } = useAuth();
+  const { user, logout } = useAuth();
   const [privacyMode, setPrivacyMode] = useState(false);
   const [consoleOn, setConsoleOn]     = useState(true);
   const [refreshing, setRefreshing]   = useState(false);
   const [appCodeVisible, setAppCodeVisible] = useState(false);
+
+  const displayName = user?.name || 'Student';
+  const displayCode = user?.userId || user?.code || 'STUDENT';
+  const displayEmail = user?.email || '';
+  const initials = displayName
+    .split(' ')
+    .filter(Boolean)
+    .map(p => p[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase() || 'ST';
 
   const handleLogout = () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
@@ -73,7 +84,7 @@ export default function AccountScreen({ navigation }) {
 
       {/* ── Top bar: user name + bell ── */}
       <View style={styles.topBar}>
-        <Text style={styles.topBarTitle} numberOfLines={1}>{USER.name}</Text>
+        <Text style={styles.topBarTitle} numberOfLines={1}>{displayName}</Text>
         <TouchableOpacity style={styles.bellBtn}>
           <Ionicons name="notifications-outline" size={22} color={colors.text} />
         </TouchableOpacity>
@@ -92,13 +103,14 @@ export default function AccountScreen({ navigation }) {
             onPress={() => navigation.navigate('Profile')}
           >
             <View style={{ flex: 1 }}>
-              <Text style={styles.code}>{USER.code}</Text>
-              <Text style={styles.email} numberOfLines={1}>{USER.email}</Text>
+              <Text style={styles.code}>{displayCode}</Text>
+              <Text style={styles.email} numberOfLines={1}>{displayEmail}</Text>
             </View>
             <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{USER.initials}</Text>
+              <Text style={styles.avatarText}>{initials}</Text>
             </View>
           </TouchableOpacity>
+
 
           <View style={styles.privacyRow}>
             <Text style={styles.privacyLabel}>Privacy mode</Text>
@@ -164,10 +176,10 @@ export default function AccountScreen({ navigation }) {
 
         {/* ── Footer ── */}
         <View style={styles.footer}>
-          <Text style={styles.footerVersion}>Kite v3 b245</Text>
+          <Text style={styles.footerVersion}>TradeLab v3.0</Text>
           <View style={styles.footerBrand}>
             <Ionicons name="leaf" size={14} color={colors.textMuted} />
-            <Text style={styles.footerBrandText}>ZERODHA</Text>
+            <Text style={styles.footerBrandText}>TRADELAB</Text>
           </View>
         </View>
       </ScrollView>

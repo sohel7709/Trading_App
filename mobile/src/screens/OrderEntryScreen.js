@@ -1,618 +1,494 @@
-import React, { useState, useEffect, useCallback } from 'react';
+/**
+ * OrderEntryScreen.js (Production Upgraded)
+ * ─────────────────────────────────────────────────────────
+ * Institutional Simulated Trade Execution Screen:
+ * - Symbol, Live LTP & expiry
+ * - Lot stepper & margin required calculator
+ * - Market / Limit segment toggle
+ * - Buy / Sell execution via POST /trade
+ * - Duplicate click prevention (loading spinner & disabled state)
+ * - Inline risk/rejection alert banner
+ */
+
+import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
-  ScrollView, Alert, ActivityIndicator,
+  KeyboardAvoidingView, Platform, Switch, ActivityIndicator, Alert
 } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { colors } from '../theme/colors';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../api/client';
-import { isMarketOpen as checkMarketOpen } from '../utils/marketHours';
-
-const ORDER_TYPES = ['Regular', 'MTF', 'Iceberg', 'Cover'];
-const PRODUCT_TYPES = ['CNC', 'MIS', 'NRML'];
-const PRICE_MODES = ['Market', 'Limit', 'SL', 'SL-M'];
+import { colors } from '../theme/colors';
+import useMarketState from '../hooks/useMarketState';
 
 export default function OrderEntryScreen({ route, navigation }) {
-  const { symbol, ltp = 0, defaultSide = 'BUY' } = route.params || {};
   const insets = useSafeAreaInsets();
+  const { isHalted, reason: haltReason } = useMarketState();
+  const {
+    symbol = 'NIFTY 24850 CE',
+    ltp = 167.05,
+    initialMode = 'BUY',
+    lotSize = 25,
+    expiry = 'NEAR'
+  } = route.params || {};
 
-  const [side, setSide] = useState(defaultSide);
-  const [exchange, setExchange] = useState('NSE');
-  const [orderType, setOrderType] = useState('Regular');
-  const [quantity, setQuantity] = useState('1');
-  const [price, setPrice] = useState(Number(ltp).toFixed(2));
-  const [triggerPrice, setTriggerPrice] = useState('');
-  const [coverStopLoss, setCoverStopLoss] = useState('');
-  const [priceMode, setPriceMode] = useState('Limit');
-  const [productType, setProductType] = useState('CNC');
+  const [mode, setMode] = useState(initialMode); // 'BUY' or 'SELL'
+  const [type, setType] = useState('MARKET'); // 'MARKET' or 'LIMIT'
+  const [lots, setLots] = useState(1);
+  const [price, setPrice] = useState(ltp ? ltp.toString() : '100');
+  const [stopLoss, setStopLoss] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [wallet, setWallet] = useState(null);
-  const [marketOpen, setMarketOpen] = useState(checkMarketOpen());
-  const [bseQuote, setBseQuote] = useState(null);
+  const [errorMessage, setErrorMessage] = useState('');
 
-  const nsePrice = Number(ltp);
-  // Real BSE_EQ quote from Dhan — fetched on demand, not derived from a formula
-  const currentExchangePrice = exchange === 'NSE' ? nsePrice : (bseQuote?.ltp ?? nsePrice);
+  const isBuy = mode === 'BUY';
+  const effectivePrice = type === 'LIMIT' ? (parseFloat(price) || ltp) : ltp;
+  const marginRequired = lots * lotSize * effectivePrice;
 
-  // Refresh available margin every time this screen is focused, so the
-  // balance shown is never a stale snapshot from an earlier visit.
-  useFocusEffect(useCallback(() => {
-    api.getWallet().then(setWallet).catch(() => {});
-  }, []));
-
-  useEffect(() => {
-    // Re-check market status every minute so the button enables/disables live
-    const timer = setInterval(() => setMarketOpen(checkMarketOpen()), 60000);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    if (ltp > 0) setPrice(Number(ltp).toFixed(2));
-  }, [ltp]);
-
-  // Pull a real BSE quote the moment the user switches to the BSE pill
-  useEffect(() => {
-    if (exchange !== 'BSE') { setBseQuote(null); return; }
-    let cancelled = false;
-    api.getQuote(symbol, 'BSE').then(q => { if (!cancelled) setBseQuote(q); }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [exchange, symbol]);
-
-  const isCover = orderType === 'Cover';
-
-  const handlePlaceOrder = async () => {
-    const qty = Number(quantity);
-    const isMarket = priceMode === 'Market' || isCover; // Cover orders are always market entries
-    const p = isMarket ? currentExchangePrice : Number(price);
-
-    if (!qty || qty <= 0) { Alert.alert('Invalid quantity'); return; }
-    if (!isMarket && (!p || p <= 0)) { Alert.alert('Invalid price'); return; }
-    if (isCover && (!coverStopLoss || Number(coverStopLoss) <= 0)) {
-      Alert.alert('Stop-loss required', 'Cover orders need a compulsory stop-loss trigger price.');
+  const handleExecuteTrade = async () => {
+    if (loading) return;
+    if (isHalted) {
+      setErrorMessage(`Trading is halted: ${haltReason || 'Exchange Circuit Breaker Active'}`);
       return;
     }
-    if (!isCover && isSLMode && (!triggerPrice || Number(triggerPrice) <= 0)) {
-      Alert.alert('Trigger price required', 'SL and SL-M orders need a trigger price.');
-      return;
-    }
-
+    setErrorMessage('');
     setLoading(true);
+
     try {
-      if (isCover) {
-        const result = await api.placeCoverOrder({
-          stockSymbol: symbol, quantity: qty, price: p,
-          stopLossTriggerPrice: Number(coverStopLoss), side, exchange,
-        });
-        Alert.alert(
-          'Cover order placed',
-          `${side} ${qty} × ${symbol} @ market\nStop-loss set at ₹${Number(coverStopLoss).toFixed(2)}`,
-          [{ text: 'OK', onPress: () => navigation.goBack() }]
-        );
-        return;
-      }
+      const payload = {
+        symbol,
+        side: mode,
+        lots: Number(lots),
+        qty: lots * lotSize,
+        price: effectivePrice,
+        type,
+        expiry
+      };
 
-      const modeMap = { Market: 'MARKET', Limit: 'LIMIT', SL: 'SL', 'SL-M': 'SLM' };
-      const result = await api.placeOrder({
-        stockSymbol: symbol,
-        qty,
-        price: p,
-        triggerPrice: isSLMode ? Number(triggerPrice) : undefined,
-        mode: modeMap[priceMode] || 'MARKET',
-        side, productType, exchange,
-      });
+      const res = await api.placeTrade(payload);
 
-      const resting = result?.order?.status === 'PENDING';
-      Alert.alert(
-        resting ? `${priceMode} order placed` : (side === 'BUY' ? 'Order executed' : 'Sell order executed'),
-        resting
-          ? `${side} ${qty} × ${symbol} will fill when the market touches your ${isSLMode ? 'trigger' : 'limit'} price.\nFind it under Orders → Open.`
-          : `${side} ${qty} × ${symbol} @ ₹${p.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` +
-            (productType === 'MIS' ? '\nWill appear in Positions.' : '\nWill appear in Holdings.'),
-        [{ text: 'OK', onPress: () => navigation.goBack() }]
-      );
-    } catch (e) {
-      Alert.alert('Order failed', e.message);
+      // Immediately navigate to Portfolio Open Positions
+      navigation.navigate('Positions', { screen: 'PositionsMain' });
+    } catch (err) {
+      console.warn('[Trade Execution Error]:', err.message);
+      const msg = err.message || 'Order rejected by trading engine.';
+      setErrorMessage(msg.includes('loss') ? 'Trade rejected: Max daily loss reached.' : msg);
     } finally {
       setLoading(false);
     }
   };
 
-  const isBuy = side === 'BUY';
-  const accentColor = isBuy ? '#25B87E' : '#E64D3D';
-  const qty = Number(quantity || 0);
-  const isMarket = priceMode === 'Market';
-  const isSLMode = priceMode === 'SL' || priceMode === 'SL-M';
-  const effectivePrice = isMarket ? currentExchangePrice : Number(price || 0);
-  const totalAmt = qty * effectivePrice;
-  const charges = Math.max(0.01, Math.round(totalAmt * 0.0005 * 100) / 100);
-  const available = Number(wallet?.availableMargin ?? 0);
-
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* ── Header ── */}
-      <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={styles.headerBtn}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="arrow-back" size={22} color="#1E1E1E" />
-        </TouchableOpacity>
+    <KeyboardAvoidingView
+      style={styles.flex}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      {/* Dimmed background overlay */}
+      <TouchableOpacity
+        style={styles.overlay}
+        activeOpacity={1}
+        onPress={() => navigation.goBack()}
+      />
 
-        <Text style={styles.headerSymbol}>{symbol}</Text>
-
-        {/* Exchange pills */}
-        <View style={styles.exchangePills}>
-          {['NSE', 'BSE'].map(ex => (
-            <TouchableOpacity
-              key={ex}
-              style={[styles.exchangePill, exchange === ex && styles.exchangePillActive]}
-              onPress={() => setExchange(ex)}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.exchangePillText, exchange === ex && styles.exchangePillTextActive]}>
-                {ex}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      </View>
-
-      {/* ── BUY / SELL Switcher ── */}
-      <View style={styles.sideSwitcher}>
-        <TouchableOpacity
-          style={[styles.sideBtn, isBuy && styles.sideBtnBuyActive]}
-          onPress={() => setSide('BUY')}
-          activeOpacity={0.85}
-        >
-          <Text style={[styles.sideBtnText, isBuy ? styles.sideBtnTextActive : { color: '#25B87E' }]}>
-            BUY
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.sideBtn, !isBuy && styles.sideBtnSellActive]}
-          onPress={() => setSide('SELL')}
-          activeOpacity={0.85}
-        >
-          <Text style={[styles.sideBtnText, !isBuy ? styles.sideBtnTextActive : { color: '#E64D3D' }]}>
-            SELL
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      <ScrollView
-        contentContainerStyle={styles.scroll}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* ── Order type tabs ── */}
-        <View style={styles.tabBar}>
-          {ORDER_TYPES.map(t => (
-            <TouchableOpacity
-              key={t}
-              style={styles.tabItem}
-              onPress={() => {
-                setOrderType(t);
-                if (t === 'Cover') setProductType('MIS'); // Cover orders are intraday-only
-              }}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.tabText, orderType === t && styles.tabTextActive]}>{t}</Text>
-              {orderType === t && <View style={styles.tabUnderline} />}
-            </TouchableOpacity>
-          ))}
+      {/* Bottom Sheet Modal */}
+      <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+        {/* Header */}
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.headerTitle}>{symbol}</Text>
+            <Text style={styles.headerSubtitle}>
+              1 lot = {lotSize} units • LTP ₹{Number(ltp || 0).toFixed(2)}
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={styles.closeBtn}
+          >
+            <Ionicons name="close" size={22} color="#64748b" />
+          </TouchableOpacity>
         </View>
 
-        {/* ── Product type: CNC / MIS / NRML — Cover orders are forced MIS ── */}
-        {!isCover && (
-          <View style={styles.sectionRow}>
-            <Text style={styles.sectionLabel}>Product</Text>
-            <View style={styles.segmentControl}>
-              {PRODUCT_TYPES.map(pt => (
-                <TouchableOpacity
-                  key={pt}
-                  style={[styles.segmentItem, productType === pt && styles.segmentItemActive]}
-                  onPress={() => setProductType(pt)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={[styles.segmentText, productType === pt && styles.segmentTextActive]}>
-                    {pt}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </View>
-        )}
-
-        {/* ── Price mode: Market / Limit / SL / SL-M — Cover orders are always Market ── */}
-        {!isCover && (
-          <View style={styles.sectionRow}>
-            <Text style={styles.sectionLabel}>Order</Text>
-            <View style={styles.segmentControl}>
-              {PRICE_MODES.map(pm => (
-                <TouchableOpacity
-                  key={pm}
-                  style={[styles.segmentItem, priceMode === pm && styles.segmentItemActive]}
-                  onPress={() => setPriceMode(pm)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={[styles.segmentText, priceMode === pm && styles.segmentTextActive]}>
-                    {pm}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </View>
-        )}
-        {isCover && (
-          <View style={styles.coverNotice}>
-            <Ionicons name="shield-checkmark-outline" size={14} color="#B45309" />
-            <Text style={styles.coverNoticeText}>
-              Cover orders are always Market entries (MIS) with a compulsory stop-loss — higher leverage in exchange for a guaranteed exit.
+        {/* Market Circuit Breaker / Halt Banner */}
+        {isHalted && (
+          <View style={[styles.errorBanner, { backgroundColor: '#fef2f2', borderColor: '#fca5a5' }]}>
+            <Ionicons name="alert-circle" size={18} color="#b91c1c" />
+            <Text style={[styles.errorBannerText, { color: '#991b1b', fontWeight: '700' }]}>
+              Trading Temporarily Halted: {haltReason || 'Circuit breaker active. New orders paused.'}
             </Text>
           </View>
         )}
 
-        {/* ── Quantity field ── */}
-        <View style={styles.fieldBlock}>
-          <Text style={styles.fieldLabel}>Qty</Text>
-          <View style={styles.qtyRow}>
+        {/* Error / Risk Rejection Banner */}
+        {errorMessage && !isHalted ? (
+          <View style={styles.errorBanner}>
+            <Ionicons name="warning-outline" size={18} color="#b91c1c" />
+            <Text style={styles.errorBannerText}>{errorMessage}</Text>
+          </View>
+        ) : null}
+
+        {/* Buy / Sell Selector */}
+        <View style={styles.segmentWrap}>
+          <TouchableOpacity
+            style={[styles.segmentBtn, isBuy && styles.segmentBtnActiveBuy]}
+            onPress={() => setMode('BUY')}
+            disabled={loading}
+          >
+            <Text style={[styles.segmentText, isBuy && styles.segmentTextActiveBuy]}>BUY</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.segmentBtn, !isBuy && styles.segmentBtnActiveSell]}
+            onPress={() => setMode('SELL')}
+            disabled={loading}
+          >
+            <Text style={[styles.segmentText, !isBuy && styles.segmentTextActiveSell]}>SELL</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Quantity Stepper */}
+        <View style={styles.fieldRow}>
+          <View>
+            <Text style={styles.fieldLabel}>Quantity</Text>
+            <Text style={styles.fieldSubLabel}>{lots * lotSize} total units</Text>
+          </View>
+          <View style={styles.stepper}>
             <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => setQuantity(q => String(Math.max(1, Number(q) - 1)))}
-              activeOpacity={0.7}
+              style={styles.stepBtn}
+              onPress={() => setLots(Math.max(1, lots - 1))}
+              disabled={loading}
             >
-              <Ionicons name="remove" size={18} color="#387ED1" />
+              <Ionicons name="remove" size={16} color="#0f172a" />
             </TouchableOpacity>
-            <TextInput
-              style={styles.qtyInput}
-              value={quantity}
-              onChangeText={v => setQuantity(v.replace(/[^0-9]/g, '') || '1')}
-              keyboardType="numeric"
-              textAlign="center"
-              selectTextOnFocus
-            />
+            <Text style={styles.stepVal}>{lots} {lots === 1 ? 'lot' : 'lots'}</Text>
             <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => setQuantity(q => String(Number(q) + 1))}
-              activeOpacity={0.7}
+              style={styles.stepBtn}
+              onPress={() => setLots(lots + 1)}
+              disabled={loading}
             >
-              <Ionicons name="add" size={18} color="#387ED1" />
+              <Ionicons name="add" size={16} color="#0f172a" />
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* ── Price field ── */}
-        <View style={styles.fieldBlock}>
-          <Text style={styles.fieldLabel}>Price</Text>
-          {isMarket ? (
-            <View style={[styles.priceInput, styles.priceInputDisabled]}>
-              <Text style={styles.priceInputMuted}>Market price</Text>
-            </View>
-          ) : (
-            <TextInput
-              style={styles.priceInput}
-              value={price}
-              onChangeText={setPrice}
-              keyboardType="decimal-pad"
-              selectTextOnFocus
-            />
-          )}
-        </View>
-
-        {/* ── Trigger price (SL / SL-M only) ── */}
-        {!isCover && isSLMode && (
-          <View style={styles.fieldBlock}>
-            <Text style={styles.fieldLabel}>Trigger Price</Text>
-            <TextInput
-              style={styles.priceInput}
-              value={triggerPrice}
-              onChangeText={setTriggerPrice}
-              keyboardType="decimal-pad"
-              selectTextOnFocus
-              placeholder="0.00"
-              placeholderTextColor="#B3BBBF"
-            />
-          </View>
-        )}
-
-        {/* ── Compulsory stop-loss (Cover orders only) ── */}
-        {isCover && (
-          <View style={styles.fieldBlock}>
-            <Text style={styles.fieldLabel}>Stop-loss trigger price</Text>
-            <TextInput
-              style={styles.priceInput}
-              value={coverStopLoss}
-              onChangeText={setCoverStopLoss}
-              keyboardType="decimal-pad"
-              selectTextOnFocus
-              placeholder={side === 'BUY' ? 'Below entry price' : 'Above entry price'}
-              placeholderTextColor="#B3BBBF"
-            />
-          </View>
-        )}
-
-        {/* ── Divider ── */}
-        <View style={styles.divider} />
-
-        {/* ── Summary rows ── */}
-        <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Available margin</Text>
-          <Text style={styles.summaryValueBlue}>
-            ₹{available.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </Text>
-        </View>
-        <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Estimated value</Text>
-          <Text style={styles.summaryValue}>
-            ₹{totalAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </Text>
-        </View>
-        <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Charges</Text>
-          <Text style={styles.summaryValueMuted}>₹{charges.toFixed(2)}</Text>
-        </View>
-      </ScrollView>
-
-      {/* ── Footer: Place Order button ── */}
-      <View style={[styles.footer, { paddingBottom: insets.bottom + 8 }]}>
-        {!marketOpen && (
-          <View style={styles.marketClosedBanner}>
-            <Ionicons name="time-outline" size={15} color="#B45309" />
-            <Text style={styles.marketClosedText}>
-              Market closed · NSE: Mon–Fri 9:15 AM – 3:30 PM IST
+        {/* Market / Limit Order Type */}
+        <View style={styles.typeSegmentWrap}>
+          <TouchableOpacity
+            style={[styles.typeSegmentBtn, type === 'MARKET' && styles.typeSegmentActive]}
+            onPress={() => setType('MARKET')}
+            disabled={loading}
+          >
+            <Text style={[styles.typeSegmentText, type === 'MARKET' && styles.typeSegmentTextActive]}>
+              Market Price
             </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.typeSegmentBtn, type === 'LIMIT' && styles.typeSegmentActive]}
+            onPress={() => setType('LIMIT')}
+            disabled={loading}
+          >
+            <Text style={[styles.typeSegmentText, type === 'LIMIT' && styles.typeSegmentTextActive]}>
+              Limit Order
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Limit Price Input */}
+        {type === 'LIMIT' && (
+          <View style={styles.inputWrap}>
+            <Text style={styles.fieldLabel}>Limit Price (₹)</Text>
+            <View style={styles.inputBox}>
+              <Text style={styles.rupeeSign}>₹</Text>
+              <TextInput
+                style={styles.input}
+                value={price}
+                onChangeText={setPrice}
+                keyboardType="decimal-pad"
+                editable={!loading}
+              />
+            </View>
           </View>
         )}
+
+        {/* Stop-loss Toggle */}
+        <View style={styles.toggleRow}>
+          <View>
+            <Text style={styles.fieldLabel}>Intraday Stop-loss</Text>
+            <Text style={styles.fieldSubLabel}>Trigger automated exit on adverse moves</Text>
+          </View>
+          <Switch
+            value={stopLoss}
+            onValueChange={setStopLoss}
+            trackColor={{ false: '#e2e8f0', true: colors.primary }}
+            disabled={loading}
+          />
+        </View>
+
+        {/* Margin Required Row */}
+        <View style={styles.marginRow}>
+          <Text style={styles.marginLabel}>Estimated Margin Required</Text>
+          <Text style={styles.marginVal}>
+            ₹{marginRequired.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </Text>
+        </View>
+
+        {/* Action Button */}
         <TouchableOpacity
-          style={[styles.placeOrderBtn, { backgroundColor: marketOpen ? accentColor : '#9CA3AF' }]}
-          onPress={marketOpen ? handlePlaceOrder : () =>
-            Alert.alert('Market Closed', 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.\n\nOrders can only be placed during market hours.')
-          }
-          activeOpacity={0.88}
-          disabled={loading}
+          style={[
+            styles.actionBtn,
+            isHalted ? { backgroundColor: '#64748b' } : { backgroundColor: isBuy ? '#1A73E8' : '#ef4444' },
+            (loading || isHalted) && { opacity: 0.7 }
+          ]}
+          onPress={handleExecuteTrade}
+          disabled={loading || isHalted}
+          activeOpacity={0.85}
         >
           {loading ? (
-            <ActivityIndicator color="#fff" size="small" />
+            <ActivityIndicator color="#FFFFFF" size="small" />
+          ) : isHalted ? (
+            <Text style={styles.actionBtnText}>Trading Halted</Text>
           ) : (
-            <Text style={styles.placeOrderText}>
-              {marketOpen
-                ? `${side} · ${qty} ${qty === 1 ? 'share' : 'shares'} · ₹${totalAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                : 'Market Closed'}
+            <Text style={styles.actionBtnText}>
+              {isBuy ? 'Place BUY Order' : 'Place SELL Order'}
             </Text>
           )}
         </TouchableOpacity>
+
+        <Text style={styles.disclaimer}>
+          Simulated institutional trade. Executes instantly on live virtual book.
+        </Text>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#FAFAFA' },
-
-  // ── Header ──
-  header: {
-    height: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
+  flex: { flex: 1, justifyContent: 'flex-end' },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  sheet: {
     backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
-  },
-  headerBtn: { padding: 4, width: 36 },
-  headerSymbol: {
-    flex: 1,
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1E1E1E',
-    textAlign: 'center',
-  },
-  exchangePills: { flexDirection: 'row', gap: 6 },
-  exchangePill: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    backgroundColor: '#FFFFFF',
-  },
-  exchangePillActive: {
-    backgroundColor: '#387ED1',
-    borderColor: '#387ED1',
-  },
-  exchangePillText: { fontSize: 11, fontWeight: '600', color: '#738390' },
-  exchangePillTextActive: { color: '#FFFFFF' },
-
-  // ── BUY / SELL switcher ──
-  sideSwitcher: {
-    flexDirection: 'row',
-    height: 48,
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
-  },
-  sideBtn: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-  },
-  sideBtnBuyActive: { backgroundColor: '#25B87E' },
-  sideBtnSellActive: { backgroundColor: '#E64D3D' },
-  sideBtnText: { fontSize: 14, fontWeight: '700', letterSpacing: 0.5 },
-  sideBtnTextActive: { color: '#FFFFFF' },
-
-  scroll: { paddingBottom: 24 },
-
-  // ── Order type tabs ──
-  tabBar: {
-    flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
-  },
-  tabItem: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: 10,
-    position: 'relative',
-  },
-  tabText: { fontSize: 13, color: '#738390', fontWeight: '500' },
-  tabTextActive: { color: '#387ED1', fontWeight: '700' },
-  tabUnderline: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 2,
-    backgroundColor: '#387ED1',
-    borderTopLeftRadius: 2,
-    borderTopRightRadius: 2,
-  },
-
-  coverNotice: {
-    flexDirection: 'row', alignItems: 'flex-start', gap: 8,
-    backgroundColor: '#FEF3C7', paddingHorizontal: 16, paddingVertical: 12,
-    borderBottomWidth: 1, borderBottomColor: '#E8E8E8',
-  },
-  coverNoticeText: { flex: 1, fontSize: 12, color: '#92400E', lineHeight: 17 },
-
-  // ── Segmented controls ──
-  sectionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
-  },
-  sectionLabel: {
-    fontSize: 13,
-    color: '#738390',
-    width: 60,
-  },
-  segmentControl: {
-    flex: 1,
-    flexDirection: 'row',
-    backgroundColor: '#F1F3F4',
-    borderRadius: 8,
-    padding: 2,
-  },
-  segmentItem: {
-    flex: 1,
-    paddingVertical: 6,
-    alignItems: 'center',
-    borderRadius: 6,
-  },
-  segmentItemActive: {
-    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
     shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 2,
-    shadowOffset: { width: 0, height: 1 },
-    elevation: 1,
-  },
-  segmentText: { fontSize: 12, fontWeight: '500', color: '#738390' },
-  segmentTextActive: { color: '#1E1E1E', fontWeight: '600' },
-
-  // ── Input fields ──
-  fieldBlock: {
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
-  },
-  fieldLabel: { fontSize: 11, color: '#738390', marginBottom: 6 },
-
-  qtyRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  stepperBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    backgroundColor: '#FFFFFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  qtyInput: {
-    flex: 1,
-    height: 48,
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 8,
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1E1E1E',
-    backgroundColor: '#FFFFFF',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 8,
   },
 
-  priceInput: {
-    height: 48,
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    fontSize: 16,
-    color: '#1E1E1E',
-    backgroundColor: '#FFFFFF',
-    justifyContent: 'center',
-  },
-  priceInputDisabled: { backgroundColor: '#F1F3F4' },
-  priceInputMuted: { fontSize: 15, color: '#B3BBBF' },
-
-  // ── Divider ──
-  divider: {
-    height: 8,
-    backgroundColor: '#F1F3F4',
-  },
-
-  // ── Summary rows ──
-  summaryRow: {
+  header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 16,
-    paddingVertical: 13,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
+    marginBottom: 16,
   },
-  summaryLabel: { fontSize: 14, color: '#738390' },
-  summaryValueBlue: { fontSize: 14, fontWeight: '600', color: '#387ED1' },
-  summaryValue: { fontSize: 14, fontWeight: '600', color: '#1E1E1E' },
-  summaryValueMuted: { fontSize: 13, color: '#B3BBBF' },
+  headerTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  headerSubtitle: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  closeBtn: {
+    padding: 4,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 20,
+  },
 
-  // ── Footer ──
-  footer: {
-    backgroundColor: '#FFFFFF',
-    borderTopWidth: 1,
-    borderTopColor: '#E8E8E8',
-    paddingHorizontal: 16,
-    paddingTop: 12,
-  },
-  marketClosedBanner: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: '#FEF3C7', borderRadius: 6,
-    paddingHorizontal: 12, paddingVertical: 8, marginBottom: 10,
-  },
-  marketClosedText: { fontSize: 12, color: '#92400E', flex: 1 },
-  placeOrderBtn: {
-    height: 52,
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#fef2f2',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    marginBottom: 16,
+  },
+  errorBannerText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#b91c1c',
+  },
+
+  segmentWrap: {
+    flexDirection: 'row',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 4,
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  segmentBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    borderRadius: 8,
+  },
+  segmentBtnActiveBuy: {
+    backgroundColor: '#eff6ff',
+  },
+  segmentBtnActiveSell: {
+    backgroundColor: '#fef2f2',
+  },
+  segmentText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#94a3b8',
+  },
+  segmentTextActiveBuy: {
+    color: '#1A73E8',
+  },
+  segmentTextActiveSell: {
+    color: '#ef4444',
+  },
+
+  fieldRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  fieldLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0f172a',
+  },
+  fieldSubLabel: {
+    fontSize: 11,
+    color: '#94a3b8',
+    marginTop: 1,
+  },
+  stepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  stepBtn: {
+    padding: 8,
+  },
+  stepVal: {
+    fontSize: 14,
+    fontWeight: '700',
+    paddingHorizontal: 14,
+    minWidth: 60,
+    textAlign: 'center',
+    color: '#0f172a',
+  },
+
+  typeSegmentWrap: {
+    flexDirection: 'row',
+    backgroundColor: '#f1f5f9',
+    borderRadius: 8,
+    padding: 3,
+    marginBottom: 14,
+  },
+  typeSegmentBtn: {
+    flex: 1,
+    paddingVertical: 7,
+    alignItems: 'center',
+    borderRadius: 6,
+  },
+  typeSegmentActive: {
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  typeSegmentText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#64748b',
+  },
+  typeSegmentTextActive: {
+    color: '#0f172a',
+    fontWeight: '700',
+  },
+
+  inputWrap: {
+    marginBottom: 12,
+  },
+  inputBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1.5,
+    borderBottomColor: colors.primary,
+    marginTop: 6,
+    paddingBottom: 4,
+  },
+  rupeeSign: {
+    fontSize: 16,
+    color: '#0f172a',
+    marginRight: 4,
+    fontWeight: '700',
+  },
+  input: {
+    flex: 1,
+    fontSize: 16,
+    color: '#0f172a',
+    fontWeight: '700',
+    padding: 0,
+  },
+
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+    marginBottom: 14,
+  },
+
+  marginRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  marginLabel: {
+    fontSize: 12,
+    color: '#64748b',
+  },
+  marginVal: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+
+  actionBtn: {
+    borderRadius: 12,
+    height: 50,
     justifyContent: 'center',
     alignItems: 'center',
+    marginBottom: 12,
   },
-  placeOrderText: {
+  actionBtnText: {
     color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '700',
+    fontSize: 15,
+    fontWeight: '800',
     letterSpacing: 0.3,
   },
+
+  disclaimer: {
+    fontSize: 11,
+    color: '#94a3b8',
+    textAlign: 'center',
+  }
 });

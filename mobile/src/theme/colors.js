@@ -1,34 +1,34 @@
 export const colors = {
   // Brand
-  primary: '#387ED1',
-  primaryDark: '#2563A8',
-  primaryLight: '#EFF6FF',
+  primary: '#1A73E8', // TradeLab Blue
+  primaryDark: '#1557B0',
+  primaryLight: '#eff6ff',
 
   // App surfaces
-  background: '#FAFAFA',       // app-level background (Kite spec)
+  background: '#F8FAFC',       // TradeLab app background
   surface: '#FFFFFF',          // card / sheet surfaces
-  surfaceLight: '#F8F9FA',     // count bar, subtle rows
+  surfaceLight: '#f1f5f9',     // count bar, subtle rows
 
   // Borders
-  border: '#E8E8E8',           // standard border
-  borderLight: '#F1F3F4',      // very subtle row dividers
+  border: '#e2e8f0',           // standard border
+  borderLight: '#f1f5f9',      // very subtle row dividers
 
   // Text
-  text: '#1E1E1E',             // primary text
-  textSecondary: '#738390',    // secondary / labels
-  textMuted: '#B3BBBF',        // muted / placeholders
+  text: '#0f172a',             // primary text
+  textSecondary: '#64748b',    // secondary / labels
+  textMuted: '#94a3b8',        // muted / placeholders
 
-  // Semantic — matched to Zerodha Kite's real up/down colors
-  gain: '#4CAF50',
-  gainLight: '#E8F8F2',
-  loss: '#DF514C',
-  lossLight: '#FDECEA',
-  warning: '#F59E0B',
-  warningLight: '#FEF3C7',
+  // Semantic
+  gain: '#10b981',
+  gainLight: '#ecfdf5',
+  loss: '#ef4444',
+  lossLight: '#fef2f2',
+  warning: '#f59e0b',
+  warningLight: '#fffbeb',
 
-  // Kite watchlist quick Buy/Sell action buttons (distinct from gain/loss)
-  buyAction: '#4184F3',
-  sellAction: '#FF5722',
+  // Buy/Sell action buttons
+  buyAction: '#1A73E8',
+  sellAction: '#ef4444',
 
   // Aliases kept for backward compat
   neutral: '#738390',

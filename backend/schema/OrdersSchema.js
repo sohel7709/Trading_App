@@ -1,6 +1,8 @@
 const { Schema } = require('mongoose');
 
 const OrdersSchema = new Schema({
+    userId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    instituteId: { type: Schema.Types.ObjectId, ref: 'Institute', index: true },
     stockSymbol: { type: String, required: true, uppercase: true },
     quantity: { type: Number, required: true },
     price: { type: Number, required: true },        // limit/execution price
@@ -19,6 +21,14 @@ const OrdersSchema = new Schema({
     // Cover orders — main (market) leg links to its compulsory SL-M leg
     isCoverOrder: { type: Boolean, default: false },
     linkedOrderId: { type: Schema.Types.ObjectId, default: null },
+    // Option-specific contract fields
+    underlyingSymbol: { type: String, default: null },
+    strikePrice: { type: Number, default: null },
+    optionType: { type: String, enum: ['CE', 'PE', null], default: null },
+    expiry: { type: String, default: null },
+    lots: { type: Number, default: null },
 }, { timestamps: true });
+
+OrdersSchema.index({ instituteId: 1, userId: 1, createdAt: -1 });
 
 module.exports = { OrdersSchema };

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useContext } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
+import { io } from "socket.io-client";
 
 import GeneralContext from "./GeneralContext";
 import "./BuyActionWindow.css";
@@ -13,7 +14,41 @@ const BuyActionWindow = ({ uid, mode }) => {
   const [productType, setProductType] = useState("CNC");
   const [searchResults, setSearchResults] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [isHalted, setIsHalted] = useState(false);
+  const [haltReason, setHaltReason] = useState("");
   const { closeBuyWindow, closeSellWindow } = useContext(GeneralContext);
+
+  useEffect(() => {
+    // Check global market state
+    axios.get("http://localhost:8080/market/state")
+      .then(res => {
+        if (res.data) {
+          setIsHalted(!!res.data.isHalted);
+          setHaltReason(res.data.reason || "");
+        }
+      })
+      .catch(() => {});
+
+    const socket = io("http://localhost:8080");
+    socket.on("market_update", (data) => {
+      if (data) {
+        setIsHalted(!!data.isHalted);
+        if (data.reason) setHaltReason(data.reason);
+      }
+    });
+    socket.on("market_halted", (data) => {
+      setIsHalted(true);
+      if (data?.reason) setHaltReason(data.reason);
+    });
+    socket.on("market_resumed", () => {
+      setIsHalted(false);
+      setHaltReason("");
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
 
   useEffect(() => {
     if (uid) {
@@ -40,6 +75,10 @@ const BuyActionWindow = ({ uid, mode }) => {
   };
 
   const handleActionClick = () => {
+    if (isHalted) {
+      alert(`Trading is temporarily halted: ${haltReason || "Exchange circuit breaker is active."}`);
+      return;
+    }
     const payload = {
       stockSymbol: stockSymbol,
       qty: Number(stockQuantity),
@@ -142,11 +181,21 @@ const BuyActionWindow = ({ uid, mode }) => {
         </div>
       </div>
 
+      {isHalted && (
+        <div style={{ backgroundColor: "#fef2f2", border: "1px solid #fca5a5", color: "#991b1b", padding: "8px 12px", borderRadius: "6px", fontSize: "12px", margin: "10px 15px", fontWeight: "600" }}>
+          ⚠️ Trading Temporarily Halted: {haltReason || "Orders suspended by administrator"}
+        </div>
+      )}
+
       <div className="buttons">
         <span>Margin required ₹{marginRequired.toFixed(2)}</span>
         <div>
-          <Link className={`btn ${mode === "BUY" ? "btn-blue" : "btn-red"}`} onClick={handleActionClick}>
-            {mode === "BUY" ? "Buy" : "Sell"}
+          <Link
+            className={`btn ${isHalted ? "btn-grey" : mode === "BUY" ? "btn-blue" : "btn-red"}`}
+            onClick={handleActionClick}
+            style={isHalted ? { cursor: "not-allowed", opacity: 0.6 } : {}}
+          >
+            {isHalted ? "Halted" : mode === "BUY" ? "Buy" : "Sell"}
           </Link>
           <Link to="" className="btn btn-grey" onClick={handleCancelClick}>
             Cancel

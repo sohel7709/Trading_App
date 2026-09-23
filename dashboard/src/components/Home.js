@@ -23,25 +23,19 @@ const SplashScreen = ({ onDone }) => {
       opacity: fade ? 0 : 1,
       transition: "opacity 0.4s ease",
     }}>
-      {/* Zerodha / Kite logo */}
+      {/* TradeLab Logo */}
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 20 }}>
-        {/* Zerodha / Kite logo — blue circle with white ring (matches real app) */}
-        <svg width="88" height="88" viewBox="0 0 88 88" fill="none" xmlns="http://www.w3.org/2000/svg">
-          {/* Outer blue circle */}
-          <circle cx="44" cy="44" r="44" fill="#387ed1"/>
-          {/* White filled ring */}
-          <circle cx="44" cy="44" r="26" fill="white"/>
-          {/* Inner blue circle to create ring effect */}
-          <circle cx="44" cy="44" r="14" fill="#387ed1"/>
-        </svg>
+        <div style={{ width: 64, height: 64, borderRadius: 18, background: "#387ed1", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, fontWeight: 800, color: "#fff" }}>
+          T
+        </div>
 
-        {/* Kite wordmark */}
+        {/* TradeLab wordmark */}
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
           <span style={{ fontSize: 32, fontWeight: 800, color: "#387ed1", letterSpacing: "-1px", fontFamily: "system-ui, -apple-system, sans-serif" }}>
-            Kite
+            TradeLab
           </span>
           <span style={{ fontSize: 13, color: "#aaa", fontFamily: "system-ui, -apple-system, sans-serif", letterSpacing: "0.5px" }}>
-            by Zerodha
+            Paper Trading Platform
           </span>
         </div>
       </div>
@@ -71,11 +65,11 @@ const SplashScreen = ({ onDone }) => {
 const Home = () => {
   // Show splash only once per session
   const [showSplash, setShowSplash] = useState(
-    () => !sessionStorage.getItem("kite_splash_shown")
+    () => !sessionStorage.getItem("tradelab_splash_shown")
   );
 
   const handleSplashDone = () => {
-    sessionStorage.setItem("kite_splash_shown", "1");
+    sessionStorage.setItem("tradelab_splash_shown", "1");
     setShowSplash(false);
   };
 

@@ -1,0 +1,2988 @@
+<title>Zerodha Kite Clone</title>
+<link rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap">
+
+<style>
+    /* ── Token system ─────────────────────────────────────────────────── */
+    :root {
+        --bg: #F4F7FB;
+        --surface: #FFFFFF;
+        --surface2: #EDF1F7;
+        --border: #D5E0EC;
+        --text: #0C1525;
+        --muted: #56697F;
+        --faint: #8A9BB2;
+        --accent: #387ED1;
+        --accent-lo: #EBF3FD;
+        --gain: #22A96E;
+        --gain-lo: #E6F7F0;
+        --loss: #E03B2F;
+        --loss-lo: #FDECEA;
+        --warn: #D97706;
+        --warn-lo: #FEF3C7;
+        --code-bg: #E8EDF5;
+        --sidebar-w: 240px;
+        --content-w: 780px;
+        font-family: Inter, system-ui, sans-serif;
+    }
+
+    @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+            --bg: #0B0F16;
+            --surface: #141C28;
+            --surface2: #1A2436;
+            --border: #1E2D42;
+            --text: #E4EDF7;
+            --muted: #8A9BB2;
+            --faint: #4A5E75;
+            --accent: #4A8FE8;
+            --accent-lo: #0F1E35;
+            --gain: #25B87E;
+            --gain-lo: #0B2418;
+            --loss: #E8564A;
+            --loss-lo: #2A100E;
+            --warn: #F59E0B;
+            --warn-lo: #1E1508;
+            --code-bg: #0D1520;
+        }
+    }
+
+    :root[data-theme="dark"] {
+        --bg: #0B0F16;
+        --surface: #141C28;
+        --surface2: #1A2436;
+        --border: #1E2D42;
+        --text: #E4EDF7;
+        --muted: #8A9BB2;
+        --faint: #4A5E75;
+        --accent: #4A8FE8;
+        --accent-lo: #0F1E35;
+        --gain: #25B87E;
+        --gain-lo: #0B2418;
+        --loss: #E8564A;
+        --loss-lo: #2A100E;
+        --warn: #F59E0B;
+        --warn-lo: #1E1508;
+        --code-bg: #0D1520;
+    }
+
+    *,
+    *::before,
+    *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.65;
+        font-size: 15px;
+        min-height: 100vh;
+    }
+
+    /* ── Layout ─────────────────────────────────────────────────────── */
+    .layout {
+        display: flex;
+        min-height: 100vh;
+    }
+
+    /* ── Sidebar ─────────────────────────────────────────────────────── */
+    .sidebar {
+        width: var(--sidebar-w);
+        flex-shrink: 0;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        overflow-y: auto;
+        overflow-x: hidden;
+        border-right: 1px solid var(--border);
+        background: var(--surface);
+        padding: 28px 0 40px;
+        scrollbar-width: thin;
+        scrollbar-color: var(--border) transparent;
+    }
+
+    .sidebar-brand {
+        padding: 0 20px 20px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 16px;
+    }
+
+    .brand-name {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 15px;
+        font-weight: 700;
+        color: var(--accent);
+        letter-spacing: -0.02em;
+    }
+
+    .brand-tag {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 2px;
+        font-weight: 500;
+    }
+
+    .toc-section {
+        margin-bottom: 4px;
+    }
+
+    .toc-label {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 9px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--faint);
+        padding: 8px 20px 4px;
+        display: block;
+    }
+
+    .toc-link {
+        display: block;
+        padding: 5px 20px 5px 20px;
+        font-size: 12.5px;
+        color: var(--muted);
+        text-decoration: none;
+        font-weight: 500;
+        border-left: 2px solid transparent;
+        transition: color 0.12s, border-color 0.12s, background 0.12s;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .toc-link:hover {
+        color: var(--text);
+        background: var(--surface2);
+    }
+
+    .toc-link.active {
+        color: var(--accent);
+        border-left-color: var(--accent);
+        background: var(--accent-lo);
+    }
+
+    .toc-sub {
+        padding-left: 30px;
+        font-size: 11.5px;
+        font-weight: 400;
+    }
+
+    /* ── Main content ────────────────────────────────────────────────── */
+    .content {
+        flex: 1;
+        padding: 48px 52px 80px;
+        min-width: 0;
+    }
+
+    .doc-hero {
+        max-width: var(--content-w);
+        margin-bottom: 52px;
+        padding-bottom: 36px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .doc-eyebrow {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 12px;
+    }
+
+    .doc-title {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: clamp(26px, 4vw, 38px);
+        font-weight: 700;
+        color: var(--text);
+        letter-spacing: -0.03em;
+        line-height: 1.15;
+        text-wrap: balance;
+        margin-bottom: 14px;
+    }
+
+    .doc-subtitle {
+        font-size: 16px;
+        color: var(--muted);
+        line-height: 1.55;
+        max-width: 620px;
+        margin-bottom: 24px;
+    }
+
+    .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 11px;
+        font-weight: 700;
+        font-family: 'JetBrains Mono', monospace;
+        letter-spacing: 0.03em;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        background: var(--surface);
+    }
+
+    .badge.accent {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--accent-lo);
+    }
+
+    .badge.gain {
+        color: var(--gain);
+        border-color: var(--gain);
+        background: var(--gain-lo);
+    }
+
+    /* ── Sections ────────────────────────────────────────────────────── */
+    section {
+        max-width: var(--content-w);
+        margin-bottom: 60px;
+        scroll-margin-top: 24px;
+    }
+
+    h2 {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--text);
+        letter-spacing: -0.02em;
+        padding-left: 16px;
+        border-left: 3px solid var(--accent);
+        margin-bottom: 24px;
+        margin-top: 8px;
+        text-wrap: balance;
+    }
+
+    h3 {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        margin-top: 32px;
+        margin-bottom: 12px;
+    }
+
+    h4 {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+        margin-top: 20px;
+        margin-bottom: 8px;
+    }
+
+    p {
+        color: var(--muted);
+        margin-bottom: 14px;
+        max-width: 680px;
+    }
+
+    ul,
+    ol {
+        color: var(--muted);
+        padding-left: 22px;
+        margin-bottom: 14px;
+    }
+
+    li {
+        margin-bottom: 5px;
+    }
+
+    li strong {
+        color: var(--text);
+    }
+
+    strong {
+        color: var(--text);
+        font-weight: 600;
+    }
+
+    a {
+        color: var(--accent);
+        text-decoration: none;
+    }
+
+    a:hover {
+        text-decoration: underline;
+    }
+
+    /* ── Code ────────────────────────────────────────────────────────── */
+    code {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12.5px;
+        background: var(--code-bg);
+        color: var(--text);
+        padding: 2px 6px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+    }
+
+    pre {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 20px 22px;
+        overflow-x: auto;
+        margin-bottom: 20px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12.5px;
+        line-height: 1.7;
+        color: var(--text);
+    }
+
+    pre code {
+        background: none;
+        border: none;
+        padding: 0;
+        font-size: inherit;
+    }
+
+    .comment {
+        color: var(--faint);
+    }
+
+    .key {
+        color: var(--accent);
+    }
+
+    .val {
+        color: var(--gain);
+    }
+
+    .str {
+        color: #C084FC;
+    }
+
+    .num {
+        color: var(--warn);
+    }
+
+    /* ── Tables ──────────────────────────────────────────────────────── */
+    .table-wrap {
+        overflow-x: auto;
+        margin-bottom: 20px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+    }
+
+    thead {
+        background: var(--surface2);
+    }
+
+    th {
+        text-align: left;
+        padding: 10px 14px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--faint);
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+    }
+
+    td {
+        padding: 9px 14px;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        vertical-align: top;
+        font-variant-numeric: tabular-nums;
+    }
+
+    tbody tr:last-child td {
+        border-bottom: none;
+    }
+
+    tbody tr:hover {
+        background: var(--surface2);
+    }
+
+    td code {
+        font-size: 11.5px;
+    }
+
+    td strong {
+        color: var(--text);
+    }
+
+    .tag-get {
+        background: var(--gain-lo);
+        color: var(--gain);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 4px;
+        letter-spacing: 0.04em;
+    }
+
+    .tag-post {
+        background: var(--accent-lo);
+        color: var(--accent);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 4px;
+        letter-spacing: 0.04em;
+    }
+
+    .tag-del {
+        background: var(--loss-lo);
+        color: var(--loss);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 4px;
+        letter-spacing: 0.04em;
+    }
+
+    .tag-patch {
+        background: var(--warn-lo);
+        color: var(--warn);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 4px;
+        letter-spacing: 0.04em;
+    }
+
+    /* ── Cards ───────────────────────────────────────────────────────── */
+    .card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 12px;
+        margin-bottom: 20px;
+    }
+
+    .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px;
+    }
+
+    .card-title {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--text);
+        margin-bottom: 5px;
+    }
+
+    .card-body {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.5;
+    }
+
+    /* ── Arch diagram ────────────────────────────────────────────────── */
+    .arch-box {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.8;
+        margin-bottom: 20px;
+        overflow-x: auto;
+    }
+
+    .arch-box .hl {
+        color: var(--accent);
+        font-weight: 700;
+    }
+
+    .arch-box .g {
+        color: var(--gain);
+    }
+
+    .arch-box .r {
+        color: var(--loss);
+    }
+
+    .arch-box .y {
+        color: var(--warn);
+    }
+
+    /* ── Callouts ────────────────────────────────────────────────────── */
+    .callout {
+        padding: 14px 18px;
+        border-radius: 8px;
+        border-left: 3px solid;
+        margin-bottom: 16px;
+        font-size: 13.5px;
+    }
+
+    .callout-info {
+        background: var(--accent-lo);
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+    .callout-gain {
+        background: var(--gain-lo);
+        border-color: var(--gain);
+        color: var(--gain);
+    }
+
+    .callout-warn {
+        background: var(--warn-lo);
+        border-color: var(--warn);
+        color: var(--warn);
+    }
+
+    .callout p {
+        color: inherit;
+        max-width: 100%;
+        margin-bottom: 0;
+    }
+
+    /* ── Flow list ────────────────────────────────────────────────────── */
+    .flow {
+        list-style: none;
+        padding: 0;
+        counter-reset: flow;
+    }
+
+    .flow li {
+        counter-increment: flow;
+        display: flex;
+        gap: 14px;
+        align-items: flex-start;
+        margin-bottom: 10px;
+        color: var(--muted);
+        font-size: 13.5px;
+    }
+
+    .flow li::before {
+        content: counter(flow);
+        flex-shrink: 0;
+        width: 24px;
+        height: 24px;
+        background: var(--accent-lo);
+        color: var(--accent);
+        border-radius: 50%;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-top: 1px;
+    }
+
+    /* ── Divider ────────────────────────────────────────────────────── */
+    .divider {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 40px 0;
+    }
+
+    /* ── Mobile breakpoint ────────────────────────────────────────────── */
+    @media (max-width: 860px) {
+        .sidebar {
+            display: none;
+        }
+
+        .content {
+            padding: 32px 20px 60px;
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        * {
+            transition: none !important;
+            animation: none !important;
+        }
+    }
+</style>
+
+<div class="layout">
+
+    <!-- ── Sidebar ─────────────────────────────────────────────────── -->
+    <nav class="sidebar" role="navigation" aria-label="Table of contents">
+        <div class="sidebar-brand">
+            <div class="brand-name">kite. clone</div>
+            <div class="brand-tag">System Documentation v1.0</div>
+        </div>
+
+        <div class="toc-section">
+            <span class="toc-label">Overview</span>
+            <a class="toc-link" href="#overview">Project Overview</a>
+            <a class="toc-link" href="#architecture">System Architecture</a>
+            <a class="toc-link" href="#tech-stack">Tech Stack</a>
+        </div>
+
+        <div class="toc-section">
+            <span class="toc-label">Backend</span>
+            <a class="toc-link" href="#backend-arch">Architecture</a>
+            <a class="toc-link toc-sub" href="#order-engine">Order Engine</a>
+            <a class="toc-link toc-sub" href="#market-data">Market Data</a>
+            <a class="toc-link toc-sub" href="#charges">Charges Service</a>
+            <a class="toc-link" href="#schemas">Database Schemas</a>
+            <a class="toc-link" href="#api">API Reference</a>
+        </div>
+
+        <div class="toc-section">
+            <span class="toc-label">Frontends</span>
+            <a class="toc-link" href="#frontend">Landing (React)</a>
+            <a class="toc-link" href="#dashboard">Dashboard (React)</a>
+            <a class="toc-link" href="#mobile">Mobile (React Native)</a>
+            <a class="toc-link toc-sub" href="#mobile-tabs">Bottom Tabs</a>
+            <a class="toc-link toc-sub" href="#mobile-screens">All 22 Screens</a>
+        </div>
+
+        <div class="toc-section">
+            <span class="toc-label">Features</span>
+            <a class="toc-link" href="#features">All Features</a>
+            <a class="toc-link toc-sub" href="#f-orders">Orders & Execution</a>
+            <a class="toc-link toc-sub" href="#f-portfolio">Portfolio & P&L</a>
+            <a class="toc-link toc-sub" href="#f-options">Options Trading</a>
+            <a class="toc-link toc-sub" href="#f-gtt">GTT & Alerts</a>
+            <a class="toc-link toc-sub" href="#f-funds">Funds & Wallet</a>
+        </div>
+
+        <div class="toc-section">
+            <span class="toc-label">Operations</span>
+            <a class="toc-link" href="#background">Background Jobs</a>
+            <a class="toc-link" href="#security">Security</a>
+            <a class="toc-link" href="#performance">Performance</a>
+            <a class="toc-link" href="#deployment">Deployment</a>
+            <a class="toc-link" href="#errors">Error Handling</a>
+            <a class="toc-link" href="#future">Future Roadmap</a>
+        </div>
+    </nav>
+
+    <!-- ── Main ───────────────────────────────────────────────────── -->
+    <main class="content">
+
+        <!-- Hero -->
+        <div class="doc-hero">
+            <div class="doc-eyebrow">System Documentation · Full Stack</div>
+            <h1 class="doc-title">Zerodha Kite<br>Trading Platform Clone</h1>
+            <p class="doc-subtitle">Production-grade simulation of the Zerodha Kite trading platform — live NSE/BSE
+                market data, realistic order execution, options paper trading, and a matching React Native mobile app.
+            </p>
+            <div class="badge-row">
+                <span class="badge accent">Node.js + Express</span>
+                <span class="badge accent">MongoDB</span>
+                <span class="badge accent">React</span>
+                <span class="badge accent">React Native / Expo</span>
+                <span class="badge gain">Socket.IO · Real-time</span>
+                <span class="badge">NSE · Dhan · Yahoo Finance</span>
+            </div>
+        </div>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="overview">
+            <h2>Project Overview</h2>
+
+            <p>This project is a full-featured clone of the <strong>Zerodha Kite</strong> trading platform — India's
+                largest retail stock broker. It simulates the complete trading lifecycle: market data ingestion, order
+                placement and execution, portfolio management, P&L accounting, options paper trading, and fund
+                management — with realistic Zerodha-style brokerage charges.</p>
+
+            <h3>Target Users</h3>
+            <ul>
+                <li><strong>Developers</strong> learning full-stack development with a real-world domain</li>
+                <li><strong>Finance students</strong> practicing equity and F&O trading without real capital</li>
+                <li><strong>Portfolio builders</strong> showcasing MERN + React Native skills</li>
+            </ul>
+
+            <h3>Problem It Solves</h3>
+            <p>Paper trading platforms either use fake data or strip away the complexity of real market mechanics. This
+                project uses <strong>live NSE prices</strong> (via NSE India → Dhan → Yahoo Finance fallback chain),
+                applies real Zerodha brokerage schedules (STT, exchange charges, GST, stamp duty), enforces T+1
+                settlement rules, and models intraday auto-squareoff — giving a realistic feel without real money at
+                risk.</p>
+
+            <h3>Key Features Summary</h3>
+            <div class="card-grid">
+                <div class="card">
+                    <div class="card-title">Live Market Data</div>
+                    <div class="card-body">NSE→Dhan→Yahoo Finance 3-tier fallback. 1s LTP via Dhan WebSocket, 15s REST
+                        quote refresh, 30s Socket.IO broadcast.</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Order Engine</div>
+                    <div class="card-body">MARKET, LIMIT, SL, SL-M orders. Pending orders evaluated on every market
+                        tick. Cover and Basket orders.</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Options Paper Trading</div>
+                    <div class="card-body">Full NIFTY/BANKNIFTY option chain with live premiums. CE/PE positions,
+                        lot-based trading, NRML product type.</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">GTT / Alerts</div>
+                    <div class="card-body">Good-Till-Triggered orders with single and OCO (one-cancels-other) trigger
+                        types. Standard price alerts.</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Realistic Charges</div>
+                    <div class="card-body">Zerodha 2024–25 tariff: zero delivery brokerage, ₹20 intraday cap, STT,
+                        exchange charges, GST, SEBI, stamp duty, DP charge.</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Full Mobile App</div>
+                    <div class="card-body">React Native (Expo) app mirroring all web features: watchlist, portfolio,
+                        orders, funds, options, P&L, GTT, live chat.</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="architecture">
+            <h2>System Architecture</h2>
+
+            <div class="arch-box">
+                <pre>
+┌─────────────────────────────────────────────────────────────────────┐
+│                        CLIENT LAYER                                 │
+│                                                                     │
+│  ┌──────────────┐  ┌──────────────────┐  ┌─────────────────────┐  │
+│  │   Frontend   │  │    Dashboard     │  │   Mobile App        │  │
+│  │  (React 19)  │  │   (React 18)     │  │  (RN / Expo 54)     │  │
+│  │  Landing &   │  │  Trading UI      │  │  iOS + Android      │  │
+│  │  Marketing   │  │  Port: 3001      │  │  Expo Go / EAS      │  │
+│  │  Port: 3000  │  │                  │  │                     │  │
+│  └──────┬───────┘  └────────┬─────────┘  └──────────┬──────────┘  │
+│         │   HTTP/REST       │  HTTP + WebSocket      │             │
+└─────────┼───────────────────┼────────────────────────┼─────────────┘
+          │                   │                        │
+          └────────────┬──────┘────────────────────────┘
+                       ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     BACKEND (Node.js / Express 5)                │
+│                          Port: 8080                              │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+│  │ REST Routes  │  │  Order       │  │  Socket.IO Server    │  │
+│  │ (30+ endpts) │  │  Engine      │  │  marketData events   │  │
+│  └──────────────┘  └──────────────┘  │  chatMessage events  │  │
+│                                       │  orderExecuted events│  │
+│  ┌──────────────┐  ┌──────────────┐  └──────────────────────┘  │
+│  │  Charges     │  │  node-cron   │                            │
+│  │  Service     │  │  (BOD + EOD) │                            │
+│  └──────────────┘  └──────────────┘                            │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+          ┌────────────────┴──────────────────┐
+          ▼                                   ▼
+┌──────────────────┐            ┌──────────────────────────────────┐
+│    MongoDB       │            │       MARKET DATA SOURCES        │
+│  (Mongoose ORM)  │            │                                  │
+│                  │            │  1st: NSE India (allIndices)     │
+│  Holdings        │            │  2nd: Dhan WebSocket (1s LTP)    │
+│  Positions       │            │  3rd: Yahoo Finance (fallback)   │
+│  Orders          │            │  4th: Simulated (offline)        │
+│  Trades          │            │                                  │
+│  Wallet          │            │  Dhan REST quote: 15s refresh    │
+│  Watchlists      │            │  Socket.IO broadcast: 30s        │
+│  PriceAlerts     │            └──────────────────────────────────┘
+│  PLRecords       │
+│  Baskets         │
+│  OptionPositions │
+│  ClosedPositions │
+│  CorporateActions│
+└──────────────────┘
+</pre>
+            </div>
+
+            <h3>Data Flow</h3>
+            <ol class="flow">
+                <li>Market data service polls NSE India (indices) and Dhan (stock LTPs) every second via WebSocket, with
+                    REST fallback every 15s.</li>
+                <li>Every 30s the backend broadcasts the complete price map + index data to all connected clients via
+                    Socket.IO <code>marketData</code> event.</li>
+                <li>Client dashboards/mobile screens subscribe to <code>marketData</code> and update LTPs in-memory
+                    without re-fetching REST.</li>
+                <li>On order placement, the REST route validates margin, calls the <strong>Order Engine</strong>, which
+                    mutates Holdings/Positions/Wallet atomically and broadcasts an <code>orderExecuted</code> Socket.IO
+                    event.</li>
+                <li>LIMIT/SL/SL-M orders are saved as PENDING and evaluated against the live price map on every
+                    market-data tick — no polling needed.</li>
+                <li>EOD cron (3:45 PM IST on weekdays) squares off all open MIS positions at last LTP, archives trades
+                    into PLRecords, and resets intraday state.</li>
+            </ol>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="tech-stack">
+            <h2>Tech Stack</h2>
+
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Layer</th>
+                            <th>Technology</th>
+                            <th>Version</th>
+                            <th>Purpose</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Runtime</strong></td>
+                            <td>Node.js</td>
+                            <td>≥18</td>
+                            <td>Backend runtime — async I/O, Fetch API built-in</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Framework</strong></td>
+                            <td>Express 5</td>
+                            <td>^5.1</td>
+                            <td>HTTP routing, middleware</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Database</strong></td>
+                            <td>MongoDB + Mongoose</td>
+                            <td>^8.16</td>
+                            <td>Document store, schema validation, indexes</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Real-time</strong></td>
+                            <td>Socket.IO</td>
+                            <td>^4.8</td>
+                            <td>Bidirectional WebSocket: market ticks, chat, order events</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Scheduler</strong></td>
+                            <td>node-cron</td>
+                            <td>^4.5</td>
+                            <td>BOD prep (9:00 AM), EOD squareoff (3:45 PM IST)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Market data</strong></td>
+                            <td>Dhan HQ API + Yahoo Finance 2</td>
+                            <td>latest</td>
+                            <td>Primary LTP source + fallback</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Web Frontend</strong></td>
+                            <td>React 19</td>
+                            <td>^19.1</td>
+                            <td>Landing pages and marketing site</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Dashboard</strong></td>
+                            <td>React 18 + MUI 5</td>
+                            <td>^18.2</td>
+                            <td>Full trading dashboard</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Dashboard charts</strong></td>
+                            <td>lightweight-charts + Chart.js</td>
+                            <td>^5.2 / ^4.5</td>
+                            <td>TradingView-style candlestick + portfolio charts</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Mobile</strong></td>
+                            <td>React Native + Expo SDK 54</td>
+                            <td>RN 0.81.5</td>
+                            <td>iOS + Android app</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Mobile charts</strong></td>
+                            <td>react-native-chart-kit + SVG</td>
+                            <td>^6.12</td>
+                            <td>Line charts, portfolio views</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Auth (mobile)</strong></td>
+                            <td>AsyncStorage + AuthContext</td>
+                            <td>—</td>
+                            <td>Persistent session with context-based logout</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Notifications</strong></td>
+                            <td>expo-notifications</td>
+                            <td>~0.32</td>
+                            <td>Local in-app OS notifications for order fills</td>
+                        </tr>
+                        <tr>
+                            <td><strong>PDF export</strong></td>
+                            <td>jspdf + jspdf-autotable</td>
+                            <td>^4.2</td>
+                            <td>Tax P&L and trade statement exports</td>
+                        </tr>
+                        <tr>
+                            <td><strong>OTA updates</strong></td>
+                            <td>expo-updates</td>
+                            <td>~29.0</td>
+                            <td>Over-the-air JS bundle updates</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Deployment</strong></td>
+                            <td>Railway.app</td>
+                            <td>—</td>
+                            <td>Backend hosting with <code>railway.json</code> config</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="backend-arch">
+            <h2>Backend Architecture</h2>
+
+            <h3>Folder Structure</h3>
+            <pre><code>backend/
+├── index.js              <span class="comment"># App entry: Express routes, Socket.IO, cron, server</span>
+├── orderEngine.js        <span class="comment"># Central order execution & pending-order trigger engine</span>
+├── marketDataService.js  <span class="comment"># Multi-source price aggregator (NSE→Dhan→Yahoo→Sim)</span>
+├── liveDataService.js    <span class="comment"># NSE session management + Groww/NSE fetchers</span>
+├── dhanDataService.js    <span class="comment"># Dhan HQ REST + WebSocket live LTP</span>
+├── candleDataService.js  <span class="comment"># Historical candle generation (1m / 5m / 15m / 1h / 1d)</span>
+├── chargesService.js     <span class="comment"># Zerodha 2024-25 realistic brokerage calculator</span>
+├── marketRules.js        <span class="comment"># Market hours, MIS leverage, IST helpers, circuit limits</span>
+├── tokenService.js       <span class="comment"># Dhan JWT token management (24h, DB-persisted)</span>
+├── schema/               <span class="comment"># Mongoose schemas (13 collections)</span>
+├── model/                <span class="comment"># Mongoose models (exports from schemas)</span>
+└── seed*.js              <span class="comment"># One-off seed scripts for holdings, P&L history, options</span></code></pre>
+
+            <h3 id="order-engine">Order Engine (orderEngine.js)</h3>
+            <p>The order engine is the most critical module — it handles all equity order execution, position/holding
+                mutations, and margin accounting. Every order flows through it via two paths:</p>
+
+            <ul>
+                <li><strong>MARKET orders</strong>: <code>executeOrder()</code> is called immediately on placement. The
+                    order is atomically executed: trade recorded, holdings/positions mutated, wallet recomputed,
+                    Socket.IO broadcast fired.</li>
+                <li><strong>LIMIT / SL / SL-M orders</strong>: Saved as <code>PENDING</code> in MongoDB. On every
+                    market-data tick, <code>evaluatePendingOrders()</code> scans all pending orders and checks trigger
+                    conditions against the current price map. Matching orders call <code>executeOrder()</code>.</li>
+            </ul>
+
+            <div class="callout callout-info">
+                <p><strong>Margin accounting</strong> is always recomputed fresh from source-of-truth collections —
+                    never tracked incrementally. <code>usedMargin</code> = sum of CNC holding cost basis;
+                    <code>misMargin</code> = MIS notional / leverage; <code>blockedMargin</code> = pending BUY notional.
+                    This eliminates drift bugs common in incremental approaches.</p>
+            </div>
+
+            <h4>CNC (Delivery) Fill Logic</h4>
+            <ol class="flow">
+                <li>BUY: upsert HoldingsModel with quantity-weighted average price. Freshly bought quantity is added to
+                    <code>t1Quantity</code> field — can't be sold until T+1 BOD prep.</li>
+                <li>SELL: validate <code>quantity ≤ holding.quantity - t1Quantity</code> (T1 sell protection). Compute
+                    realized P&L = <code>(execPrice − avgPrice) × qty</code>. Reduce holding quantity; delete doc if
+                    quantity reaches zero.</li>
+                <li>Recompute wallet: sum all holding cost bases → <code>usedMargin</code>; update
+                    <code>availableMargin</code>.</li>
+            </ol>
+
+            <h4>MIS (Intraday) Fill Logic</h4>
+            <p>MIS supports genuine long <em>and</em> short positions — <code>quantity</code> is signed (positive =
+                long, negative = short). On a BUY against an existing short, the engine nets the positions and books a
+                <code>ClosedPosition</code> snapshot for the closed-out quantity. MIS positions are auto-squared-off at
+                EOD.</p>
+
+            <h4>Cover Orders</h4>
+            <p>A cover order is a pair: an immediate MARKET BUY + a compulsory SL-M SELL leg. The SL-M leg is linked via
+                <code>linkedOrderId</code>. If the MARKET leg fills, the SL-M leg remains PENDING protecting the
+                position. Cover orders cannot be cancelled independently — only by squaring off the entire position.</p>
+
+            <h4>Basket Orders</h4>
+            <p>A basket bundles multiple order legs (stored in <code>BasketModel</code>). On execute, each leg is
+                submitted through the normal order flow sequentially. MARKET legs fill immediately; LIMIT/SL legs rest
+                as PENDING. If any leg is rejected, earlier filled legs are NOT reversed — partial fills are accepted.
+            </p>
+
+            <h3 id="market-data">Market Data Service (marketDataService.js)</h3>
+
+            <p>A 4-tier fallback chain ensures live prices are available even when upstream services are down:</p>
+
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Tier</th>
+                            <th>Source</th>
+                            <th>Data</th>
+                            <th>Frequency</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>1st</strong></td>
+                            <td>NSE India (allIndices API)</td>
+                            <td>Index LTPs, change %</td>
+                            <td>On every 30s broadcast cycle</td>
+                        </tr>
+                        <tr>
+                            <td><strong>2nd</strong></td>
+                            <td>Dhan HQ WebSocket + REST</td>
+                            <td>Stock LTPs (50+ NSE symbols)</td>
+                            <td>1s push via WS; 15s REST fallback</td>
+                        </tr>
+                        <tr>
+                            <td><strong>3rd</strong></td>
+                            <td>Yahoo Finance 2 (Node.js)</td>
+                            <td>All stocks + indices</td>
+                            <td>On Dhan failure</td>
+                        </tr>
+                        <tr>
+                            <td><strong>4th</strong></td>
+                            <td>Simulated (random walk)</td>
+                            <td>All symbols</td>
+                            <td>Always available offline</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The service maintains an in-memory price map keyed by symbol. Each entry carries: <code>ltp</code>,
+                <code>open</code>, <code>high</code>, <code>low</code>, <code>prevClose</code>, <code>change</code>,
+                <code>changePercent</code>, <code>volume</code>, <code>high52w</code>, <code>low52w</code>,
+                <code>source</code>.</p>
+
+            <h3 id="charges">Charges Service (chargesService.js)</h3>
+            <p>Realistic Zerodha 2024–25 brokerage schedule — not a flat percentage. The service accepts
+                <code>{ segment, side, turnover }</code> and returns a full charge breakdown:</p>
+
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Segment</th>
+                            <th>Brokerage</th>
+                            <th>STT</th>
+                            <th>Exchange</th>
+                            <th>Special</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>equity_delivery</strong></td>
+                            <td>₹0 (zero)</td>
+                            <td>0.1% both sides</td>
+                            <td>0.00297%</td>
+                            <td>₹15.34 DP charge on sell</td>
+                        </tr>
+                        <tr>
+                            <td><strong>equity_intraday</strong></td>
+                            <td>0.03% or ₹20 cap</td>
+                            <td>0.025% sell only</td>
+                            <td>0.00297%</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td><strong>options</strong></td>
+                            <td>₹20 flat per order</td>
+                            <td>0.1% sell premium (post Oct-2024)</td>
+                            <td>0.03503%</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td><strong>futures</strong></td>
+                            <td>₹20 flat per order</td>
+                            <td>0.02% sell only</td>
+                            <td>0.0019%</td>
+                            <td>—</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p>GST at 18% is applied on <code>brokerage + exchange charges + SEBI charges</code>. Stamp duty applies on
+                buy side only, at segment-specific rates.</p>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="schemas">
+            <h2>Database Schemas</h2>
+            <p>MongoDB via Mongoose. All collections use auto-generated <code>_id: ObjectId</code> and Mongoose's
+                <code>timestamps: true</code> (<code>createdAt</code>, <code>updatedAt</code>). 13 active collections.
+            </p>
+
+            <h3>Holdings</h3>
+            <pre><code>{
+  <span class="key">stockSymbol</span>: <span class="str">String</span>,   <span class="comment">// uppercase, required — NSE symbol</span>
+  <span class="key">quantity</span>:    <span class="num">Number</span>,   <span class="comment">// total shares held</span>
+  <span class="key">avgPrice</span>:    <span class="num">Number</span>,   <span class="comment">// quantity-weighted average buy price</span>
+  <span class="key">ltp</span>:         <span class="num">Number</span>,   <span class="comment">// last traded price (updated on fills + market ticks)</span>
+  <span class="key">productType</span>: <span class="str">'CNC'|'MIS'|'NRML'</span>,
+  <span class="key">t1Quantity</span>:  <span class="num">Number</span>,   <span class="comment">// shares bought today — unsettled, cannot sell yet</span>
+  <span class="key">t1Date</span>:      Date      <span class="comment">// date t1Quantity was added — cleared at next BOD</span>
+}</code></pre>
+
+            <h3>Positions (Equity Intraday)</h3>
+            <pre><code>{
+  <span class="key">stockSymbol</span>: <span class="str">String</span>,
+  <span class="key">quantity</span>:    <span class="num">Number</span>,   <span class="comment">// signed: +ve = long, -ve = short (MIS shorts supported)</span>
+  <span class="key">avgPrice</span>:    <span class="num">Number</span>,
+  <span class="key">ltp</span>:         <span class="num">Number</span>,
+  <span class="key">productType</span>: <span class="str">'CNC'|'MIS'|'NRML'</span>,
+  <span class="key">isIntraday</span>:  Boolean
+}</code></pre>
+
+            <h3>Orders</h3>
+            <pre><code>{
+  <span class="key">stockSymbol</span>:     <span class="str">String</span>,
+  <span class="key">quantity</span>:        <span class="num">Number</span>,
+  <span class="key">price</span>:           <span class="num">Number</span>,       <span class="comment">// limit/execution price</span>
+  <span class="key">triggerPrice</span>:    <span class="num">Number|null</span>,  <span class="comment">// SL/SL-M trigger</span>
+  <span class="key">slTriggered</span>:     Boolean,      <span class="comment">// SL order activated (limit → pending)</span>
+  <span class="key">type</span>:            <span class="str">'MARKET'|'LIMIT'|'SL'|'SLM'</span>,
+  <span class="key">side</span>:            <span class="str">'BUY'|'SELL'</span>,
+  <span class="key">status</span>:          <span class="str">'PENDING'|'EXECUTED'|'CANCELLED'|'REJECTED'</span>,
+  <span class="key">productType</span>:     <span class="str">'CNC'|'MIS'|'NRML'</span>,
+  <span class="key">exchange</span>:        <span class="str">'NSE'|'BSE'</span>,
+  <span class="key">rejectionReason</span>: <span class="str">String|null</span>,
+  <span class="key">basketId</span>:        ObjectId|null, <span class="comment">// links all legs of a basket</span>
+  <span class="key">isCoverOrder</span>:    Boolean,
+  <span class="key">linkedOrderId</span>:   ObjectId|null  <span class="comment">// cover order: main ↔ SL-M leg</span>
+}</code></pre>
+
+            <h3>Trades</h3>
+            <pre><code>{
+  <span class="key">stockSymbol</span>: <span class="str">String</span>,
+  <span class="key">quantity</span>:    <span class="num">Number</span>,
+  <span class="key">price</span>:       <span class="num">Number</span>,
+  <span class="key">side</span>:        <span class="str">'BUY'|'SELL'</span>,
+  <span class="key">productType</span>: <span class="str">String</span>,
+  <span class="key">orderId</span>:     ObjectId,   <span class="comment">// ref to Orders collection</span>
+  <span class="key">charges</span>:     <span class="num">Number</span>,     <span class="comment">// total brokerage + taxes</span>
+  <span class="key">totalValue</span>:  <span class="num">Number</span>,     <span class="comment">// qty × price</span>
+  <span class="key">archived</span>:    Boolean     <span class="comment">// true after rolled into PLRecord at EOD</span>
+}</code></pre>
+
+            <h3>Wallet</h3>
+            <pre><code>{
+  <span class="key">balance</span>:         <span class="num">Number</span>,  <span class="comment">// total deposited funds</span>
+  <span class="key">usedMargin</span>:      <span class="num">Number</span>,  <span class="comment">// CNC holdings cost basis (recomputed fresh)</span>
+  <span class="key">misMargin</span>:       <span class="num">Number</span>,  <span class="comment">// MIS position notional / MIS_LEVERAGE</span>
+  <span class="key">optionMargin</span>:    <span class="num">Number</span>,  <span class="comment">// premium paid for option longs</span>
+  <span class="key">blockedMargin</span>:   <span class="num">Number</span>,  <span class="comment">// notional of resting PENDING BUY orders</span>
+  <span class="key">availableMargin</span>: <span class="num">Number</span>   <span class="comment">// balance − usedMargin − misMargin − optionMargin − blocked</span>
+}</code></pre>
+
+            <h3>Price Alerts / GTT</h3>
+            <pre><code>{
+  <span class="key">stockSymbol</span>:     <span class="str">String</span>,
+  <span class="key">targetPrice</span>:     <span class="num">Number</span>,
+  <span class="key">condition</span>:       <span class="str">'ABOVE'|'BELOW'</span>,
+  <span class="key">active</span>:          Boolean,    <span class="comment">// false once triggered</span>
+  <span class="key">triggered</span>:       Boolean,
+  <span class="key">triggeredAt</span>:     Date|null,
+  <span class="comment">// GTT extension — fires a real order on trigger</span>
+  <span class="key">gtt</span>:             Boolean,
+  <span class="key">side</span>:            <span class="str">'BUY'|'SELL'|null</span>,
+  <span class="key">quantity</span>:        <span class="num">Number|null</span>,
+  <span class="key">limitPrice</span>:      <span class="num">Number|null</span>,
+  <span class="key">productType</span>:     <span class="str">String</span>,
+  <span class="comment">// OCO extension — second independent trigger leg</span>
+  <span class="key">triggerType</span>:     <span class="str">'single'|'oco'</span>,
+  <span class="key">ocoTargetPrice</span>:  <span class="num">Number|null</span>,
+  <span class="key">ocoCondition</span>:    <span class="str">'ABOVE'|'BELOW'|null</span>
+}</code></pre>
+
+            <h3>Option Positions</h3>
+            <pre><code>{
+  <span class="key">symbol</span>:           <span class="str">String</span>,   <span class="comment">// e.g. "NIFTY25JUL24500CE"</span>
+  <span class="key">underlyingSymbol</span>: <span class="str">String</span>,   <span class="comment">// "NIFTY 50"</span>
+  <span class="key">strikePrice</span>:      <span class="num">Number</span>,
+  <span class="key">optionType</span>:       <span class="str">'CE'|'PE'</span>,
+  <span class="key">expiry</span>:           <span class="str">String</span>,   <span class="comment">// "YYYY-MM-DD"</span>
+  <span class="key">lotSize</span>:          <span class="num">Number</span>,
+  <span class="key">lots</span>:             <span class="num">Number</span>,
+  <span class="key">quantity</span>:         <span class="num">Number</span>,   <span class="comment">// lots × lotSize</span>
+  <span class="key">avgPremium</span>:       <span class="num">Number</span>,
+  <span class="key">ltp</span>:              <span class="num">Number</span>,
+  <span class="key">productType</span>:      <span class="str">String</span>    <span class="comment">// 'NRML' (F&O)</span>
+}</code></pre>
+
+            <h3>PLRecord (Profit & Loss History)</h3>
+            <pre><code>{
+  <span class="key">tradeDate</span>:      Date,
+  <span class="key">symbol</span>:         <span class="str">String</span>,
+  <span class="key">quantity</span>:       <span class="num">Number</span>,
+  <span class="key">buyValue</span>:       <span class="num">Number</span>,
+  <span class="key">sellValue</span>:      <span class="num">Number</span>,
+  <span class="key">realizedPL</span>:     <span class="num">Number</span>,
+  <span class="key">netPL</span>:          <span class="num">Number</span>,    <span class="comment">// realizedPL − charges</span>
+  <span class="key">brokerage</span>:      <span class="num">Number</span>,
+  <span class="key">stt</span>:            <span class="num">Number</span>,
+  <span class="key">exchangeCharges</span>:<span class="num">Number</span>,
+  <span class="key">gst</span>:            <span class="num">Number</span>,
+  <span class="key">sebiCharges</span>:    <span class="num">Number</span>,
+  <span class="key">stampDuty</span>:      <span class="num">Number</span>,
+  <span class="key">segment</span>:        <span class="str">'equity'|'fno'|'combined'|...</span>,
+  <span class="comment">// Index for fast date-range + segment queries:</span>
+  <span class="comment">// PLRecordSchema.index({ tradeDate: 1, segment: 1 })</span>
+}</code></pre>
+
+            <h3>Other Collections</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Collection</th>
+                            <th>Purpose</th>
+                            <th>Key Fields</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Watchlists</strong></td>
+                            <td>User watchlists (named lists of stock symbols)</td>
+                            <td><code>name</code>, <code>stocks: [String]</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>FundTransactions</strong></td>
+                            <td>Deposit / withdrawal ledger</td>
+                            <td><code>type</code>, <code>amount</code>, <code>status</code>, <code>method</code>,
+                                <code>upiApp</code>, <code>reference</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Chat</strong></td>
+                            <td>Live trader chat messages</td>
+                            <td><code>username</code>, <code>message</code>, <code>room</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Baskets</strong></td>
+                            <td>Multi-leg order baskets</td>
+                            <td><code>name</code>, <code>legs: [BasketLeg]</code>, <code>executed</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>ClosedPositions</strong></td>
+                            <td>Frozen snapshots of squared-off positions for Positions screen</td>
+                            <td><code>kind</code>, <code>pnl</code>, <code>exitPrice</code>, <code>dateStr</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>CorporateActions</strong></td>
+                            <td>Dividend / split / bonus calendar</td>
+                            <td><code>type</code>, <code>exDate</code>, <code>dividendPerShare</code>,
+                                <code>ratio</code>, <code>applied</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="api">
+            <h2>API Reference</h2>
+            <p>Base URL: <code>http://localhost:8080</code>. All endpoints accept and return JSON. No authentication
+                currently enforced on REST (demo mode — single-user simulation).</p>
+
+            <h3>Holdings & Positions</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Description</th>
+                            <th>Response</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/allHoldings</code></td>
+                            <td>All CNC holdings</td>
+                            <td><code>[Holding]</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/allPositions</code></td>
+                            <td>All open MIS positions</td>
+                            <td><code>[Position]</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/positions/day</code></td>
+                            <td>Today's positions (open + closed)</td>
+                            <td><code>{ open, closed }</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/positions/dayPnl</code></td>
+                            <td>Aggregate day P&L</td>
+                            <td><code>{ realised, unrealised, total }</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/closedPositions</code></td>
+                            <td>Frozen squared-off snapshots</td>
+                            <td><code>[ClosedPosition]</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/positions/:id/squareoff</code></td>
+                            <td>Square off a position at market</td>
+                            <td><code>{ message, order }</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Orders</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Body</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/allOrders</code></td>
+                            <td>—</td>
+                            <td>All orders, sorted newest first</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/newOrder</code></td>
+                            <td><code>{ stockSymbol, qty, price, mode, side, productType, triggerPrice? }</code></td>
+                            <td>Place an equity order</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-patch">PATCH</span></td>
+                            <td><code>/orders/:id</code></td>
+                            <td><code>{ price?, quantity?, triggerPrice? }</code></td>
+                            <td>Modify a PENDING order</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-del">DELETE</span></td>
+                            <td><code>/orders/:id</code></td>
+                            <td>—</td>
+                            <td>Cancel a PENDING order</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/newCoverOrder</code></td>
+                            <td><code>{ stockSymbol, qty, price, slTriggerPrice, productType }</code></td>
+                            <td>Cover order (market + compulsory SL-M)</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4>POST /newOrder — full request example</h4>
+            <pre><code>{
+  <span class="key">"stockSymbol"</span>:  <span class="str">"RELIANCE"</span>,
+  <span class="key">"qty"</span>:          <span class="num">5</span>,
+  <span class="key">"price"</span>:        <span class="num">2450.50</span>,
+  <span class="key">"mode"</span>:         <span class="str">"LIMIT"</span>,   <span class="comment">// MARKET | LIMIT | SL | SLM</span>
+  <span class="key">"side"</span>:         <span class="str">"BUY"</span>,
+  <span class="key">"productType"</span>:  <span class="str">"CNC"</span>,     <span class="comment">// CNC | MIS | NRML</span>
+  <span class="key">"triggerPrice"</span>: <span class="num">2440.00</span>   <span class="comment">// required for SL / SLM</span>
+}</code></pre>
+
+            <h4>Success response (MARKET order)</h4>
+            <pre><code>{
+  <span class="key">"message"</span>: <span class="str">"Order executed successfully"</span>,
+  <span class="key">"order"</span>: { <span class="key">"_id"</span>: <span class="str">"..."</span>, <span class="key">"status"</span>: <span class="str">"EXECUTED"</span>, <span class="key">"price"</span>: <span class="num">2451.20</span>, ... },
+  <span class="key">"trade"</span>: { <span class="key">"totalValue"</span>: <span class="num">12256.00</span>, <span class="key">"charges"</span>: <span class="num">15.34</span>, ... }
+}</code></pre>
+
+            <h4>Error responses</h4>
+            <pre><code><span class="comment">// Insufficient margin</span>
+{ <span class="key">"message"</span>: <span class="str">"Insufficient margin. Required ₹12,258.00, available ₹8,400.00"</span> }
+
+<span class="comment">// T1 sell attempt</span>
+{ <span class="key">"message"</span>: <span class="str">"5 of your RELIANCE shares are in T1 settlement and can't be sold until tomorrow."</span> }
+
+<span class="comment">// Market closed</span>
+{ <span class="key">"message"</span>: <span class="str">"Market is closed. LIMIT/SL orders accepted during pre-market."</span> }</code></pre>
+
+            <h3>Baskets</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/baskets</code></td>
+                            <td>All baskets</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/baskets</code></td>
+                            <td>Create basket. Body:
+                                <code>{ name, legs: [{stockSymbol, qty, price, side, type, productType}] }</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/baskets/:id/execute</code></td>
+                            <td>Execute all legs of a basket</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-del">DELETE</span></td>
+                            <td><code>/baskets/:id</code></td>
+                            <td>Delete an unexecuted basket</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Options</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/optionchain/:symbol?expiry=</code></td>
+                            <td>Live option chain (CE/PE strikes, LTP, OI, IV)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/optionPositions</code></td>
+                            <td>All open option positions</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/newOptionOrder</code></td>
+                            <td>Place option order. Body:
+                                <code>{ symbol, underlyingSymbol, strikePrice, optionType, expiry, lotSize, lots, premium, side }</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/optionPositions/:id/squareoff</code></td>
+                            <td>Square off option position. Body: <code>{ lots? }</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Market Data</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/live</code></td>
+                            <td>Complete live price map for all tracked symbols</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/indexes</code></td>
+                            <td>Index data: NIFTY 50, BANK NIFTY, SENSEX, IT, FINNIFTY, etc.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/movers</code></td>
+                            <td>Top gainers and losers of the day</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/quote/:symbol</code></td>
+                            <td>Single stock full quote (LTP, OHLC, 52W H/L, volume)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/search?q=</code></td>
+                            <td>Search stocks by symbol or name (client-side filtered)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/stocks</code></td>
+                            <td>Full NSE stock catalog (50+ symbols with sector)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/candles/:symbol?interval=</code></td>
+                            <td>OHLCV candle data. Intervals: <code>1m 5m 15m 1h 1d</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/index-candles/:indexName?interval=</code></td>
+                            <td>Index OHLCV candles</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/history/:symbol?days=</code></td>
+                            <td>Historical daily candles (default 30 days)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/status</code></td>
+                            <td>Market open/closed, data source info, last updated</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/market/ipos</code></td>
+                            <td>Live IPO data from NSE</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Wallet & Funds</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/wallet</code></td>
+                            <td>Current wallet: balance, margins, available</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/funds</code></td>
+                            <td>Fund transaction history (deposits + withdrawals)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/funds/deposit</code></td>
+                            <td>Add funds. Body: <code>{ amount, method, upiApp? }</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/funds/withdraw</code></td>
+                            <td>Withdraw funds. Body: <code>{ amount }</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Watchlists</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/watchlists</code></td>
+                            <td>All watchlists</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/watchlists</code></td>
+                            <td>Create watchlist. Body: <code>{ name }</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/watchlists/:id/stock</code></td>
+                            <td>Add stock. Body: <code>{ stockSymbol }</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-del">DELETE</span></td>
+                            <td><code>/watchlists/:id/stock/:symbol</code></td>
+                            <td>Remove stock from watchlist</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-del">DELETE</span></td>
+                            <td><code>/watchlists/:id</code></td>
+                            <td>Delete watchlist</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Alerts / GTT</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/alerts</code></td>
+                            <td>All price alerts and GTT orders</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/alerts</code></td>
+                            <td>Create alert/GTT. Body:
+                                <code>{ stockSymbol, targetPrice, condition, gtt?, side?, quantity?, limitPrice?, productType?, triggerType?, ocoTargetPrice?, ocoCondition? }</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-del">DELETE</span></td>
+                            <td><code>/alerts/:id</code></td>
+                            <td>Delete alert</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>P&L</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/pnl/records?segment=&from=&to=</code></td>
+                            <td>P&L records filtered by segment and date range</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/pnl/charges?segment=&from=&to=</code></td>
+                            <td>Aggregate charges breakdown for a period</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/pnl/monthly-breakdown?segment=&from=&to=</code></td>
+                            <td>Monthly P&L grouped by month</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Admin & Ops</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Endpoint</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/seed</code></td>
+                            <td>Seed default wallet, watchlist "Nifty 50", sample holdings and positions</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/corporate-actions</code></td>
+                            <td>List corporate action calendar</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/corporate-actions/apply</code></td>
+                            <td>Apply pending corporate actions to holdings (idempotent)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-post">POST</span></td>
+                            <td><code>/admin/update-token</code></td>
+                            <td>Update Dhan JWT token (24h expiry). Body: <code>{ accessToken, clientId }</code></td>
+                        </tr>
+                        <tr>
+                            <td><span class="tag-get">GET</span></td>
+                            <td><code>/admin/token-status</code></td>
+                            <td>Dhan token validity, issued/expiry time</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Socket.IO Events</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Direction</th>
+                            <th>Event</th>
+                            <th>Payload</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Server → Client</td>
+                            <td><code>marketData</code></td>
+                            <td><code>{ prices, indexes, movers, lastUpdated }</code></td>
+                            <td>Broadcast every 30s and on connect</td>
+                        </tr>
+                        <tr>
+                            <td>Server → Client</td>
+                            <td><code>orderExecuted</code></td>
+                            <td><code>{ order, trade }</code></td>
+                            <td>Emitted when any order fills</td>
+                        </tr>
+                        <tr>
+                            <td>Server → Client</td>
+                            <td><code>alertTriggered</code></td>
+                            <td><code>{ alert, ltp }</code></td>
+                            <td>GTT/alert trigger event</td>
+                        </tr>
+                        <tr>
+                            <td>Server → Client</td>
+                            <td><code>chatMessage</code></td>
+                            <td><code>{ username, message, room, createdAt }</code></td>
+                            <td>Live chat broadcast</td>
+                        </tr>
+                        <tr>
+                            <td>Client → Server</td>
+                            <td><code>chatMessage</code></td>
+                            <td><code>{ username, message, room }</code></td>
+                            <td>Send a chat message</td>
+                        </tr>
+                        <tr>
+                            <td>Client → Server</td>
+                            <td><code>subscribe</code></td>
+                            <td><code>[symbols]</code></td>
+                            <td>Join symbol-specific rooms for targeted updates</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="features">
+            <h2>Features — Detailed</h2>
+
+            <h3 id="f-orders">Orders & Execution</h3>
+
+            <h4>Order Types</h4>
+            <ul>
+                <li><strong>MARKET</strong>: Executes immediately at the current LTP from the price map. No price
+                    negotiation.</li>
+                <li><strong>LIMIT</strong>: Saved as PENDING. BUY limit fills when <code>LTP ≤ limitPrice</code>; SELL
+                    limit fills when <code>LTP ≥ limitPrice</code>.</li>
+                <li><strong>SL (Stop Loss)</strong>: Has both a trigger price and a limit price. When
+                    <code>LTP ≤ triggerPrice</code> (for BUY SL), the order becomes an active LIMIT order at
+                    <code>limitPrice</code>. Used when you want a guaranteed limit after the trigger fires.</li>
+                <li><strong>SL-M (Stop Loss Market)</strong>: Executes at market price once trigger is crossed. Faster
+                    than SL but may get a worse fill.</li>
+            </ul>
+
+            <h4>Product Types</h4>
+            <ul>
+                <li><strong>CNC</strong> (Cash & Carry): Delivery. Shares credited to demat. No auto-squareoff. Zero
+                    brokerage on Zerodha schedule.</li>
+                <li><strong>MIS</strong> (Margin Intraday Square-off): Intraday only. Supports long and short.
+                    Auto-squared off at 3:15 PM IST. 5× leverage modelled.</li>
+                <li><strong>NRML</strong>: Used for F&O (options/futures) — overnight positions allowed in derivatives.
+                </li>
+            </ul>
+
+            <h3 id="f-portfolio">Portfolio & P&L</h3>
+
+            <h4>Holdings P&L</h4>
+            <p>Unrealized P&L = <code>(ltp − avgPrice) × quantity</code>. The dashboard updates ltp from Socket.IO
+                marketData events in real-time so the P&L value animates live. Realized P&L is booked on each SELL fill
+                and accumulated in PLRecords.</p>
+
+            <h4>Day P&L</h4>
+            <p>The Positions screen aggregates realized + unrealized P&L for all positions opened today. Closed
+                (squared-off) positions show the frozen <code>ClosedPosition</code> snapshot — the P&L never recomputes
+                after the position is closed, so "what you booked" is immutable.</p>
+
+            <h4>Profit & Loss Statement</h4>
+            <p>The P&L screen reads from <code>PLRecords</code> — a permanent archive of every realized trade grouped by
+                day, symbol, and segment. Supports filtering by segment (equity/fno/combined) and arbitrary date ranges.
+                The monthly breakdown groups records by calendar month, showing realized P&L, total charges, and net
+                P&L. PDF export via jspdf-autotable is supported.</p>
+
+            <h4>T+1 Settlement</h4>
+            <p>Shares bought with CNC go into <code>t1Quantity</code>. The BOD cron (9:00 AM next trading day) clears
+                <code>t1Quantity</code>, making them sellable. Attempting to sell T1 shares triggers an
+                <code>OrderRejectedError</code> with a clear message.</p>
+
+            <h3 id="f-options">Options Paper Trading</h3>
+
+            <p>NIFTY 50, BANK NIFTY, SENSEX, NIFTY IT, FINNIFTY all have a live option chain. Expiries are computed
+                dynamically (weekly for NIFTY/BANKNIFTY, monthly for others). The chain shows CE and PE strikes at ±10%
+                of the current underlying price in 50-point intervals.</p>
+
+            <ul>
+                <li><strong>Premiums</strong>: Black-Scholes approximation using live underlying LTP, strike, expiry,
+                    and implied volatility estimated from historical price range.</li>
+                <li><strong>Lot sizes</strong>: NIFTY=75, BANKNIFTY=15, SENSEX=10 (real NSE lot sizes).</li>
+                <li><strong>Margin</strong>: Premium × lots × lotSize is debited from <code>optionMargin</code> on buy.
+                    Written (short) positions use an approximation margin.</li>
+                <li><strong>Square-off</strong>: Via <code>POST /optionPositions/:id/squareoff</code>. Partial squareoff
+                    by specifying <code>lots</code>.</li>
+            </ul>
+
+            <h3 id="f-gtt">GTT (Good Till Triggered) & Alerts</h3>
+
+            <p>GTT extends a price alert into an automatic order trigger. When the alert condition fires:</p>
+            <ol class="flow">
+                <li>The market-data broadcast loop checks all active GTT alerts against current LTP.</li>
+                <li>If <code>condition === 'ABOVE' && ltp >= targetPrice</code> (or BELOW), the GTT fires.</li>
+                <li>A LIMIT order is placed at <code>limitPrice</code> for <code>quantity</code> shares on the specified
+                    <code>side</code>.</li>
+                <li>The GTT is deactivated (<code>active: false, triggered: true</code>), so it never fires twice.</li>
+                <li>An <code>alertTriggered</code> Socket.IO event is emitted and a local OS notification is fired on
+                    mobile.</li>
+            </ol>
+
+            <p><strong>OCO (One Cancels Other)</strong>: Two trigger levels on one GTT. Whichever leg fires first
+                executes its order and deactivates the entire GTT (the other leg is killed). Used for "buy on breakout
+                above ₹X or buy on dip to ₹Y" strategies.</p>
+
+            <h3 id="f-funds">Funds & Wallet</h3>
+
+            <p>Single-wallet model (single user, demo). Deposit via <code>POST /funds/deposit</code> increments
+                <code>balance</code> and recomputes <code>availableMargin</code>. Withdrawal validates
+                <code>availableMargin ≥ amount</code> to prevent overdraft. Each transaction is ledgered in
+                <code>FundTransactions</code> with method (UPI/NETBANKING/BANK) and a reference number for traceability.
+            </p>
+
+            <h3>Live Chat</h3>
+            <p>Persistent Socket.IO chat room. Messages are saved to <code>ChatModel</code> and broadcast to all
+                connected clients. On connection, the last 100 messages are fetched via <code>GET /chat/history</code>
+                so the room is pre-populated. The mobile app uses a keyboard-avoiding view and auto-scrolls to the
+                newest message.</p>
+
+            <h3>Corporate Actions</h3>
+            <p>A curated <code>CorporateActions</code> collection tracks dividends, splits, and bonus issues.
+                <code>POST /corporate-actions/apply</code> applies pending actions to holdings: dividends credit the
+                wallet, splits/bonuses multiply <code>quantity</code> and adjust <code>avgPrice</code> proportionally.
+                The <code>applied</code> flag makes the operation fully idempotent.</p>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="frontend">
+            <h2>Landing Site (React 19)</h2>
+
+            <p>A multi-page marketing site mirroring Zerodha's public website. Built with React 19, React Router 7, and
+                Bootstrap 5.</p>
+
+            <h3>Pages</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Route</th>
+                            <th>Component</th>
+                            <th>Content</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>/</code></td>
+                            <td><code>HomePage</code></td>
+                            <td>Hero, stats (1.5Cr+ clients), awards, education section, pricing preview</td>
+                        </tr>
+                        <tr>
+                            <td><code>/about</code></td>
+                            <td><code>AboutPage</code></td>
+                            <td>Company story, team section</td>
+                        </tr>
+                        <tr>
+                            <td><code>/products</code></td>
+                            <td><code>ProductsPage</code></td>
+                            <td>Product universe — Kite, Console, Coin, Sensibull, Streak</td>
+                        </tr>
+                        <tr>
+                            <td><code>/pricing</code></td>
+                            <td><code>PricingPage</code></td>
+                            <td>Brokerage comparison table, free delivery trades call-out</td>
+                        </tr>
+                        <tr>
+                            <td><code>/support</code></td>
+                            <td><code>SupportPage</code></td>
+                            <td>Support portal, create ticket form</td>
+                        </tr>
+                        <tr>
+                            <td><code>/signup</code></td>
+                            <td><code>Signup</code></td>
+                            <td>Account opening form (UI only)</td>
+                        </tr>
+                        <tr>
+                            <td><code>*</code></td>
+                            <td><code>NotFound</code></td>
+                            <td>404 page</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p>Start: <code>cd frontend &amp;&amp; npm start</code> → Port 3000.</p>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="dashboard">
+            <h2>Trading Dashboard (React 18)</h2>
+            <p>The web trading UI — a full Zerodha Kite web clone. Built with React 18, React Router 6, MUI 5, Chart.js,
+                and lightweight-charts.</p>
+
+            <h3>Component Structure</h3>
+            <pre><code>dashboard/src/components/
+├── Home.js              <span class="comment"># Root: routing + GeneralContext provider</span>
+├── Dashboard.js         <span class="comment"># Main layout: sidebar + content area</span>
+├── TopBar.js            <span class="comment"># Header: indexes ticker + account nav</span>
+├── Menu.js              <span class="comment"># Left sidebar navigation</span>
+├── WatchList.js         <span class="comment"># Watchlist with live LTPs, B/S actions</span>
+├── Holdings.js          <span class="comment"># CNC holdings P&L table</span>
+├── Positions.js         <span class="comment"># Open + closed intraday positions</span>
+├── Orders.js            <span class="comment"># Order book (all orders)</span>
+├── TradeBook.js         <span class="comment"># Executed trades with charges</span>
+├── Funds.js             <span class="comment"># Wallet, add/withdraw, transactions</span>
+├── StockChart.js        <span class="comment"># lightweight-charts candlestick view</span>
+├── IndexCharts.js       <span class="comment"># Index line charts (NIFTY, BANKNIFTY)</span>
+├── IndexTicker.js       <span class="comment"># Horizontal scrolling index strip</span>
+├── MarketMovers.js      <span class="comment"># Gainers / losers list</span>
+├── HistoricalData.js    <span class="comment"># Historical OHLCV data table</span>
+├── PLStatement.js       <span class="comment"># P&L with segment filter + PDF export</span>
+├── TaxPnL.js            <span class="comment"># Tax-ready P&L breakdown</span>
+├── LiveChat.js          <span class="comment"># Socket.IO live trader chat</span>
+├── Notifications.js     <span class="comment"># Price alert management</span>
+├── BuyActionWindow.js   <span class="comment"># Order entry modal (buy or sell)</span>
+├── GeneralContext.js    <span class="comment"># Context: open/close buy/sell modal</span>
+└── AdminDashboard.js    <span class="comment"># Admin: corporate actions, seed, token mgmt</span></code></pre>
+
+            <h3>State Management</h3>
+            <p>No Redux — state is kept local to each component and shared via <code>GeneralContext</code> for the
+                buy/sell modal. Socket.IO events update component state via <code>useEffect</code> listeners. All API
+                calls use <code>axios</code> pointed at <code>http://localhost:8080</code>.</p>
+
+            <p>Start: <code>cd dashboard &amp;&amp; npm start</code> → Port 3001.</p>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="mobile">
+            <h2>Mobile App (React Native / Expo)</h2>
+
+            <h3>Project Config</h3>
+            <ul>
+                <li><strong>SDK</strong>: Expo 54, React Native 0.81.5, React 19.1</li>
+                <li><strong>Targets</strong>: iOS + Android via Expo Go (dev) and EAS Build (production APK/IPA)</li>
+                <li><strong>OTA</strong>: expo-updates for over-the-air JS bundle updates without store review</li>
+            </ul>
+
+            <h3>Navigation Architecture</h3>
+            <pre><code>App.js
+└── NavigationContainer
+    └── Bottom Tab Navigator (6 tabs)
+        ├── Watchlist Stack
+        │   ├── DashboardScreen  (default)
+        │   ├── StockDetailScreen
+        │   ├── OrderEntryScreen
+        │   ├── OptionChainScreen
+        │   ├── OptionOrderScreen
+        │   ├── IndexChartScreen
+        │   ├── AlertsScreen
+        │   └── FundsScreen / AddFundsScreen / WithdrawScreen
+        ├── Markets Stack
+        │   └── MarketsScreen → StockDetail / OptionChain / ...
+        ├── Orders Stack
+        │   └── OrdersScreen → GTTScreen / StockDetail / ...
+        ├── Portfolio Stack
+        │   └── PortfolioScreen → StockDetail / PLScreen / ...
+        ├── Funds Screen (no stack)
+        └── Account Stack
+            ├── AccountScreen
+            ├── ProfileScreen
+            ├── SettingsScreen
+            ├── ConnectedAppsScreen
+            └── Funds / Withdraw / StockDetail</code></pre>
+
+            <h3>Screens Reference</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Screen</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>LoginScreen</strong></td>
+                            <td>Auth gate (username/password). Session persisted in AsyncStorage.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>DashboardScreen</strong></td>
+                            <td>Watchlist with live LTPs, search-to-add stocks, swipe tabs between watchlists, B/S
+                                action buttons.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>MarketsScreen</strong></td>
+                            <td>Full NSE stock list, top-gainers/losers tabs, live search, buy/sell from list.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>StockDetailScreen</strong></td>
+                            <td>Live quote, line chart (1D/1W/1M/3M/1Y intervals), market depth simulation, buy/sell
+                                footer.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>PortfolioScreen</strong></td>
+                            <td>Holdings and open positions with P&L, progress bars, add/exit actions.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>OrderEntryScreen</strong></td>
+                            <td>Full order form: MARKET/LIMIT/SL/SL-M, CNC/MIS, qty stepper, price input, charge
+                                estimate.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>OrdersScreen</strong></td>
+                            <td>Order book + Trade book tabs, cancel PENDING orders, live status badges.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>FundsScreen</strong></td>
+                            <td>Wallet balance, margin breakdown, transaction history with method details.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>AddFundsScreen</strong></td>
+                            <td>UPI / NetBanking method selector, quick-amount chips, deposit flow.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>WithdrawScreen</strong></td>
+                            <td>Withdrawal with bank account display and available margin check.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>AlertsScreen</strong></td>
+                            <td>Price alerts CRUD. Create GTT with single/OCO trigger types.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>GTTScreen</strong></td>
+                            <td>Dedicated GTT management: view, create, delete, track trigger status.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>OptionChainScreen</strong></td>
+                            <td>Live option chain for NIFTY/BANKNIFTY. Strike rows with CE/PE LTP, OI, IV, bid/ask.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>OptionOrderScreen</strong></td>
+                            <td>Option order entry with lot selector, premium display, margin estimate.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>PLScreen</strong></td>
+                            <td>P&L statement with segment filter, monthly breakdown chart, charges table, XLSX/PDF
+                                export.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>IndexChartScreen</strong></td>
+                            <td>Full-screen candlestick chart for market indices with interval selector.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>BidsScreen</strong></td>
+                            <td>IPO applications (bids) tracker — live IPO listing from NSE.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>ChatScreen</strong></td>
+                            <td>Socket.IO live trader chat room with persistent message history.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>AccountScreen</strong></td>
+                            <td>User profile, privacy mode toggle, Console shortcuts, logout.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>ProfileScreen</strong></td>
+                            <td>KYC details: PAN, demat, BO ID, linked bank, phone (last 4 digits).</td>
+                        </tr>
+                        <tr>
+                            <td><strong>SettingsScreen</strong></td>
+                            <td>Order notifications toggle, data saver, theme preference.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>ConnectedAppsScreen</strong></td>
+                            <td>List of third-party apps authorized to the account.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Key Components</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Component</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>IndexTicker</code></td>
+                            <td>Horizontal scrollable strip of live index chips. Tapping an index opens
+                                IndexChartScreen.</td>
+                        </tr>
+                        <tr>
+                            <td><code>BuySellModal</code></td>
+                            <td>Slide-up order form. Used from watchlist, stock detail, portfolio. Supports all order
+                                types.</td>
+                        </tr>
+                        <tr>
+                            <td><code>StockActionSheet</code></td>
+                            <td>Context action sheet on stock long-press: buy, sell, add to watchlist, set alert, view
+                                chart.</td>
+                        </tr>
+                        <tr>
+                            <td><code>CandlestickChart</code></td>
+                            <td>react-native-svg based OHLCV candlestick renderer with volume bars.</td>
+                        </tr>
+                        <tr>
+                            <td><code>NotificationBridge</code></td>
+                            <td>Headless component that subscribes to Socket.IO events and fires local OS notifications
+                                via expo-notifications.</td>
+                        </tr>
+                        <tr>
+                            <td><code>ErrorBoundary</code></td>
+                            <td>React class component catching render errors — shows a recovery screen instead of a
+                                white crash.</td>
+                        </tr>
+                        <tr>
+                            <td><code>AppCodeSheet</code></td>
+                            <td>Bottom sheet showing the user's app code (TG3140) as a scannable badge.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>API Client (src/api/client.js)</h3>
+            <p>Thin fetch wrapper with:</p>
+            <ul>
+                <li><strong>Short-TTL cache</strong>: Hot GETs (<code>/market/live</code>, <code>/market/indexes</code>)
+                    are cached for 2s and de-duplicated in-flight — prevents N parallel component mounts from firing N
+                    identical requests.</li>
+                <li><strong>Socket.IO singleton</strong>: <code>getSocket()</code> returns one shared instance with
+                    <code>websocket + polling</code> transports and infinite reconnect. Polling fallback ensures
+                    connectivity on mobile carrier NATs.</li>
+                <li><strong>URL resolution</strong>: <code>EXPO_PUBLIC_API_URL</code> env var →
+                    <code>Constants.expoConfig.extra.apiUrl</code> → hardcoded LAN IP for local dev.</li>
+            </ul>
+
+            <h3>Auth Flow</h3>
+            <ol class="flow">
+                <li>App.js restores <code>AsyncStorage</code> session flag on mount. Shows a spinner during restore to
+                    prevent flash-of-login-screen for already-signed-in users.</li>
+                <li>LoginScreen validates credentials and calls <code>onLogin()</code>.</li>
+                <li><code>handleLogin()</code> writes <code>'session_active': '1'</code> to AsyncStorage <em>before</em>
+                    flipping React state — guards against OS backgrounding the app during the write window.</li>
+                <li><code>AuthContext</code> provides <code>logout()</code> to any screen without prop-drilling through
+                    stacks.</li>
+            </ol>
+
+            <h3>Market Hours Utility</h3>
+            <p>Uses pure UTC-offset arithmetic (<code>+5.5h</code>) rather than
+                <code>toLocaleString('en-IN', {timeZone:'Asia/Kolkata'})</code> followed by
+                <code>new Date(string)</code>. The re-parsing path breaks on Hermes builds that don't ship full ICU
+                timezone data — silently returns <code>NaN</code>, making the market look permanently closed.</p>
+
+            <p>Run: <code>cd mobile &amp;&amp; npx expo start</code> → scan QR with Expo Go, or press <code>i</code>
+                (iOS) / <code>a</code> (Android) for simulator.</p>
+
+            <hr class="divider">
+
+            <h3 id="mobile-tabs">Bottom Tab Navigator — 5 Tabs</h3>
+
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Tab Label</th>
+                            <th>Icon</th>
+                            <th>Root Screen</th>
+                            <th>Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>1</td>
+                            <td><strong>Watchlist</strong></td>
+                            <td>bookmark</td>
+                            <td><code>DashboardScreen</code></td>
+                            <td>Default tab on launch</td>
+                        </tr>
+                        <tr>
+                            <td>2</td>
+                            <td><strong>Orders</strong></td>
+                            <td>receipt</td>
+                            <td><code>OrdersScreen</code></td>
+                            <td>Order book + trade book</td>
+                        </tr>
+                        <tr>
+                            <td>3</td>
+                            <td><strong>Portfolio</strong></td>
+                            <td>briefcase</td>
+                            <td><code>PortfolioScreen</code></td>
+                            <td>Holdings + positions</td>
+                        </tr>
+                        <tr>
+                            <td>4</td>
+                            <td><strong>Bids</strong></td>
+                            <td>pricetag</td>
+                            <td><code>BidsScreen</code></td>
+                            <td>Live IPO listings</td>
+                        </tr>
+                        <tr>
+                            <td>5</td>
+                            <td><strong>Account (TG3140)</strong></td>
+                            <td>AW avatar circle</td>
+                            <td><code>AccountScreen</code></td>
+                            <td>User initials rendered as a filled circle</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout callout-info">
+                <p><strong>Markets tab is missing.</strong> <code>MarketsScreen</code> and <code>MarketsStack</code> are
+                    defined in <code>AppNavigator.js</code> but never added to <code>Tab.Navigator</code>. The screen is
+                    dead code in the current navigator — accessible only if a screen explicitly calls
+                    <code>navigation.navigate('MarketsHome')</code>.</p>
+            </div>
+
+            <h3 id="mobile-screens">All 22 Screens — Complete Reference</h3>
+
+            <h4>Auth (before login)</h4>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>File</th>
+                            <th>Loading</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>1</td>
+                            <td><code>LoginScreen.js</code></td>
+                            <td>Eager</td>
+                            <td>Username / password gate. <code>App.js</code> shows this screen when no valid session
+                                exists in AsyncStorage. On success, writes session flag before flipping React state to
+                                prevent Android OS-kill window.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4>Watchlist Stack (Tab 1)</h4>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>File</th>
+                            <th>Loading</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>2</td>
+                            <td><code>DashboardScreen.js</code></td>
+                            <td>Eager (tab root)</td>
+                            <td>Live watchlist with LTPs, swipeable multi-watchlist tabs, stock search, long-press
+                                context sheet, buy/sell shortcut buttons.</td>
+                        </tr>
+                        <tr>
+                            <td>3</td>
+                            <td><code>StockDetailScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Full stock quote — OHLC, 52W H/L, volume. Line chart with 1D / 1W / 1M / 3M / 1Y
+                                interval selector. Simulated market depth. Buy / Sell footer bar.</td>
+                        </tr>
+                        <tr>
+                            <td>4</td>
+                            <td><code>OrderEntryScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Full order entry form. Order type: MARKET / LIMIT / SL / SL-M. Product type: CNC / MIS /
+                                NRML. Quantity stepper, price input, real-time charge estimate. Validates margin before
+                                submit.</td>
+                        </tr>
+                        <tr>
+                            <td>5</td>
+                            <td><code>OptionChainScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Live option chain for NIFTY, BANKNIFTY, SENSEX, FINNIFTY. CE and PE columns per strike.
+                                LTP, OI, IV, Bid/Ask displayed. Expiry selector. Strike rows are tappable to open
+                                <code>OptionOrderScreen</code>.</td>
+                        </tr>
+                        <tr>
+                            <td>6</td>
+                            <td><code>OptionOrderScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Options order entry. Lot selector (+/−), live premium from chain, total margin estimate,
+                                BUY / SELL submit.</td>
+                        </tr>
+                        <tr>
+                            <td>7</td>
+                            <td><code>IndexChartScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Full-screen candlestick chart for market indices (NIFTY 50, BANK NIFTY, SENSEX …).
+                                Interval selector: 1m / 5m / 15m / 1h / 1d. Rendered via <code>CandlestickChart</code>
+                                component.</td>
+                        </tr>
+                        <tr>
+                            <td>8</td>
+                            <td><code>AlertsScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Price alerts management — create (ABOVE / BELOW threshold), view active and triggered
+                                alerts, delete. GTT alerts also listed here with their trigger type badge (single /
+                                OCO).</td>
+                        </tr>
+                        <tr>
+                            <td>9</td>
+                            <td><code>FundsScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Wallet overview — total balance, used margin, MIS margin, option margin, blocked margin,
+                                available margin. Fund transaction ledger (deposits and withdrawals). Links to AddFunds
+                                and Withdraw.</td>
+                        </tr>
+                        <tr>
+                            <td>10</td>
+                            <td><code>AddFundsScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Deposit flow. Method selector: UPI (GPay, PhonePe, Paytm, BHIM) and NetBanking.
+                                Quick-amount chips (₹1K / ₹5K / ₹10K / ₹25K / ₹50K / ₹1L). Calls
+                                <code>POST /funds/deposit</code>.</td>
+                        </tr>
+                        <tr>
+                            <td>11</td>
+                            <td><code>WithdrawScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Withdrawal form showing linked bank (Canara Bank ••••9869). Validates withdrawal ≤
+                                available margin. Calls <code>POST /funds/withdraw</code>.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4>Orders Stack (Tab 2)</h4>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>File</th>
+                            <th>Loading</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>12</td>
+                            <td><code>OrdersScreen.js</code></td>
+                            <td>Eager (tab root)</td>
+                            <td>Two tabs: <strong>Orders</strong> (all orders with status badges, swipe-to-cancel for
+                                PENDING) and <strong>Trades</strong> (executed trades with charge breakdown). Navigates
+                                to GTTScreen via header button.</td>
+                        </tr>
+                        <tr>
+                            <td>13</td>
+                            <td><code>GTTScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Good Till Triggered order management. Lists all GTT alerts with trigger price,
+                                condition, linked order details, and trigger status (active / triggered). Create new GTT
+                                with single or OCO trigger type. Delete.</td>
+                        </tr>
+                        <tr>
+                            <td>—</td>
+                            <td><em>StockDetail, OrderEntry, OptionChain, OptionOrder, IndexChart shared here</em></td>
+                            <td>—</td>
+                            <td>Same screens as Watchlist stack, re-registered so Orders tab is fully self-contained.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4>Portfolio Stack (Tab 3)</h4>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>File</th>
+                            <th>Loading</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>14</td>
+                            <td><code>PortfolioScreen.js</code></td>
+                            <td>Eager (tab root)</td>
+                            <td>Two sections: <strong>Holdings</strong> (CNC delivery stocks, P&amp;L progress bars,
+                                current value) and <strong>Positions</strong> (open + closed intraday MIS positions).
+                                Day P&amp;L summary header. Tap any stock → StockDetail. Links to PLScreen.</td>
+                        </tr>
+                        <tr>
+                            <td>15</td>
+                            <td><code>PLScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>Profit &amp; Loss statement. Segment filter: Equity / F&amp;O / Combined. Date range
+                                picker. Monthly breakdown bar chart. Charges table (brokerage, STT, exchange, GST, SEBI,
+                                stamp duty). XLSX and PDF export via <code>expo-sharing</code>.</td>
+                        </tr>
+                        <tr>
+                            <td>—</td>
+                            <td><em>StockDetail, OrderEntry, OptionChain, OptionOrder, IndexChart shared here</em></td>
+                            <td>—</td>
+                            <td></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4>Bids Stack (Tab 4)</h4>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>File</th>
+                            <th>Loading</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>16</td>
+                            <td><code>BidsScreen.js</code></td>
+                            <td>Eager (tab root)</td>
+                            <td>Live IPO listings fetched from NSE via <code>GET /market/ipos</code>. Shows open /
+                                upcoming / closed IPOs with issue price, lot size, subscription dates, and GMP if
+                                available. Only a single screen in this stack.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4>Account Stack (Tab 5)</h4>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>File</th>
+                            <th>Loading</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>17</td>
+                            <td><code>AccountScreen.js</code></td>
+                            <td>Eager (tab root)</td>
+                            <td>User card (Ashok Shrikisan Waghmode · TG3140). Quick links: Portfolio, Orders, Holdings,
+                                P&amp;L, Funds, Logout. Privacy mode toggle (hides balances app-wide). Console section
+                                links. Tap profile → ProfileScreen.</td>
+                        </tr>
+                        <tr>
+                            <td>18</td>
+                            <td><code>ProfileScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>KYC details — full name, email, PAN (ACQPW8465M), phone (••••8652), demat
+                                (1208160034922852), BO ID (34922852), linked bank (Canara Bank ••••9869). Read-only
+                                display.</td>
+                        </tr>
+                        <tr>
+                            <td>19</td>
+                            <td><code>SettingsScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>App preferences — order fill notifications toggle (writes <code>app_settings_v1</code>
+                                to AsyncStorage, read by <code>notificationService.js</code>), data saver mode, theme
+                                preference.</td>
+                        </tr>
+                        <tr>
+                            <td>20</td>
+                            <td><code>ConnectedAppsScreen.js</code></td>
+                            <td>Lazy</td>
+                            <td>List of third-party apps authorized to the Zerodha account (Sensibull, Smallcase,
+                                Streak, etc.) with permission scopes and revoke option.</td>
+                        </tr>
+                        <tr>
+                            <td>—</td>
+                            <td><em>Funds, AddFunds, Withdraw, Portfolio, Orders, GTT, Alerts, StockDetail, OrderEntry,
+                                    PL shared here</em></td>
+                            <td>—</td>
+                            <td>Entire app is reachable from Account stack — no cross-tab navigation needed.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4>Defined but not in navigator</h4>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>File</th>
+                            <th>Status</th>
+                            <th>Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>21</td>
+                            <td><code>MarketsScreen.js</code></td>
+                            <td><span style="color:var(--warn);font-weight:600;">Unwired</span></td>
+                            <td><code>MarketsStack</code> is fully defined in <code>AppNavigator.js</code> with its own
+                                screen registrations, but is never added as a <code>Tab.Screen</code>. To activate: add
+                                it to the <code>Tab.Navigator</code> between Watchlist and Orders.</td>
+                        </tr>
+                        <tr>
+                            <td>22</td>
+                            <td><code>ChatScreen.js</code></td>
+                            <td><span style="color:var(--warn);font-weight:600;">Unwired</span></td>
+                            <td>Socket.IO live trader chat room. File is complete with message history fetch and
+                                real-time send, but has no entry in <code>AppNavigator.js</code>. Likely accessed via a
+                                direct button in <code>DashboardScreen</code> or intended as a future tab.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4>Reusable Components (not screens)</h4>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>File</th>
+                            <th>Type</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>components/BuySellModal.js</code></td>
+                            <td>Modal</td>
+                            <td>Slide-up order form. Invoked from Watchlist and StockDetail. Supports all order types.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>components/IndexTicker.js</code></td>
+                            <td>Component</td>
+                            <td>Horizontal scrolling strip of live index chips. Tap → IndexChartScreen.</td>
+                        </tr>
+                        <tr>
+                            <td><code>components/CandlestickChart.js</code></td>
+                            <td>Component</td>
+                            <td>react-native-svg OHLCV candlestick renderer with volume bars.</td>
+                        </tr>
+                        <tr>
+                            <td><code>components/StockActionSheet.js</code></td>
+                            <td>Bottom sheet</td>
+                            <td>Context menu on long-press: buy, sell, add to watchlist, set alert, view chart.</td>
+                        </tr>
+                        <tr>
+                            <td><code>components/TimeframeSheet.js</code></td>
+                            <td>Bottom sheet</td>
+                            <td>Chart interval selector sheet (1D / 1W / 1M / 3M / 1Y).</td>
+                        </tr>
+                        <tr>
+                            <td><code>components/AppCodeSheet.js</code></td>
+                            <td>Bottom sheet</td>
+                            <td>Displays user's Zerodha app code (TG3140) as a scannable badge.</td>
+                        </tr>
+                        <tr>
+                            <td><code>components/ErrorBoundary.js</code></td>
+                            <td>Class component</td>
+                            <td>Wraps the full app tree — catches render errors, shows recovery UI instead of white
+                                crash screen.</td>
+                        </tr>
+                        <tr>
+                            <td><code>components/NotificationBridge.js</code></td>
+                            <td>Headless</td>
+                            <td>Subscribes to Socket.IO <code>orderExecuted</code> / <code>alertTriggered</code> events
+                                and fires local OS notifications via <code>expo-notifications</code>.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="background">
+            <h2>Background Jobs & Scheduled Tasks</h2>
+
+            <p>Implemented via <code>node-cron</code> in <code>index.js</code>. All crons operate in IST (UTC+5:30)
+                computed via plain UTC-offset arithmetic.</p>
+
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Cron</th>
+                            <th>Schedule</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Market Data Broadcast</strong></td>
+                            <td>Every 30s (setInterval)</td>
+                            <td>Calls <code>fetchAllStockPrices()</code> then broadcasts <code>marketData</code>
+                                Socket.IO event to all connected clients.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Dhan LTP (Fast tick)</strong></td>
+                            <td>Every 1s via WebSocket</td>
+                            <td>Dhan pushes live LTP for subscribed symbols. The price map is updated in memory;
+                                broadcast waits for 30s cycle.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Dhan Quote (REST)</strong></td>
+                            <td>Every 15s</td>
+                            <td>Fetches full quote (OHLC, volume) for all tracked symbols when Dhan WS doesn't carry
+                                that data.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>BOD Prep</strong></td>
+                            <td>9:00 AM IST, Mon–Fri</td>
+                            <td>Clears <code>t1Quantity</code> on all holdings (T+1 settlement). Restores buying power
+                                for yesterday's purchases.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>EOD Squareoff</strong></td>
+                            <td>3:15 PM IST, Mon–Fri</td>
+                            <td>Squares off all open MIS equity positions at last LTP. Archives their trades into
+                                PLRecords. Clears intraday P&L state.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>EOD Archive</strong></td>
+                            <td>3:45 PM IST, Mon–Fri</td>
+                            <td>Rolls up unarchived trades into permanent PLRecord documents. Sets
+                                <code>archived: true</code> on processed trades to prevent double-counting on restarts.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>Alert/GTT Evaluation</strong></td>
+                            <td>On every marketData broadcast</td>
+                            <td>Scans all active <code>PriceAlertModel</code> docs. Fires GTT orders or emits
+                                <code>alertTriggered</code> when conditions are met.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Pending Order Eval</strong></td>
+                            <td>On every marketData broadcast</td>
+                            <td><code>evaluatePendingOrders()</code> checks LIMIT/SL/SL-M orders against current price
+                                map. Executes matching orders.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="security">
+            <h2>Security</h2>
+
+            <div class="callout callout-warn">
+                <p><strong>Demo mode</strong>: This is a single-user simulation. No user authentication is enforced on
+                    REST endpoints. In a production deployment, all routes would require a signed JWT and user-scoped
+                    data isolation.</p>
+            </div>
+
+            <h3>What's in place</h3>
+            <ul>
+                <li><strong>CORS</strong>: <code>cors()</code> middleware allows all origins (demo). Production should
+                    whitelist specific domains.</li>
+                <li><strong>Input validation</strong>: All API handlers validate required fields and return structured
+                    <code>400</code> errors. Symbol inputs are always <code>.toUpperCase()</code>'d before DB queries to
+                    prevent case-mismatch injections.</li>
+                <li><strong>Mongoose schema validation</strong>: <code>enum</code> constraints on critical fields
+                    (<code>type</code>, <code>side</code>, <code>status</code>, <code>productType</code>) reject invalid
+                    values at the ORM layer before reaching the order engine.</li>
+                <li><strong>Dhan token</strong>: 24-hour JWT stored in MongoDB (not in env files). Refreshed via
+                    <code>POST /admin/update-token</code> — the token is never exposed to client-side code.</li>
+                <li><strong>Mobile session</strong>: Session flag stored in AsyncStorage (device-local).
+                    <code>AuthContext.logout()</code> removes it and returns to LoginScreen.</li>
+                <li><strong>T1 sell protection</strong>: Order engine validates
+                    <code>sellable = quantity − t1Quantity</code> — prevents fraudulent T1 sell attempts that would
+                    bypass settlement rules.</li>
+                <li><strong>Margin check</strong>: <code>availableMargin ≥ required</code> validated before any BUY
+                    order is saved. Rejection creates an <code>REJECTED</code> order doc with
+                    <code>rejectionReason</code> for audit trail.</li>
+            </ul>
+
+            <h3>Environment Variables</h3>
+            <pre><code><span class="comment"># backend/.env</span>
+<span class="key">DATABASE_URL</span>=mongodb+srv://&lt;user&gt;:&lt;pass&gt;@cluster.mongodb.net/zerodha
+<span class="key">PORT</span>=8080
+<span class="key">DHAN_ACCESS_TOKEN</span>=&lt;24h JWT from Dhan portal&gt;
+<span class="key">DHAN_CLIENT_ID</span>=&lt;your Dhan client ID&gt;
+
+<span class="comment"># mobile/.env (or eas.json env)</span>
+<span class="key">EXPO_PUBLIC_API_URL</span>=https://your-backend.railway.app</code></pre>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="performance">
+            <h2>Performance & Optimization</h2>
+
+            <ul>
+                <li><strong>In-memory price map</strong>: All 50+ stock prices live in a Node.js Map object — O(1)
+                    lookups on every tick, zero DB reads for price data.</li>
+                <li><strong>Fresh-recompute margin</strong>: Rather than incrementally tracking <code>usedMargin</code>
+                    (which drifts under concurrent fills), the engine recomputes it from the live holdings collection on
+                    every fill. Slightly more DB reads per trade, eliminates an entire class of balance bugs.</li>
+                <li><strong>Client-side caching (mobile)</strong>: <code>cachedGet()</code> with 2s TTL collapses
+                    concurrent requests from multiple components mounting simultaneously. <code>_inflight</code> map
+                    de-duplicates in-flight requests — two components requesting <code>/market/live</code> at t=0ms
+                    resolve from the same promise.</li>
+                <li><strong>PLRecord index</strong>: <code>{ tradeDate: 1, segment: 1 }</code> compound index on
+                    PLRecords enables fast date-range + segment queries without full collection scans.</li>
+                <li><strong>Lazy screen loading (mobile)</strong>: <code>React.lazy()</code> + <code>Suspense</code>
+                    defers parsing of heavy screens (option chain, charts) until first navigation — reduces cold-start
+                    JS parse time.</li>
+                <li><strong>Socket.IO polling fallback</strong>: <code>transports: ['websocket', 'polling']</code>
+                    allows upgrade from long-polling → WS. Prevents silent disconnects on mobile carrier NATs that block
+                    raw WebSocket upgrades.</li>
+                <li><strong>Dhan WebSocket LTP</strong>: 1-second push ticks from Dhan avoid polling entirely for price
+                    updates. The 30s broadcast cycle is for connected clients — the in-memory map is always fresh.</li>
+            </ul>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="deployment">
+            <h2>Deployment</h2>
+
+            <h3>Backend — Railway.app</h3>
+            <pre><code><span class="comment"># railway.json</span>
+{
+  <span class="key">"build"</span>: { <span class="key">"builder"</span>: <span class="str">"NIXPACKS"</span> },
+  <span class="key">"deploy"</span>: {
+    <span class="key">"startCommand"</span>: <span class="str">"node index.js"</span>,
+    <span class="key">"healthcheckPath"</span>: <span class="str">"/"</span>
+  }
+}</code></pre>
+            <ul>
+                <li>Push to GitHub → Railway auto-deploys on every commit to <code>main</code>.</li>
+                <li>Environment variables set in Railway dashboard (DATABASE_URL, DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID).
+                </li>
+                <li>Railway provides a public HTTPS domain — set as <code>EXPO_PUBLIC_API_URL</code> in EAS.</li>
+            </ul>
+
+            <h3>Mobile — EAS Build</h3>
+            <pre><code><span class="comment"># eas.json</span>
+{
+  <span class="key">"build"</span>: {
+    <span class="key">"production"</span>: {
+      <span class="key">"env"</span>: {
+        <span class="key">"EXPO_PUBLIC_API_URL"</span>: <span class="str">"https://your-backend.railway.app"</span>
+      }
+    }
+  }
+}</code></pre>
+            <p><code>npx eas build --platform android</code> produces an APK/AAB. <code>eas submit</code> uploads to
+                Play Store / App Store. OTA JS bundle updates via <code>expo-updates</code> skip store review for
+                non-native changes.</p>
+
+            <h3>Local Development</h3>
+            <pre><code><span class="comment"># Terminal 1 — Backend</span>
+cd backend &amp;&amp; npm run dev     <span class="comment"># nodemon, port 8080</span>
+
+<span class="comment"># Terminal 2 — Dashboard</span>
+cd dashboard &amp;&amp; npm start     <span class="comment"># CRA, port 3001</span>
+
+<span class="comment"># Terminal 3 — Frontend</span>
+cd frontend &amp;&amp; npm start      <span class="comment"># CRA, port 3000</span>
+
+<span class="comment"># Terminal 4 — Mobile</span>
+cd mobile &amp;&amp; npx expo start   <span class="comment"># Expo Dev Server</span>
+<span class="comment"># Set BASE_URL in src/api/client.js to your machine's LAN IP</span></code></pre>
+
+            <h3>Seed Data</h3>
+            <pre><code>curl -X POST http://localhost:8080/seed</code></pre>
+            <p>Creates: default wallet (₹1,00,000 balance), "Nifty 50" watchlist with 9 stocks, 12 sample CNC holdings,
+                and 2 sample MIS positions.</p>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="errors">
+            <h2>Edge Cases & Error Handling</h2>
+
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Scenario</th>
+                            <th>Handling</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Market closed + MARKET order</td>
+                            <td>Allowed (demo mode simulates immediate fill). Real behavior: rejected outside 9:15 AM –
+                                3:30 PM IST.</td>
+                        </tr>
+                        <tr>
+                            <td>Insufficient margin on BUY</td>
+                            <td><code>OrderRejectedError</code> → order saved as REJECTED with
+                                <code>rejectionReason</code>. Specific ₹amount shown in error message.</td>
+                        </tr>
+                        <tr>
+                            <td>T1 sell attempt</td>
+                            <td><code>OrderRejectedError</code> stating how many shares are unsettled and until when.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>SELL more than held</td>
+                            <td>Rejected with "you only hold N shares" message. Naked shorting blocked for CNC.</td>
+                        </tr>
+                        <tr>
+                            <td>Dhan API down</td>
+                            <td>Automatic fallback to Yahoo Finance. Stats object tracks <code>source</code> field;
+                                <code>/market/status</code> reports the active source.</td>
+                        </tr>
+                        <tr>
+                            <td>All data sources down</td>
+                            <td>Simulated prices (random walk on last known LTP) — trades still process, users see a
+                                "SIMULATED" badge in market status.</td>
+                        </tr>
+                        <tr>
+                            <td>Dhan JWT expired</td>
+                            <td><code>POST /admin/update-token</code> refreshes without restart.
+                                <code>tokenService</code> caches token in memory; stale cache expires after 30 min.</td>
+                        </tr>
+                        <tr>
+                            <td>Socket.IO disconnect</td>
+                            <td>Infinite reconnect with exponential backoff (1s → 5s max). On reconnect the client
+                                receives a fresh <code>marketData</code> broadcast immediately.</td>
+                        </tr>
+                        <tr>
+                            <td>Mobile iOS timezone (Hermes)</td>
+                            <td><code>marketHours.js</code> uses pure UTC arithmetic — never <code>toLocaleString</code>
+                                + <code>new Date(string)</code>, which silently returns NaN on Hermes without full ICU.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>EOD archive restart during cron</td>
+                            <td>Trades have <code>archived</code> flag. EOD cron only processes
+                                <code>{ archived: false }</code> trades — idempotent across restarts.</td>
+                        </tr>
+                        <tr>
+                            <td>GTT double-trigger</td>
+                            <td><code>active: false</code> set atomically before the order is placed. Alert evaluation
+                                loop skips inactive alerts — can never fire twice.</td>
+                        </tr>
+                        <tr>
+                            <td>Basket partial failure</td>
+                            <td>Filled legs are NOT reversed (no saga/compensating transactions). REJECTED legs save
+                                with <code>rejectionReason</code>. Documented behavior.</td>
+                        </tr>
+                        <tr>
+                            <td>React Native app crash</td>
+                            <td><code>ErrorBoundary</code> wraps the entire app tree. Catches render errors, shows
+                                recovery UI instead of white screen.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ══════════════════════════════════════════════ -->
+        <section id="future">
+            <h2>Future Roadmap</h2>
+
+            <h3>Near Term</h3>
+            <ul>
+                <li><strong>Multi-user auth</strong>: JWT-based auth with per-user MongoDB namespacing. Passport.js is
+                    already installed and wired (passport-local-mongoose in dependencies).</li>
+                <li><strong>Futures paper trading</strong>: Extend the option order engine to futures contracts. The
+                    <code>chargesService</code> already models futures charges.</li>
+                <li><strong>Bracket orders</strong>: Entry + take-profit + stop-loss triple-leg orders. Extends the
+                    cover order pattern in <code>orderEngine.js</code>.</li>
+                <li><strong>Live 52W High/Low scanner</strong>: Real-time screener using the price map —
+                    <code>ltp >= high52w * 0.99</code> filter. Backend data already includes 52W fields.</li>
+            </ul>
+
+            <h3>Medium Term</h3>
+            <ul>
+                <li><strong>Options Greeks display</strong>: Delta, Gamma, Theta, Vega from Black-Scholes already
+                    computed in the option chain — surface them in the mobile option order screen.</li>
+                <li><strong>Mutual Funds module</strong>: NAV data via AMFI API, SIP simulation, portfolio overlap view.
+                </li>
+                <li><strong>Stripe-based payments</strong>: Replace mock deposit flow with a real payment gateway for
+                    the landing site's account opening flow.</li>
+                <li><strong>Admin dashboard</strong>: <code>AdminDashboard.js</code> exists in the web dashboard —
+                    extend with portfolio analytics, user activity, and corporate action management UI.</li>
+            </ul>
+
+            <h3>Scalability</h3>
+            <ul>
+                <li><strong>Redis pub/sub</strong>: Replace Socket.IO in-process broadcast with Redis adapter for
+                    horizontal scaling across multiple Node.js instances.</li>
+                <li><strong>MongoDB read replicas</strong>: Holdings/positions reads could be served from replicas; only
+                    order fills need the primary.</li>
+                <li><strong>Rate limiting</strong>: Add <code>express-rate-limit</code> on market data endpoints — the
+                    current polling-based client can generate significant load without throttling.</li>
+                <li><strong>Time-series DB</strong>: Migrate candlestick data to InfluxDB or TimescaleDB for efficient
+                    range queries and compression of minute-level OHLCV data.</li>
+            </ul>
+        </section>
+
+    </main>
+</div>
+
+<script>
+    // Sidebar active-link highlighting on scroll
+    const links = document.querySelectorAll('.toc-link[href^="#"]');
+    const sections = [...links].map(l => document.querySelector(l.getAttribute('href'))).filter(Boolean);
+
+    const obs = new IntersectionObserver(entries => {
+        entries.forEach(e => {
+            if (e.isIntersecting) {
+                links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id));
+            }
+        });
+    }, { rootMargin: '-20% 0px -70% 0px', threshold: 0 });
+
+    sections.forEach(s => obs.observe(s));
+</script>

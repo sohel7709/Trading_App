@@ -35,7 +35,7 @@ const IndexTicker = () => {
     return num.toLocaleString("en-IN", { maximumFractionDigits: 2 });
   };
 
-  const indexList = Object.values(indexes);
+  const indexList = Object.values(indexes || {});
 
   if (indexList.length === 0) {
     return (

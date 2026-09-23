@@ -1,6 +1,9 @@
 const { Schema } = require('mongoose');
 
 const PriceAlertSchema = new Schema({
+    userId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    instituteId: { type: Schema.Types.ObjectId, ref: 'Institute', index: true },
+
     stockSymbol: { type: String, required: true, uppercase: true },
     targetPrice: { type: Number, required: true },
     condition: { type: String, enum: ['ABOVE', 'BELOW'], required: true },
@@ -22,5 +25,7 @@ const PriceAlertSchema = new Schema({
     ocoTargetPrice: { type: Number, default: null },
     ocoCondition: { type: String, enum: ['ABOVE', 'BELOW'], default: null },
 }, { timestamps: true });
+
+PriceAlertSchema.index({ instituteId: 1, userId: 1, active: 1 });
 
 module.exports = { PriceAlertSchema };

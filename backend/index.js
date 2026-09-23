@@ -28,6 +28,14 @@ const dhanDataService = require('./dhanDataService');
 const rules = require('./marketRules');
 const orderEngine = require('./orderEngine');
 const { calcCharges } = require('./chargesService');
+const { authRouter } = require('./auth');
+const { authenticate } = require('./middleware/authenticate');
+const { UserModel } = require('./model/UserModel');
+const { InstituteModel } = require('./model/InstituteModel');
+
+const { startMTMEngine, redisClient } = require('./mtmEngine');
+const InstituteDataManager = require('./services/InstituteDataManager');
+const CacheService = require('./services/cacheService');
 
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.DATABASE_URL;
@@ -38,19 +46,214 @@ const io = new Server(server, {
     cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 ioInstance = io;
+app.set('io', io);
 orderEngine.init(io);
+const marketControlService = require('./services/marketControlService');
+marketControlService.init(io);
 
+app.get('/market/state', async (req, res) => {
+    try {
+        let batchId = req.query.batchId || req.user?.batchId;
+        if (!batchId && req.user?._id) {
+            const { EnrollmentModel } = require('./model/EnrollmentModel');
+            const enr = await EnrollmentModel.findOne({ userId: req.user._id, status: 'ACTIVE' });
+            batchId = enr?.batchId;
+        }
+        const globalState = marketControlService.getMarketState();
+        if (batchId) {
+            const batchState = await marketControlService.getBatchMarketState(batchId);
+            if (batchState) {
+                return res.json({
+                    success: true,
+                    mode: batchState.mode || globalState.mode,
+                    isHalted: globalState.isHalted || Boolean(batchState.isHalted),
+                    globalHalted: globalState.isHalted,
+                    batchHalted: Boolean(batchState.isHalted),
+                    haltReason: globalState.isHalted ? globalState.haltReason : (batchState.haltReason || null),
+                    scope: globalState.isHalted ? 'GLOBAL' : (batchState.isHalted ? 'BATCH' : null),
+                    batchId: batchState.batchId,
+                    batchCode: batchState.batchCode,
+                    globalState,
+                });
+            }
+        }
+        res.json({ success: true, ...globalState });
+    } catch (e) {
+        res.json({ success: true, ...marketControlService.getMarketState() });
+    }
+});
+
+const { initNotificationSocket, sendNotification } = require('./services/notificationService');
+const { NotificationModel } = require('./model/NotificationModel');
+const { RiskLogModel } = require('./model/RiskLogModel');
+initNotificationSocket(io);
+marketDataService.initOptionChainBroadcaster(io);
+
+// ── Decoupled Architecture Integration: Redis Pub/Sub & 300ms Throttler ──
+const socketHandler = require('./socket-server/socketHandler');
+socketHandler.init(io);
+const dhanMarketService = require('./market-data-worker/dhanService');
+dhanMarketService.start().catch((e) => console.warn('[MarketWorker] Start note:', e.message));
+const preAggregationWorker = require('./services/preAggregationWorker');
+preAggregationWorker.start(3000);
+
+// ── Authenticate Socket.IO connections ──────────────────────────────────────
+const jwt = require('jsonwebtoken');
+const { ACCESS_SECRET } = require('./auth');
+
+io.use(async (socket, next) => {
+    try {
+        const token = socket.handshake.auth?.token 
+            || socket.handshake.query?.token 
+            || socket.handshake.headers?.authorization?.replace('Bearer ', '');
+        if (token) {
+            const payload = jwt.verify(token, ACCESS_SECRET);
+            const user = await UserModel.findById(payload.sub).select('-passwordHash');
+            if (user && user.isActive) {
+                socket.user = user;
+                socket.userId = user._id.toString();
+                // Join private user rooms for strict tenant data isolation
+                socket.join(`user:${user._id.toString()}`);
+                socket.join(user._id.toString());
+                // Auto-join institute-scoped socket room for market data isolation
+                if (user.instituteCode) {
+                    socket.join(`institute:${user.instituteCode}`);
+                }
+            }
+        }
+        next();
+    } catch (err) {
+        // Allow unauthenticated connection for public ticker quotes
+        next();
+    }
+});
+
+// ── Institute Data Manager (multi-tenant market data) ─────────────────────
+let instituteDataManager = null;
+
+// Handle explicit room join requests (e.g., from mobile app after login)
+io.on('connection', (socket) => {
+    // Ensure socket is joined to user-specific private rooms
+    if (socket.user?._id) {
+        const uid = socket.user._id.toString();
+        socket.join(`user:${uid}`);
+        socket.join(uid);
+    }
+
+    if (socket.user?.instituteCode && instituteDataManager) {
+        const data = instituteDataManager.getPrices(socket.user.instituteCode);
+        socket.emit('marketData', data);
+    }
+
+    socket.on('join_institute', ({ instituteCode }) => {
+        const code = instituteCode || socket.user?.instituteCode;
+        if (code) {
+            socket.join(`institute:${code}`);
+            if (instituteDataManager) {
+                const data = instituteDataManager.getPrices(code);
+                socket.emit('marketData', data);
+            }
+        }
+    });
+
+    socket.on('join_user', ({ userId }) => {
+        const uid = userId || socket.userId;
+        if (uid) {
+            socket.join(`user:${uid}`);
+            socket.join(uid.toString());
+        }
+    });
+
+    // 1-Second Option Chain Room Subscription
+    socket.on('subscribeOptionChain', (data) => {
+        const indexName = typeof data === 'object' ? data?.indexName : data;
+        const expiry = typeof data === 'object' ? data?.expiry : null;
+        const norm = normalizeIndexName(indexName || 'NIFTY 50');
+        socket.join(`chain:${norm}`);
+        if (expiry) {
+            socket.join(`chain:${norm}:${expiry}`);
+        }
+        marketDataService.getOptionChain(norm, expiry).then(chain => {
+            if (chain) socket.emit('optionChain', chain);
+        }).catch(() => {});
+    });
+
+    socket.on('unsubscribeOptionChain', (data) => {
+        const indexName = typeof data === 'object' ? data?.indexName : data;
+        const expiry = typeof data === 'object' ? data?.expiry : null;
+        const norm = normalizeIndexName(indexName || 'NIFTY 50');
+        socket.leave(`chain:${norm}`);
+        if (expiry) {
+            socket.leave(`chain:${norm}:${expiry}`);
+        }
+    });
+});
+
+
+const compression = require('compression');
+const { ensureIndexes } = require('./scripts/ensureIndexes');
+
+// Start BullMQ MTM background job for Module 2
+startMTMEngine(io);
+
+app.use(compression());
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Health check — Railway/Render ping this to verify the service is up
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Zerodha Kite API', version: '1.0.0' }));
+// Health check
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'TradeLab API', version: '1.0.0' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', service: 'TradeLab API', version: '1.0.0' }));
+
+// ── Auth routes (public — no token required) ──────────────────────────────
+app.use('/auth', authRouter);
+
+// ── Protect all data routes below this line ───────────────────────────────
+app.use(authenticate);
+
+const { instituteRouter } = require('./routes/instituteRoutes');
+app.use('/institutes', instituteRouter);
+app.use('/institute', instituteRouter);
+
+const { superAdminRouter } = require('./routes/superAdminRoutes');
+app.use('/super-admin', superAdminRouter);
+
+const userRoutes = require('./routes/userRoutes');
+const { batchRouter } = require('./routes/batchRoutes');
+const replayRoutes = require('./routes/replayRoutes');
+const brokerRoutes = require('./routes/brokerRoutes');
+const marketRoutes = require('./routes/marketRoutes');
+const leaderboardRoutes = require('./routes/leaderboardRoutes');
+const analyticsRoutes = require('./routes/analyticsRoutes');
+const { broadcastInstructorFeed } = require('./services/instructorFeedService');
+const notificationService = require('./services/notificationService');
+const replayEngine = require('./services/replayEngineService');
+
+app.use('/batches', batchRouter);
+app.use('/batch', batchRouter);
+app.use('/users', userRoutes);
+app.use('/replay', replayRoutes);
+app.use('/brokers', brokerRoutes);
+app.use('/market', marketRoutes);
+app.use('/leaderboard', leaderboardRoutes);
+app.use('/analytics', analyticsRoutes);
+app.use(marketRoutes);
 
 mongoose.connect(MONGO_URI)
     .then(async () => {
         console.log('Connected to MongoDB');
+        await ensureIndexes();
         await tokenService.loadTokenFromDB();
         dhanAutoRenew.startAutoRenewCron();
+        const { initBrokerTokenCron } = require('./jobs/brokerTokenCron');
+        initBrokerTokenCron();
+        // Initialize real-time ecosystem services
+        notificationService.init(io);
+        replayEngine.init(io);
+        // Initialize multi-institute data manager
+        instituteDataManager = new InstituteDataManager(io);
+        app.set('instituteDataManager', instituteDataManager);
+        await instituteDataManager.startAll();
+        console.log(`[InstDataMgr] Active institute feeds: ${instituteDataManager.activeCount}`);
     })
     .catch(err => console.error('Error connecting to MongoDB:', err));
 
@@ -60,21 +263,282 @@ mongoose.connect(MONGO_URI)
 // socket tick corrected it.
 function withLiveLtp(doc) {
     const live = marketDataService.getStockPrice(doc.stockSymbol);
+    const plain = doc.toObject ? doc.toObject() : doc;
     return {
-        ...doc.toObject(),
+        ...plain,
         ltp: live?.ltp ?? doc.ltp,
-        // Day's change (today's price move, NOT the holding's overall P&L) —
-        // needed for the Holdings screen's "LTP (day %)" row and the
-        // aggregate "Day's P&L" footer, same numbers real Kite shows.
         change: live?.change ?? 0,
         changePercent: live?.changePercent ?? 0,
     };
 }
 
+// ============ UNIFIED STUDENT PORTFOLIO ============
+app.get('/portfolio', async (req, res) => {
+    try {
+        const userId = req.user._id.toString();
+
+        // 1. Check Redis cache first (unless ?fresh=true or ?nocache=true)
+        if (!req.query.fresh && !req.query.nocache) {
+            const cached = await CacheService.getPortfolio(userId);
+            if (cached) {
+                return res.status(200).json(cached);
+            }
+        }
+
+        const [wallet, holdings, eqPositions, optPositions, closedPositions, userOrders] = await Promise.all([
+            WalletModel.findOne({ userId }).lean().catch(() => null),
+            HoldingsModel.find({ userId }).lean().catch(() => []),
+            PositionsModel.find({ userId }).lean().catch(() => []),
+            OptionPositionsModel.find({ userId }).lean().catch(() => []),
+            ClosedPositionModel.find({ userId }).sort({ closedAt: -1 }).lean().catch(() => []),
+            OrdersModel.find({ userId }).sort({ createdAt: -1 }).limit(50).lean().catch(() => [])
+        ]);
+
+        const safeHoldings = Array.isArray(holdings) ? holdings : [];
+        const safeEqPositions = Array.isArray(eqPositions) ? eqPositions : [];
+        const safeOptPositions = Array.isArray(optPositions) ? optPositions : [];
+        const safeClosedPositions = Array.isArray(closedPositions) ? closedPositions : [];
+        const safeUserOrders = Array.isArray(userOrders) ? userOrders : [];
+
+        const startingCapital = req.user.startingCapitalPaise ? req.user.startingCapitalPaise / 100 : (wallet?.balance || 500000);
+        const balance = wallet ? (wallet.balancePaise ? wallet.balancePaise / 100 : wallet.balance) : startingCapital;
+        const totalUsedMargin = Math.round((wallet?.usedMargin || 0) + (wallet?.misMargin || 0) + (wallet?.optionMargin || 0));
+        const availableMargin = wallet?.availableMargin ?? Math.max(0, balance - totalUsedMargin);
+        const usedMargin = totalUsedMargin;
+        const blockedMargin = wallet?.blockedMarginPaise ? wallet.blockedMarginPaise / 100 : (wallet?.blockedMargin || 0);
+
+        // Calculate realized PnL
+        let realizedPnl = safeClosedPositions.reduce((sum, c) => sum + (c?.pnl || 0), 0);
+        let winCount = safeClosedPositions.filter(c => (c?.pnl || 0) > 0).length;
+        const winRate = safeClosedPositions.length > 0 ? Math.round((winCount / safeClosedPositions.length) * 100) : 0;
+
+        // Calculate unrealized PnL across open positions
+        let unrealizedPnl = 0;
+        const enrichedEq = safeEqPositions.map(p => {
+            const live = marketDataService.getStockPrice(p.stockSymbol);
+            const avg = Number(p.avgPrice || 0);
+            const curPrice = Number(live?.ltp ?? (typeof p.ltp === 'number' ? p.ltp : avg));
+            const side = p.side || (p.quantity >= 0 ? 'BUY' : 'SELL');
+            const dir = side.toUpperCase() === 'BUY' ? 1 : -1;
+            const posPnl = Math.round((curPrice - avg) * (p.quantity || 1) * dir * 100) / 100;
+            unrealizedPnl += (isNaN(posPnl) ? 0 : posPnl);
+            const pnlPct = avg > 0 ? Math.round(((curPrice - avg) / avg) * dir * 10000) / 100 : 0;
+            return {
+                ...(p.toObject ? p.toObject() : p),
+                kind: 'equity',
+                side,
+                symbol: p.stockSymbol,
+                avgPrice: avg,
+                ltp: curPrice,
+                pnl: isNaN(posPnl) ? 0 : posPnl,
+                pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
+            };
+        });
+
+        const enrichedOpt = await Promise.all(safeOptPositions.map(async p => {
+            let rawLtp = null;
+            if (marketDataService.getOptionLTPSync && p.underlyingSymbol) {
+                rawLtp = marketDataService.getOptionLTPSync(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry);
+            }
+            if (!rawLtp && marketDataService.getOptionLTP && p.underlyingSymbol) {
+                try { rawLtp = await marketDataService.getOptionLTP(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry); } catch {}
+            }
+            const avg = Number(p.avgPremium || p.avgPrice || 100);
+            const curPrice = Number(typeof rawLtp === 'number' ? rawLtp : (rawLtp?.ltp ?? (typeof p.ltp === 'number' && p.ltp > 0 ? p.ltp : avg)));
+            const side = p.side || (p.quantity >= 0 ? 'BUY' : 'SELL');
+            const dir = side.toUpperCase() === 'BUY' ? 1 : -1;
+            const posPnl = Math.round((curPrice - avg) * (p.quantity || 1) * dir * 100) / 100;
+            unrealizedPnl += (isNaN(posPnl) ? 0 : posPnl);
+            const pnlPct = avg > 0 ? Math.round(((curPrice - avg) / avg) * dir * 10000) / 100 : 0;
+            return {
+                ...(p.toObject ? p.toObject() : p),
+                kind: 'option',
+                side,
+                symbol: `${p.underlyingSymbol || 'OPTION'} ${p.strikePrice || ''} ${p.optionType || ''}`.trim(),
+                contractSymbol: p.symbol,
+                stockSymbol: p.symbol,
+                productType: p.productType || 'NRML',
+                avgPrice: avg,
+                avgPremium: avg,
+                ltp: curPrice,
+                pnl: isNaN(posPnl) ? 0 : posPnl,
+                pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
+            };
+        }));
+
+        const enrichedHoldings = safeHoldings.map(h => {
+            const live = marketDataService.getStockPrice(h.stockSymbol);
+            const avg = Number(h.avgPrice || 0);
+            const curPrice = Number(live?.ltp ?? (typeof h.ltp === 'number' ? h.ltp : avg));
+            const posPnl = Math.round((curPrice - avg) * (h.quantity || 1) * 100) / 100;
+            unrealizedPnl += (isNaN(posPnl) ? 0 : posPnl);
+            const pnlPct = avg > 0 ? Math.round(((curPrice - avg) / avg) * 10000) / 100 : 0;
+            return {
+                ...(h.toObject ? h.toObject() : h),
+                kind: 'holding',
+                side: 'BUY',
+                symbol: h.stockSymbol,
+                stockSymbol: h.stockSymbol,
+                productType: 'CNC',
+                avgPrice: avg,
+                ltp: curPrice,
+                pnl: isNaN(posPnl) ? 0 : posPnl,
+                pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
+            };
+        });
+
+        const allOpenPositions = [...enrichedEq, ...enrichedOpt, ...enrichedHoldings];
+        const totalPnl = Math.round((realizedPnl + unrealizedPnl) * 100) / 100;
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const todayClosed = closedPositions.filter(c => c.dateStr === todayStr);
+        const todayRealized = todayClosed.reduce((sum, c) => sum + (c.pnl || 0), 0);
+        const todayPnl = Math.round((todayRealized + unrealizedPnl) * 100) / 100;
+
+        const portfolioPayload = {
+            success: true,
+            balance,
+            availableMargin,
+            usedMargin,
+            totalUsedMargin,
+            blockedMargin,
+            totalCapital: balance + blockedMargin,
+            startingCapital,
+            totalPnl,
+            pnl: totalPnl,
+            todayPnl,
+            realizedPnl: Math.round(realizedPnl * 100) / 100,
+            unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
+            winRate,
+            openPositionsCount: allOpenPositions.length,
+            totalTrades: userOrders.length,
+            positions: allOpenPositions,
+            closedTrades: closedPositions.slice(0, 50),
+            holdings: enrichedHoldings,
+            orders: userOrders.slice(0, 50)
+        };
+
+        // Cache in Redis for 30s to absorb rapid re-renders/polling
+        CacheService.setPortfolio(userId, portfolioPayload, 30).catch(() => {});
+
+        res.status(200).json(portfolioPayload);
+    } catch (err) {
+        console.error('[Portfolio API Error]:', err);
+        res.status(500).json({ message: 'Error fetching portfolio', error: err.message });
+    }
+});
+
+// ============ COMBINED DASHBOARD SUMMARY (ZERO REDUNDANT CALLS) ============
+app.get('/dashboard-summary', async (req, res) => {
+    try {
+        const userId = req.user._id.toString();
+
+        // Check Redis cache (5s TTL)
+        if (!req.query.fresh && !req.query.nocache) {
+            const cached = await CacheService.getDashboardSummary(userId);
+            if (cached) return res.status(200).json(cached);
+        }
+
+        const dateStr = require('./marketRules').istDateStr();
+        const { NotificationModel } = require('./model/NotificationModel');
+        const { PLRecordModel } = require('./model/PLRecordModel');
+
+        const [wallet, closedTrades, eqPositions, optPositions, notifs, plRecords] = await Promise.all([
+            WalletModel.findOne({ userId }).lean(),
+            ClosedPositionModel.find({ userId }).sort({ closedAt: -1 }).limit(50).lean(),
+            PositionsModel.find({ userId }).lean(),
+            OptionPositionsModel.find({ userId }).lean(),
+            NotificationModel ? NotificationModel.find({ userId }).sort({ createdAt: -1 }).limit(20).lean() : [],
+            PLRecordModel ? PLRecordModel.find({ userId }).sort({ date: -1 }).limit(7).lean() : []
+        ]);
+
+        const startingCapital = req.user.startingCapitalPaise ? req.user.startingCapitalPaise / 100 : (wallet?.balance || 500000);
+        const balance = wallet ? (wallet.balancePaise ? wallet.balancePaise / 100 : wallet.balance) : startingCapital;
+        const totalUsedMargin = Math.round((wallet?.usedMargin || 0) + (wallet?.misMargin || 0) + (wallet?.optionMargin || 0));
+        const blockedMargin = wallet?.blockedMarginPaise ? wallet.blockedMarginPaise / 100 : (wallet?.blockedMargin || 0);
+        const availableMargin = (wallet && typeof wallet.availableMargin === 'number' && wallet.availableMargin > 0)
+            ? wallet.availableMargin
+            : Math.max(0, balance - totalUsedMargin - blockedMargin);
+        const usedMargin = totalUsedMargin;
+
+        let realizedPnl = closedTrades.reduce((sum, c) => sum + (c.pnl || 0), 0);
+        const todayClosed = closedTrades.filter(c => c.dateStr === dateStr || (c.closedAt && new Date(c.closedAt).toISOString().slice(0, 10) === dateStr));
+        const todayRealized = todayClosed.reduce((sum, c) => sum + (c.pnl || 0), 0);
+
+        let winCount = closedTrades.filter(c => (c.pnl || 0) > 0).length;
+        const winRate = closedTrades.length > 0 ? Math.round((winCount / closedTrades.length) * 100) : 0;
+
+        let unrealizedPnl = 0;
+        for (const p of eqPositions) {
+            const live = marketDataService.getStockPrice(p.stockSymbol);
+            const avg = Number(p.avgPrice || 0);
+            const cur = Number(live?.ltp ?? p.ltp ?? avg);
+            const dir = (p.side || 'BUY').toUpperCase() === 'BUY' ? 1 : -1;
+            unrealizedPnl += Math.round((cur - avg) * (p.quantity || 1) * dir * 100) / 100;
+        }
+        for (const p of optPositions) {
+            let liveLtp = marketDataService.getOptionLTPSync ? marketDataService.getOptionLTPSync(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry) : null;
+            if (!liveLtp && marketDataService.getOptionLTP) {
+                try { liveLtp = await marketDataService.getOptionLTP(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry); } catch {}
+            }
+            const avg = Number(p.avgPremium || p.avgPrice || 100);
+            const cur = Number(typeof liveLtp === 'number' ? liveLtp : (liveLtp?.ltp ?? (typeof p.ltp === 'number' ? p.ltp : avg)));
+            const dir = (p.side || 'BUY').toUpperCase() === 'BUY' ? 1 : -1;
+            const diff = Math.round((cur - avg) * (p.quantity || 1) * dir * 100) / 100;
+            unrealizedPnl += isNaN(diff) ? 0 : diff;
+        }
+
+        const totalPnl = Math.round((realizedPnl + unrealizedPnl) * 100) / 100;
+        const todayPnl = Math.round((todayRealized + unrealizedPnl) * 100) / 100;
+
+        const unreadNotifs = (notifs || []).filter(n => !n.read).length;
+        const latestRisk = (notifs || []).find(n => n.type === 'RISK' && !n.read);
+
+        const timeline = (plRecords || []).map(r => ({
+            date: r.dateStr || (r.date ? new Date(r.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : ''),
+            pnl: (r.netPnl || 0) / 100,
+        }));
+
+        const indexes = marketDataService.getIndexData ? marketDataService.getIndexData() : {};
+
+        const summary = {
+            success: true,
+            balance,
+            availableMargin,
+            usedMargin,
+            blockedMargin,
+            totalPnl,
+            todayPnl,
+            winRate,
+            openPositionsCount: eqPositions.length + optPositions.length,
+            portfolio: {
+                balance,
+                availableMargin,
+                usedMargin,
+                blockedMargin,
+                totalPnl,
+                todayPnl,
+                winRate,
+                openPositionsCount: eqPositions.length + optPositions.length,
+            },
+            indexes,
+            unreadNotifs,
+            riskAlert: latestRisk ? { message: latestRisk.message, isHardStop: latestRisk.message?.toLowerCase().includes('max loss') } : null,
+            pnlTimeline: timeline,
+            timestamp: Date.now()
+        };
+
+        CacheService.setDashboardSummary(userId, summary, 5).catch(() => {});
+        res.status(200).json(summary);
+    } catch (err) {
+        console.error('[DashboardSummary Error]:', err);
+        res.status(500).json({ message: 'Error generating dashboard summary', error: err.message });
+    }
+});
+
 // ============ HOLDINGS ============
 app.get('/allHoldings', async (req, res) => {
     try {
-        const allHoldings = await HoldingsModel.find({});
+        const allHoldings = await HoldingsModel.find({ userId: req.user._id });
         res.status(200).json(allHoldings.map(withLiveLtp));
     } catch (err) {
         res.status(500).json({ message: 'Error fetching holdings', error: err.message });
@@ -86,15 +550,32 @@ app.get('/allHoldings', async (req, res) => {
 // market on the still-open quantity) for one equity position.
 async function enrichEquityPosition(doc) {
     const p = withLiveLtp(doc);
-    const unrealizedPnl = Math.round((p.ltp - p.avgPrice) * p.quantity * 100) / 100;
-    const realizedPnl   = await computeRealizedPnlToday(p.stockSymbol, p.productType);
-    return { ...p, unrealizedPnl, realizedPnl, pnl: Math.round((unrealizedPnl + realizedPnl) * 100) / 100 };
+    const side = p.side || (p.quantity >= 0 ? 'BUY' : 'SELL');
+    const dir = side.toUpperCase() === 'BUY' ? 1 : -1;
+    const unrealizedPnl = Math.round((p.ltp - p.avgPrice) * p.quantity * dir * 100) / 100;
+    const realizedPnl   = await computeRealizedPnlToday(doc.userId, p.stockSymbol, p.productType);
+    return {
+        ...p,
+        kind: 'equity',
+        symbol: p.stockSymbol,
+        side,
+        avgPrice: p.avgPrice,
+        productType: p.productType || 'MIS',
+        unrealizedPnl,
+        realizedPnl,
+        pnl: Math.round((unrealizedPnl + realizedPnl) * 100) / 100
+    };
 }
 
-app.get('/allPositions', async (req, res) => {
+app.get(['/allPositions', '/positions'], async (req, res) => {
     try {
-        const allPositions = await PositionsModel.find({});
-        res.status(200).json(await Promise.all(allPositions.map(enrichEquityPosition)));
+        const [allPositions, optPositions] = await Promise.all([
+            PositionsModel.find({ userId: req.user._id }),
+            OptionPositionsModel.find({ userId: req.user._id })
+        ]);
+        const enrichedEq = await Promise.all(allPositions.map(enrichEquityPosition));
+        const enrichedOpt = await enrichOptionPositions(req.user._id, optPositions);
+        res.status(200).json([...enrichedEq, ...enrichedOpt]);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching positions', error: err.message });
     }
@@ -106,12 +587,12 @@ app.get('/allPositions', async (req, res) => {
 app.get('/positions/dayPnl', async (req, res) => {
     try {
         const [equityPositions, optionPositionsRaw, totalRealizedPnl] = await Promise.all([
-            PositionsModel.find({}),
-            OptionPositionsModel.find({}),
-            computeTotalRealizedPnlToday(),
+            PositionsModel.find({ userId: req.user._id }),
+            OptionPositionsModel.find({ userId: req.user._id }),
+            computeTotalRealizedPnlToday(req.user._id),
         ]);
         const equity  = await Promise.all(equityPositions.map(enrichEquityPosition));
-        const options = await enrichOptionPositions(optionPositionsRaw);
+        const options = await enrichOptionPositions(req.user._id, optionPositionsRaw);
         const totalUnrealizedPnl = Math.round(
             (equity.reduce((s, p) => s + p.unrealizedPnl, 0) + options.reduce((s, p) => s + p.unrealizedPnl, 0)) * 100
         ) / 100;
@@ -131,7 +612,7 @@ app.get('/positions/dayPnl', async (req, res) => {
 app.get('/closedPositions', async (req, res) => {
     try {
         const { dateStr } = istDayRange();
-        const closed = await ClosedPositionModel.find({ dateStr: req.query.date || dateStr })
+        const closed = await ClosedPositionModel.find({ userId: req.user._id, dateStr: req.query.date || dateStr })
             .sort({ closedAt: -1 }).lean();
         const withLtp = await Promise.all(closed.map(async (c) => {
             if (c.kind === 'option' && c.underlyingSymbol) {
@@ -150,29 +631,104 @@ app.get('/closedPositions', async (req, res) => {
 // Square off (fully or partially close) an equity MIS/NRML position at the
 // current live LTP — the long-press "Square off" action in the app.
 app.post('/positions/:id/squareoff', async (req, res) => {
-    if (!isMarketOpen()) {
-        return res.status(400).json({
-            message: 'Market is closed',
-            detail: 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.',
-            marketClosed: true,
-        });
-    }
     try {
-        const position = await PositionsModel.findById(req.params.id);
+        let position = await PositionsModel.findById(req.params.id);
+        let isHolding = false;
+        if (!position) {
+            position = await HoldingsModel.findById(req.params.id);
+            if (position) isHolding = true;
+        }
         if (!position) return res.status(404).json({ message: 'Position not found' });
 
-        const isShort = position.quantity < 0;
+        if (req.user.role === 'STUDENT' && position.userId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: 'Unauthorized to square off this position' });
+        }
+
+        const isShort = isHolding ? false : position.quantity < 0;
         const side = isShort ? 'BUY' : 'SELL'; // cover a short, exit a long
-        const requestedQty = req.body?.quantity ? Number(req.body.quantity) : Math.abs(position.quantity);
-        const quantity = Math.min(requestedQty, Math.abs(position.quantity));
+        const positionQty = isHolding ? position.quantity : Math.abs(position.quantity);
+        const requestedQty = req.body?.quantity ? Number(req.body.quantity) : positionQty;
+        const quantity = Math.min(requestedQty, positionQty);
+        const productType = isHolding ? 'CNC' : position.productType;
 
         const liveLtp = marketDataService.getStockPrice(position.stockSymbol)?.ltp ?? position.ltp;
 
-        const result = await orderEngine.placeOrder({
+        const result = await orderEngine.placeOrder(position.userId, {
             stockSymbol: position.stockSymbol, quantity, price: liveLtp,
-            type: 'MARKET', side, productType: position.productType,
+            type: 'MARKET', side, productType,
         });
+        CacheService.invalidatePortfolio(position.userId.toString()).catch(() => {});
         res.status(201).json({ message: 'Position squared off', order: result.order, trade: result.trade });
+
+    } catch (err) {
+        if (err instanceof orderEngine.OrderRejectedError) return res.status(400).json({ message: err.message });
+        res.status(500).json({ message: 'Error squaring off position', error: err.message });
+    }
+});
+
+// Universal Square-Off endpoint (POST /trade/square-off)
+// Supports Option, Equity, and Holding positions with auto-detection
+app.post('/trade/square-off', async (req, res) => {
+    try {
+        const targetId = req.body?.positionId || req.body?.id;
+        if (!targetId) return res.status(400).json({ message: 'positionId is required' });
+
+        const userIdStr = req.user._id.toString();
+
+        // 1. Try Option position first
+        const optPos = await OptionPositionsModel.findById(targetId);
+        if (optPos) {
+            if (req.user.role === 'STUDENT' && optPos.userId.toString() !== userIdStr) {
+                return res.status(403).json({ message: 'Unauthorized to square off this position' });
+            }
+            const isShort = optPos.quantity < 0;
+            const action  = isShort ? 'BUY' : 'SELL';
+            const requestedLots = req.body?.lots ? Number(req.body.lots) : Math.abs(optPos.lots || 1);
+            const lots = Math.min(requestedLots, Math.abs(optPos.lots || 1));
+
+            const rawLive = await getLiveOptionLTP(optPos.underlyingSymbol, optPos.strikePrice, optPos.optionType, optPos.expiry);
+            let premium = typeof rawLive === 'number' ? rawLive : (rawLive?.ltp ?? (typeof optPos.ltp === 'number' ? optPos.ltp : (optPos.ltp?.ltp ?? optPos.avgPremium ?? 100)));
+            if (!Number.isFinite(Number(premium)) || Number(premium) <= 0) {
+                premium = Number(optPos.avgPremium || 100);
+            }
+
+            const result = await executeOptionOrder(optPos.userId, {
+                underlyingSymbol: optPos.underlyingSymbol, strikePrice: optPos.strikePrice,
+                optionType: optPos.optionType, expiry: optPos.expiry,
+                lots, premium, action,
+            });
+            CacheService.invalidatePortfolio(userIdStr).catch(() => {});
+            return res.status(result.status).json(result.body);
+        }
+
+        // 2. Try Equity or Holding position
+        let eqPos = await PositionsModel.findById(targetId);
+        let isHolding = false;
+        if (!eqPos) {
+            eqPos = await HoldingsModel.findById(targetId);
+            if (eqPos) isHolding = true;
+        }
+        if (!eqPos) return res.status(404).json({ message: 'Position not found' });
+
+        if (req.user.role === 'STUDENT' && eqPos.userId.toString() !== userIdStr) {
+            return res.status(403).json({ message: 'Unauthorized to square off this position' });
+        }
+
+        const isShort = isHolding ? false : eqPos.quantity < 0;
+        const side = isShort ? 'BUY' : 'SELL';
+        const positionQty = isHolding ? eqPos.quantity : Math.abs(eqPos.quantity);
+        const requestedQty = req.body?.quantity ? Number(req.body.quantity) : positionQty;
+        const quantity = Math.min(requestedQty, positionQty);
+        const productType = isHolding ? 'CNC' : eqPos.productType;
+        const liveLtp = marketDataService.getStockPrice(eqPos.stockSymbol)?.ltp ?? eqPos.ltp;
+
+        const result = await orderEngine.placeOrder(eqPos.userId, {
+            stockSymbol: eqPos.stockSymbol, quantity, price: liveLtp,
+            type: 'MARKET', side, productType,
+        });
+        CacheService.invalidatePortfolio(userIdStr).catch(() => {});
+        return res.status(201).json({ message: 'Position squared off', order: result.order, trade: result.trade });
+
     } catch (err) {
         if (err instanceof orderEngine.OrderRejectedError) return res.status(400).json({ message: err.message });
         res.status(500).json({ message: 'Error squaring off position', error: err.message });
@@ -180,12 +736,36 @@ app.post('/positions/:id/squareoff', async (req, res) => {
 });
 
 // ============ ORDERS ============
-// Orders "vanish" at every new trading day: the API only returns orders
-// placed today (IST); the daily prep job deletes older ones from the DB.
-app.get('/allOrders', async (req, res) => {
+// Orders strictly scoped to authenticated user, supporting optional status filter
+app.get(['/allOrders', '/orders'], async (req, res) => {
     try {
-        const { start } = istDayRange();
-        const allOrders = await OrdersModel.find({ createdAt: { $gte: start } }).sort({ createdAt: -1 });
+        const query = { userId: req.user._id };
+        if (req.query.status) {
+            query.status = req.query.status.toUpperCase();
+        }
+        if (req.query.today === 'true') {
+            const { start } = istDayRange();
+            query.createdAt = { $gte: start };
+        }
+        const page = req.query.page ? Math.max(1, parseInt(req.query.page, 10)) : null;
+        const limit = req.query.limit ? Math.min(200, Math.max(1, parseInt(req.query.limit, 10))) : (page ? 20 : 200);
+
+        if (page) {
+            const skip = (page - 1) * limit;
+            const [orders, total] = await Promise.all([
+                OrdersModel.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+                OrdersModel.countDocuments(query)
+            ]);
+            return res.status(200).json({
+                data: orders,
+                page,
+                limit,
+                total,
+                totalPages: Math.ceil(total / limit)
+            });
+        }
+
+        const allOrders = await OrdersModel.find(query).sort({ createdAt: -1 }).limit(limit).lean();
         res.status(200).json(allOrders);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching orders', error: err.message });
@@ -194,9 +774,18 @@ app.get('/allOrders', async (req, res) => {
 
 // NSE market hours: Mon–Fri 09:15 IST start, excluding NSE holidays — single
 // source of truth lives in marketRules.js (was duplicated inline before).
-// Default (no arg) is the cash-equity close of 15:30; F&O routes pass 'FO'
-// for the 15:40 close (extended 2026-08-03 alongside the new CAS auction).
 const isMarketOpen = rules.isMarketOpen;
+const isActualMarketHours = rules.isActualMarketHours;
+
+function isLiveMarketActive(segment = 'FO') {
+    try {
+        const marketControlService = require('./services/marketControlService');
+        const state = marketControlService.getMarketState ? marketControlService.getMarketState() : null;
+        if (state?.isHalted) return false;
+        if (state?.mode === 'SYNTHETIC' || state?.mode === 'REPLAY') return true;
+    } catch { /* ignore */ }
+    return isActualMarketHours(segment);
+}
 
 // Today's date boundaries in IST (works regardless of server timezone)
 function istDayRange(d = new Date()) {
@@ -213,10 +802,10 @@ function istDayRange(d = new Date()) {
 // net quantity — it has no memory of round-trips already closed earlier
 // today. "Realised" P&L for the position screen has to come from FIFO-
 // matching today's actual BUY/SELL trade log for that exact symbol.
-async function computeRealizedPnlToday(stockSymbol, productType) {
+async function computeRealizedPnlToday(userId, stockSymbol, productType) {
     const { start, end } = istDayRange();
     const trades = await TradeModel.find({
-        stockSymbol, productType, createdAt: { $gte: start, $lte: end },
+        userId, stockSymbol, productType, createdAt: { $gte: start, $lte: end },
     }).sort({ createdAt: 1 }).lean();
 
     const buyQueue = trades.filter(t => t.side === 'BUY').map(b => ({ price: b.price, remaining: b.quantity }));
@@ -245,9 +834,9 @@ async function computeRealizedPnlToday(stockSymbol, productType) {
 // too, so it's computed from the full trade log for today — independent of
 // which positions are still open — rather than summed off currently-open
 // position docs.
-async function computeTotalRealizedPnlToday() {
+async function computeTotalRealizedPnlToday(userId) {
     const { start, end } = istDayRange();
-    const trades = await TradeModel.find({ createdAt: { $gte: start, $lte: end } })
+    const trades = await TradeModel.find({ userId, createdAt: { $gte: start, $lte: end } })
         .select('stockSymbol productType').lean();
 
     const seen = new Set();
@@ -256,17 +845,17 @@ async function computeTotalRealizedPnlToday() {
         const key = `${t.stockSymbol}|${t.productType}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        total += await computeRealizedPnlToday(t.stockSymbol, t.productType);
+        total += await computeRealizedPnlToday(userId, t.stockSymbol, t.productType);
     }
     return Math.round(total * 100) / 100;
 }
 
 // Frozen snapshot for the Positions screen's "squared off" section — see
 // orderEngine.recordClosedEquityPosition for the equity-side counterpart.
-async function recordClosedOptionPosition({ symbol, productType, quantity, lots, avgPrice, exitPrice, pnl, underlyingSymbol, strikePrice, optionType, expiry }) {
+async function recordClosedOptionPosition({ userId, symbol, productType, quantity, lots, avgPrice, exitPrice, pnl, underlyingSymbol, strikePrice, optionType, expiry }) {
     try {
         await new ClosedPositionModel({
-            kind: 'option', symbol, productType, quantity, lots, avgPrice, exitPrice,
+            userId, kind: 'option', symbol, productType, quantity, lots, avgPrice, exitPrice,
             pnl: Math.round(pnl * 100) / 100, dateStr: istDayRange().dateStr,
             underlyingSymbol, strikePrice, optionType, expiry,
         }).save();
@@ -277,34 +866,38 @@ async function recordClosedOptionPosition({ symbol, productType, quantity, lots,
 // picked up by orderEngine.evaluatePendingOrders() on the next market tick —
 // a real resting order book instead of "everything fills immediately".
 app.post('/newOrder', async (req, res) => {
-    const { stockSymbol, qty: quantity, price, mode: type, triggerPrice, side, productType, exchange } = req.body;
+    let userBatchId = req.user?.batchId;
+    if (!userBatchId && req.user?._id) {
+        const { EnrollmentModel } = require('./model/EnrollmentModel');
+        const enr = await EnrollmentModel.findOne({ userId: req.user._id, status: 'ACTIVE' });
+        userBatchId = enr?.batchId;
+    }
+    const haltCheck = await marketControlService.isBatchHalted(userBatchId);
+    if (haltCheck.isHalted) {
+        return res.status(403).json({ message: `Trading is halted: ${haltCheck.reason || 'Trading paused'}` });
+    }
+
+    const { stockSymbol, triggerPrice, side, productType, exchange } = req.body;
+    const quantity = req.body.qty ?? req.body.quantity;
+    const type = req.body.mode ?? req.body.orderType;
+    let price = req.body.price;
+    if (!price || Number(price) <= 0) {
+        const live = marketDataService.getStockPrice(stockSymbol);
+        price = live?.ltp || 1000;
+    }
 
     if (!stockSymbol || !quantity || !price) {
         return res.status(400).json({ message: 'Missing required fields: stockSymbol, qty, price' });
     }
-    // `!quantity`/`!price` above only reject 0/null/undefined — a negative
-    // quantity is truthy and sails through. For SELL orders that's a real
-    // exploit: applyEquityFillCNC's `quantity > holding.quantity` oversell
-    // guard is trivially satisfied by a negative number, and `holding.quantity
-    // -= quantity` then *adds* shares for free (checkFunds is also skipped
-    // entirely for non-BUY sides, so there's no funds gate to catch it either).
     if (!Number.isFinite(Number(quantity)) || Number(quantity) <= 0 || !Number.isFinite(Number(price)) || Number(price) <= 0) {
         return res.status(400).json({ message: 'qty and price must be positive numbers' });
-    }
-
-    if (!isMarketOpen()) {
-        return res.status(400).json({
-            message: 'Market is closed',
-            detail: 'NSE trading hours: Mon–Fri, 9:15 AM – 3:30 PM IST.',
-            marketClosed: true,
-        });
     }
 
     try {
         marketDataService.trackSymbol(stockSymbol);
         const orderType = ['MARKET', 'LIMIT', 'SL', 'SLM'].includes(type) ? type : 'MARKET';
 
-        const result = await orderEngine.placeOrder({
+        const result = await orderEngine.placeOrder(req.user._id, {
             stockSymbol, quantity, price, triggerPrice,
             type: orderType, side: side || 'BUY',
             productType: productType || 'CNC', exchange,
@@ -335,6 +928,9 @@ app.patch('/orders/:id', async (req, res) => {
     try {
         const order = await OrdersModel.findById(req.params.id);
         if (!order) return res.status(404).json({ message: 'Order not found' });
+        if (req.user.role === 'STUDENT' && order.userId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: 'Unauthorized to modify this order' });
+        }
         if (order.status !== 'PENDING') {
             return res.status(400).json({ message: `Cannot modify a ${order.status.toLowerCase()} order` });
         }
@@ -349,7 +945,8 @@ app.patch('/orders/:id', async (req, res) => {
         if (triggerPrice != null) order.triggerPrice = Number(triggerPrice);
         order.slTriggered = false; // re-arm SL if trigger/price changed
         await order.save();
-        io.emit('orderModified', { order: order.toObject() });
+        io.to(`user:${order.userId}`).emit('orderModified', { order: order.toObject ? order.toObject() : order });
+
         res.json({ message: 'Order modified', order });
     } catch (err) {
         res.status(500).json({ message: 'Error modifying order', error: err.message });
@@ -362,7 +959,7 @@ app.patch('/orders/:id', async (req, res) => {
 // rest as PENDING, exactly like placing them one at a time.
 app.get('/baskets', async (req, res) => {
     try {
-        res.json(await BasketModel.find({}).sort({ createdAt: -1 }));
+        res.json(await BasketModel.find({ userId: req.user._id }).sort({ createdAt: -1 }));
     } catch (err) {
         res.status(500).json({ message: 'Error fetching baskets', error: err.message });
     }
@@ -375,6 +972,7 @@ app.post('/baskets', async (req, res) => {
     }
     try {
         const basket = new BasketModel({
+            userId: req.user._id,
             name,
             legs: legs.map(l => ({
                 stockSymbol: String(l.stockSymbol).toUpperCase(),
@@ -413,7 +1011,7 @@ app.post('/baskets/:id/execute', async (req, res) => {
         for (const leg of basket.legs) {
             try {
                 marketDataService.trackSymbol(leg.stockSymbol);
-                const result = await orderEngine.placeOrder({
+                const result = await orderEngine.placeOrder(req.user._id, {
                     stockSymbol: leg.stockSymbol, quantity: leg.quantity, price: leg.price,
                     triggerPrice: leg.triggerPrice, type: leg.type, side: leg.side,
                     productType: leg.productType, exchange: leg.exchange,
@@ -457,13 +1055,13 @@ app.post('/newCoverOrder', async (req, res) => {
         const ltp = marketDataService.getStockPrice(stockSymbol.toUpperCase())?.ltp ?? Number(price);
         const notional = Number(quantity) * ltp;
         const required = notional / COVER_ORDER_LEVERAGE;
-        const wallet = await WalletModel.findOne({});
+        const wallet = await WalletModel.findOne({ userId: req.user._id });
         if (!wallet || wallet.availableMargin < required) {
             return res.status(400).json({ message: 'Insufficient funds for cover order', required, available: wallet?.availableMargin ?? 0 });
         }
 
         // Main leg — always MARKET, always MIS (cover orders are intraday-only)
-        const mainResult = await orderEngine.placeOrder({
+        const mainResult = await orderEngine.placeOrder(req.user._id, {
             stockSymbol, quantity, price: ltp, type: 'MARKET', side,
             productType: 'MIS', exchange,
         });
@@ -473,6 +1071,7 @@ app.post('/newCoverOrder', async (req, res) => {
         // Compulsory SL-M exit leg, opposite side, rests until the stop is hit
         const slSide = side === 'BUY' ? 'SELL' : 'BUY';
         const slOrder = new OrdersModel({
+            userId: req.user._id,
             stockSymbol: stockSymbol.toUpperCase(), quantity: Number(quantity),
             price: Number(stopLossTriggerPrice), triggerPrice: Number(stopLossTriggerPrice),
             type: 'SLM', side: slSide, productType: 'MIS', exchange: exchange || 'NSE',
@@ -482,8 +1081,9 @@ app.post('/newCoverOrder', async (req, res) => {
         mainResult.order.linkedOrderId = slOrder._id;
         await mainResult.order.save();
 
-        io.emit('coverOrderPlaced', { mainOrder: mainResult.order, slOrder });
+        io.to(`user:${req.user._id}`).emit('coverOrderPlaced', { mainOrder: mainResult.order, slOrder });
         res.status(201).json({ message: 'Cover order placed', mainOrder: mainResult.order, slOrder, trade: mainResult.trade });
+
     } catch (err) {
         if (err instanceof orderEngine.OrderRejectedError) return res.status(400).json({ message: err.message });
         res.status(500).json({ message: 'Error placing cover order', error: err.message });
@@ -493,7 +1093,14 @@ app.post('/newCoverOrder', async (req, res) => {
 // ============ TRADES ============
 app.get('/trades', async (req, res) => {
     try {
-        const trades = await TradeModel.find({}).sort({ createdAt: -1 });
+        const { from, to } = req.query;
+        let query = { userId: req.user._id };
+        if (from || to) {
+            query.createdAt = {};
+            if (from) query.createdAt.$gte = new Date(from);
+            if (to) query.createdAt.$lte = new Date(new Date(to).setHours(23, 59, 59, 999));
+        }
+        const trades = await TradeModel.find(query).sort({ createdAt: -1 });
         res.status(200).json(trades);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching trades', error: err.message });
@@ -524,7 +1131,7 @@ app.get('/pnl', async (req, res) => {
             mutualfunds:  ['CNC'],
         };
 
-        const tradeQuery = {};
+        const tradeQuery = { userId: req.user._id };
         if (Object.keys(dateFilter).length > 0) tradeQuery.createdAt = dateFilter;
 
         const segKey = (segment || '').toLowerCase().replace(/\s+/g, '');
@@ -596,9 +1203,9 @@ app.get('/pnl', async (req, res) => {
         });
 
         // Unrealized P&L from current holdings
-        let holdingsQuery = {};
-        if (segKey === 'equity') holdingsQuery = { productType: { $in: ['CNC'] } };
-        else if (segKey === 'mtf')  holdingsQuery = { productType: 'MIS' };
+        let holdingsQuery = { userId: req.user._id };
+        if (segKey === 'equity') holdingsQuery.productType = { $in: ['CNC'] };
+        else if (segKey === 'mtf')  holdingsQuery.productType = 'MIS';
 
         const holdings = (await HoldingsModel.find(holdingsQuery)).map(withLiveLtp);
         const totalInvestment = holdings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
@@ -645,7 +1252,7 @@ function detectSegment(symbol) {
 app.get('/pnl/records', async (req, res) => {
     try {
         const { segment, from, to, page = 1, limit = 50 } = req.query;
-        const query = {};
+        const query = { userId: req.user._id };
         if (from) query.tradeDate = { ...query.tradeDate, $gte: new Date(from) };
         if (to)   query.tradeDate = { ...query.tradeDate, $lte: new Date(to + 'T23:59:59.999Z') };
         const segKey = (segment || '').toLowerCase();
@@ -677,9 +1284,10 @@ app.get('/pnl/records', async (req, res) => {
         // other segments (fno, currency, commodity, …) have none.
         let unrealizedPL = 0;
         if (segKey === '' || segKey === 'combined' || segKey === 'equity') {
-            const holdings = (await HoldingsModel.find(
-                segKey === 'equity' ? { productType: 'CNC' } : {}
-            )).map(withLiveLtp);
+            const holdings = (await HoldingsModel.find({
+                userId: req.user._id,
+                ...(segKey === 'equity' ? { productType: 'CNC' } : {})
+            })).map(withLiveLtp);
             unrealizedPL = holdings.reduce((s, h) => s + (h.ltp - h.avgPrice) * h.quantity, 0);
         }
 
@@ -728,10 +1336,11 @@ app.post('/pnl/seed', async (req, res) => {
         }
 
         if (clear) {
-            await PLRecordModel.deleteMany({ source: 'import' });
+            await PLRecordModel.deleteMany({ userId: req.user._id, source: 'import' });
         }
 
         const docs = records.map(r => ({
+            userId:        req.user._id,
             tradeDate:     new Date(r.tradeDate),
             symbol:        String(r.symbol).toUpperCase(),
             quantity:      Number(r.quantity),
@@ -756,9 +1365,9 @@ app.post('/pnl/seed', async (req, res) => {
 app.get('/pnl/summary', async (req, res) => {
     try {
         const { from, to } = req.query;
-        const match = {};
+        const match = { userId: req.user._id };
         if (from) match.tradeDate = { $gte: new Date(from) };
-        if (to)   match.tradeDate = { ...match.tradeDate, $lte: new Date(to + 'T23:59:59.999Z') };
+        if (to)   match.tradeDate = { $lte: new Date(to + 'T23:59:59.999Z') };
 
         const [agg] = await PLRecordModel.aggregate([
             { $match: match },
@@ -784,9 +1393,9 @@ app.get('/pnl/charges', async (req, res) => {
         const { from, to, segment } = req.query;
 
         // Real per-component charges aggregated from the seeded trade sheet (PLRecords)
-        const query = {};
-        if (from) query.tradeDate = { ...query.tradeDate, $gte: new Date(from) };
-        if (to)   query.tradeDate = { ...query.tradeDate, $lte: new Date(to + 'T23:59:59.999Z') };
+        const query = { userId: req.user._id };
+        if (from) query.tradeDate = { $gte: new Date(from) };
+        if (to)   query.tradeDate = { $lte: new Date(to + 'T23:59:59.999Z') };
         const segKey = (segment || '').toLowerCase();
         if (segKey && segKey !== 'combined') query.segment = segKey;
 
@@ -836,9 +1445,9 @@ app.get('/pnl/monthly-breakdown', async (req, res) => {
     try {
         const { from, to, segment, initialBalance = '34000000' } = req.query;
 
-        const match = {};
+        const match = { userId: req.user._id };
         if (from) match.tradeDate = { $gte: new Date(from) };
-        if (to)   match.tradeDate = { ...match.tradeDate, $lte: new Date(to + 'T23:59:59.999Z') };
+        if (to)   match.tradeDate = { $lte: new Date(to + 'T23:59:59.999Z') };
         const segKey = (segment || '').toLowerCase();
         if (segKey && segKey !== 'combined') match.segment = segKey;
 
@@ -906,7 +1515,7 @@ app.post('/tax-pnl/seed-equity', async (req, res) => {
     }
     try {
         // Remove old equity trades first
-        await TradeModel.deleteMany({ productType: 'CNC' });
+        await TradeModel.deleteMany({ userId: req.user._id, productType: 'CNC' });
 
         const equityTrades = [
             // STCG trades (held < 365 days) — FY 2025-26
@@ -933,6 +1542,7 @@ app.post('/tax-pnl/seed-equity', async (req, res) => {
             const buyTime  = new Date(t.buyDate  + 'T09:15:00.000Z');
             const sellTime = new Date(t.sellDate + 'T15:20:00.000Z');
             docs.push({
+                userId: req.user._id,
                 stockSymbol: t.sym, quantity: t.qty, price: t.buyPrice,
                 side: 'BUY', productType: 'CNC',
                 charges: parseFloat((t.charges * 0.3).toFixed(2)),
@@ -940,6 +1550,7 @@ app.post('/tax-pnl/seed-equity', async (req, res) => {
                 createdAt: buyTime, updatedAt: buyTime,
             });
             docs.push({
+                userId: req.user._id,
                 stockSymbol: t.sym, quantity: t.qty, price: t.sellPrice,
                 side: 'SELL', productType: 'CNC',
                 charges: parseFloat((t.charges * 0.7).toFixed(2)),
@@ -977,12 +1588,13 @@ app.get('/tax-pnl', async (req, res) => {
 
         // All SELL trades within FY (these are realization events)
         const sells = await TradeModel.find({
+            userId: req.user._id,
             side: 'SELL',
             createdAt: { $gte: fyFrom, $lte: fyTo },
         }).lean().sort({ createdAt: 1 });
 
         // All BUY trades (need full history for FIFO lot matching)
-        const allBuys = await TradeModel.find({ side: 'BUY' }).lean().sort({ createdAt: 1 });
+        const allBuys = await TradeModel.find({ userId: req.user._id, side: 'BUY' }).lean().sort({ createdAt: 1 });
 
         // Group buys by symbol → FIFO queue
         const buyQueues = {};
@@ -1132,31 +1744,485 @@ app.get('/tax-pnl', async (req, res) => {
 // ============ WALLET ============
 app.get('/wallet', async (req, res) => {
     try {
-        // Atomic get-or-create: the previous find-then-conditionally-create
-        // pattern had a TOCTOU window — two concurrent requests hitting an
-        // empty wallet collection could both pass `!wallet` before either
-        // saved, creating two wallet documents (every other route's blind
-        // `findOne({})` would then non-deterministically pick either one).
-        // `findOneAndUpdate` + upsert does the check-and-create in one
-        // atomic op instead of two round trips.
-        let wallet = await WalletModel.findOneAndUpdate(
-            {},
-            { $setOnInsert: { balance: 100000, usedMargin: 0, blockedMargin: 0, availableMargin: 100000 } },
-            { upsert: true, new: true }
-        );
-        // Blocked margin (funds reserved by resting PENDING orders) is
-        // recomputed fresh on every read so it can never drift.
+        const uid = req.user._id;
+        let wallet = await WalletModel.findOne({ userId: uid });
+        if (!wallet) {
+            const { EnrollmentModel } = require('./model/EnrollmentModel');
+            const enrollment = await EnrollmentModel.findOne({ userId: uid, status: 'ACTIVE' }).populate('batchId');
+            const capPaise = enrollment?.batchId?.startingCapitalPaise || 10000000;
+            const capRupees = capPaise / 100;
+            wallet = await WalletModel.create({
+                userId: uid,
+                balance: capRupees,
+                balancePaise: capPaise,
+                availableMargin: capRupees,
+                usedMargin: 0,
+                misMargin: 0,
+                optionMargin: 0,
+                blockedMargin: 0,
+                blockedMarginPaise: 0,
+            });
+        }
         wallet = await orderEngine.recomputeBlockedMargin(wallet);
-        res.status(200).json(wallet);
+        const totalUsed = Math.round((wallet.usedMargin || 0) + (wallet.misMargin || 0) + (wallet.optionMargin || 0));
+        const walletObj = wallet.toObject();
+        walletObj.totalUsedMargin = totalUsed;
+        walletObj.usedMargin = totalUsed;
+        res.status(200).json(walletObj);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching wallet', error: err.message });
+    }
+});
+
+// ============ CAPITAL ASSIGNMENT (INSTRUCTOR / ADMIN) ============
+app.post('/wallet/assign', async (req, res) => {
+    try {
+        const { studentId, amount } = req.body;
+        if (!studentId) {
+            return res.status(400).json({ message: 'studentId is required' });
+        }
+        const numAmount = Number(amount);
+        if (isNaN(numAmount) || numAmount < 0) {
+            return res.status(400).json({ message: 'Valid non-negative amount is required' });
+        }
+
+        // Authorization check
+        if (!['INSTRUCTOR', 'INSTITUTE_ADMIN', 'ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) {
+            return res.status(403).json({ message: 'Forbidden: only instructors and admins can assign capital' });
+        }
+
+        const student = await UserModel.findById(studentId);
+        if (!student) {
+            return res.status(404).json({ message: 'Student not found' });
+        }
+
+        // Institute scoping check
+        if (!['SUPER_ADMIN', 'ADMIN'].includes(req.user.role)) {
+            if (student.instituteCode && req.user.instituteCode && student.instituteCode !== req.user.instituteCode) {
+                return res.status(403).json({ message: 'Unauthorized: student belongs to a different institute' });
+            }
+        }
+
+        let wallet = await WalletModel.findOne({ userId: studentId });
+        const oldBalance = wallet ? wallet.balance : 0;
+        const capPaise = Math.round(numAmount * 100);
+
+        if (!wallet) {
+            wallet = await WalletModel.create({
+                userId: studentId,
+                balance: numAmount,
+                balancePaise: capPaise,
+                availableMargin: numAmount,
+                usedMargin: 0,
+                misMargin: 0,
+                optionMargin: 0,
+                blockedMargin: 0,
+                blockedMarginPaise: 0,
+            });
+        } else {
+            wallet.balance = numAmount;
+            wallet.balancePaise = capPaise;
+            wallet.availableMargin = Math.max(0, numAmount - (wallet.usedMargin || 0) - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
+            await wallet.save();
+        }
+
+        // Also update student's starting capital on UserModel
+        student.startingCapital = numAmount;
+        student.startingCapitalPaise = capPaise;
+        student.balance = numAmount;
+        student.balancePaise = capPaise;
+        await student.save();
+
+        // Invalidate cached user session so /auth/me returns updated capital instantly
+        try {
+            const CacheService = require('./services/cacheService');
+            await CacheService.invalidateUserSession(studentId.toString());
+        } catch (e) { /* non-fatal */ }
+
+        // Record fund transaction audit
+        try {
+            await FundTransactionModel.create({
+                userId: studentId,
+                type: 'CREDIT',
+                amount: numAmount,
+                amountPaise: capPaise,
+                balanceAfter: numAmount,
+                remark: `Capital assigned by ${req.user.name || req.user.role} (prev: ₹${oldBalance.toLocaleString()})`,
+                createdBy: req.user._id,
+            });
+        } catch (e) { /* non-fatal transaction logging */ }
+
+        // Find batch to broadcast socket events
+        const { EnrollmentModel } = require('./model/EnrollmentModel');
+        const enrollment = await EnrollmentModel.findOne({ userId: studentId, status: 'ACTIVE' });
+        const batchId = enrollment?.batchId?.toString();
+
+        const totalUsed = Math.round((wallet.usedMargin || 0) + (wallet.misMargin || 0) + (wallet.optionMargin || 0));
+        const walletObj = {
+            ...wallet.toObject(),
+            totalUsedMargin: totalUsed,
+            usedMargin: totalUsed,
+        };
+
+        const socketPayload = {
+            studentId: studentId.toString(),
+            balance: wallet.balance,
+            balancePaise: wallet.balancePaise,
+            availableMargin: wallet.availableMargin,
+            usedMargin: totalUsed,
+            totalUsedMargin: totalUsed,
+            wallet: walletObj,
+            batchId,
+        };
+
+        if (batchId) {
+            io.to(`batch:${batchId}`).emit('pnl_update', socketPayload);
+            io.to(`batch:${batchId}`).emit('wallet_updated', socketPayload);
+            io.to(`batch:${batchId}`).emit('walletUpdated', { wallet: walletObj });
+            sendNotification({
+                userId: studentId,
+                batchId,
+                type: 'CAPITAL',
+                title: 'Capital Assigned',
+                message: `₹${numAmount.toLocaleString('en-IN')} virtual capital assigned to ${student.name}`,
+                data: { studentId: studentId.toString(), amount: numAmount }
+            }).catch(() => {});
+        }
+        io.to(`user:${studentId}`).emit('walletUpdated', { wallet: walletObj });
+        io.to(studentId.toString()).emit('walletUpdated', { wallet: walletObj });
+        io.to(`user:${studentId}`).emit('pnl_update', socketPayload);
+        io.to(studentId.toString()).emit('pnl_update', socketPayload);
+        io.to(`user:${studentId}`).emit('initialData', { wallet: walletObj });
+        io.to(studentId.toString()).emit('initialData', { wallet: walletObj });
+        io.emit('wallet_updated', socketPayload);
+
+        res.status(200).json({
+            success: true,
+            balance: wallet.balance,
+            balancePaise: wallet.balancePaise,
+            availableMargin: wallet.availableMargin,
+            studentId,
+        });
+    } catch (err) {
+        res.status(500).json({ message: 'Error assigning capital', error: err.message });
+    }
+});
+
+// ============ STUDENT ANALYTICS (INSTRUCTOR VIEW) ============
+app.get('/student/:id/analytics', async (req, res) => {
+    try {
+        const studentId = req.params.id;
+        const student = await UserModel.findById(studentId).select('-passwordHash');
+        if (!student) return res.status(404).json({ message: 'Student not found' });
+
+        const { HoldingsModel } = require('./model/HoldingsModel');
+        const [orders, closedPos, eqPos, optPos, userHoldings, wallet] = await Promise.all([
+            OrdersModel.find({ userId: studentId }).sort({ createdAt: -1 }),
+            ClosedPositionModel.find({ userId: studentId }).sort({ createdAt: -1 }),
+            PositionsModel.find({ userId: studentId }),
+            OptionPositionsModel.find({ userId: studentId }),
+            HoldingsModel.find({ userId: studentId }),
+            WalletModel.findOne({ userId: studentId }),
+        ]);
+
+        const totalTrades = orders.length;
+        const closedCount = closedPos.length;
+
+        let winTrades = 0;
+        let lossTrades = 0;
+        let realizedPnl = 0;
+        let bestTrade = 0;
+        let worstTrade = 0;
+
+        closedPos.forEach(p => {
+            const pnl = p.pnl || 0;
+            realizedPnl += pnl;
+            if (pnl > 0) winTrades++;
+            else if (pnl < 0) lossTrades++;
+            if (pnl > bestTrade) bestTrade = pnl;
+            if (pnl < worstTrade) worstTrade = pnl;
+        });
+
+        // Unrealized PnL from CNC Holdings
+        let unrealizedPnl = 0;
+        userHoldings.forEach(h => {
+            const live = marketDataService.getStockPrice(h.stockSymbol);
+            const curPrice = live?.ltp ?? h.ltp ?? h.avgPrice;
+            unrealizedPnl += (curPrice - h.avgPrice) * h.quantity;
+        });
+
+        // Unrealized PnL from open equity positions
+        eqPos.forEach(p => {
+            const live = marketDataService.getStockPrice(p.stockSymbol);
+            const curPrice = live?.ltp ?? p.ltp ?? p.avgPrice;
+            unrealizedPnl += (curPrice - p.avgPrice) * p.quantity;
+        });
+
+        // Unrealized PnL from open option positions
+        optPos.forEach(p => {
+            const liveLtp = marketDataService.getOptionLTPSync ? marketDataService.getOptionLTPSync(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry) : (p.ltp ?? p.avgPrice);
+            const curPrice = Number(typeof liveLtp === 'number' ? liveLtp : (p.ltp ?? p.avgPrice));
+            const dir = p.side === 'BUY' ? 1 : -1;
+            const diff = (curPrice - p.avgPrice) * p.quantity * dir;
+            unrealizedPnl += isNaN(diff) ? 0 : diff;
+        });
+
+        const totalPnl = Math.round((realizedPnl + unrealizedPnl) * 100) / 100;
+        const winRate = closedCount > 0 ? Math.round((winTrades / closedCount) * 100) : 0;
+        const currentBalance = wallet ? wallet.balance : 0;
+        const currentBalancePaise = wallet?.balancePaise !== undefined ? wallet.balancePaise : Math.round(currentBalance * 100);
+        const totalOpenPositions = userHoldings.length + eqPos.length + optPos.length;
+
+        const summary = {
+            totalTrades,
+            closedTrades: closedCount,
+            openPositions: totalOpenPositions,
+            winningTrades: winTrades,
+            losingTrades: lossTrades,
+            winRate,
+            pnl: totalPnl,
+            netPnlPaise: Math.round(totalPnl * 100),
+            realizedPnl: Math.round(realizedPnl * 100) / 100,
+            realizedPnlPaise: Math.round(realizedPnl * 100),
+            unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
+            unrealizedPnlPaise: Math.round(unrealizedPnl * 100),
+            bestTrade: bestTrade !== 0 ? { symbol: '', pnl: bestTrade } : null,
+            worstTrade: worstTrade !== 0 ? { symbol: '', pnl: worstTrade } : null,
+        };
+
+        res.json({
+            success: true,
+            studentId,
+            studentName: student.name,
+            email: student.email,
+            balance: currentBalance,
+            balancePaise: currentBalancePaise,
+            student: {
+                _id: studentId,
+                name: student.name,
+                email: student.email,
+                wallet: {
+                    balance: currentBalance,
+                    balancePaise: currentBalancePaise,
+                },
+            },
+            summary,
+            totalTrades,
+            closedTrades: closedCount,
+            openPositions: totalOpenPositions,
+            winTrades,
+            lossTrades,
+            winRate,
+            pnl: totalPnl,
+            realizedPnl: Math.round(realizedPnl * 100) / 100,
+            unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
+            bestTrade: Math.round(bestTrade * 100) / 100,
+            worstTrade: Math.round(worstTrade * 100) / 100,
+            recentOrders: orders.slice(0, 10),
+        });
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching student analytics', error: err.message });
+    }
+});
+
+// ============ STUDENT PnL HISTORY (FOR EQUITY CURVE & DAILY BARS) ============
+app.get('/student/:id/pnl-history', async (req, res) => {
+    try {
+        const studentId = req.params.id;
+        const student = await UserModel.findById(studentId);
+        if (!student) return res.status(404).json({ message: 'Student not found' });
+
+        const { HoldingsModel } = require('./model/HoldingsModel');
+        const [closedPos, plRecords, holdings, positions, optPositions] = await Promise.all([
+            ClosedPositionModel.find({ userId: studentId }).sort({ closedAt: 1 }),
+            PLRecordModel.find({ userId: studentId }).sort({ tradeDate: 1 }),
+            HoldingsModel.find({ userId: studentId }),
+            PositionsModel.find({ userId: studentId }),
+            OptionPositionsModel.find({ userId: studentId }),
+        ]);
+
+        // Today's live unrealized PnL
+        let liveUnrealized = 0;
+        holdings.forEach(h => {
+            const curPrice = marketDataService.getStockPrice(h.stockSymbol)?.ltp ?? h.ltp ?? h.avgPrice;
+            liveUnrealized += (curPrice - h.avgPrice) * h.quantity;
+        });
+        positions.forEach(p => {
+            const curPrice = marketDataService.getStockPrice(p.stockSymbol)?.ltp ?? p.ltp ?? p.avgPrice;
+            liveUnrealized += (curPrice - p.avgPrice) * p.quantity;
+        });
+        optPositions.forEach(p => {
+            const liveLtp = marketDataService.getOptionLTPSync ? marketDataService.getOptionLTPSync(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry) : (p.ltp ?? p.avgPrice);
+            const curPrice = Number(typeof liveLtp === 'number' ? liveLtp : (p.ltp ?? p.avgPrice));
+            const dir = p.side === 'BUY' ? 1 : -1;
+            const diff = (curPrice - p.avgPrice) * p.quantity * dir;
+            liveUnrealized += isNaN(diff) ? 0 : diff;
+        });
+
+        // Group realized PnL by date
+        const dayMap = {};
+        closedPos.forEach(cp => {
+            const d = cp.dateStr || (cp.closedAt ? cp.closedAt.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10));
+            dayMap[d] = (dayMap[d] || 0) + (cp.pnl || 0);
+        });
+
+        plRecords.forEach(plr => {
+            const d = plr.dateStr || (plr.tradeDate ? plr.tradeDate.toISOString().slice(0, 10) : null);
+            if (d && dayMap[d] === undefined) {
+                dayMap[d] = (plr.netPnl || 0) / 100;
+            }
+        });
+
+        const todayStr = rules.istDateStr();
+        dayMap[todayStr] = (dayMap[todayStr] || 0) + liveUnrealized;
+
+        // Ensure 7-day continuity
+        const datesToShow = new Set(Object.keys(dayMap));
+        const todayDate = new Date();
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date(todayDate);
+            d.setDate(d.getDate() - i);
+            datesToShow.add(d.toISOString().slice(0, 10));
+        }
+
+        const allDates = Array.from(datesToShow).sort();
+        const history = [];
+        let runningCumulative = 0;
+
+        allDates.forEach(d => {
+            const dayPnl = Math.round((dayMap[d] || 0) * 100) / 100;
+            runningCumulative = Math.round((runningCumulative + dayPnl) * 100) / 100;
+            history.push({
+                date: d,
+                pnl: dayPnl,
+                cumulativePnl: runningCumulative,
+            });
+        });
+
+        res.json(history);
+    } catch (err) {
+        console.error('[pnl-history] Error:', err);
+        res.status(500).json({ message: 'Error fetching PnL history', error: err.message });
+    }
+});
+
+// ============ STUDENT ACTIVITY LOG (AUDIT TRAIL) ============
+app.get('/student/:id/activity', async (req, res) => {
+    try {
+        const studentId = req.params.id;
+        const student = await UserModel.findById(studentId);
+        if (!student) return res.status(404).json({ message: 'Student not found' });
+
+        const [fundTxs, orders, riskLogs] = await Promise.all([
+            FundTransactionModel.find({ userId: studentId }).sort({ createdAt: -1 }).limit(30),
+            OrdersModel.find({ userId: studentId }).sort({ createdAt: -1 }).limit(30),
+            RiskLogModel.find({ userId: studentId }).sort({ createdAt: -1 }).limit(30),
+        ]);
+
+        const activities = [];
+
+        fundTxs.forEach(f => {
+            activities.push({
+                id: f._id.toString(),
+                type: 'CAPITAL',
+                title: f.type === 'CREDIT' ? 'Capital Assigned' : 'Capital Adjusted',
+                message: f.remark || `₹${(f.amount || 0).toLocaleString('en-IN')} ${f.type.toLowerCase()}`,
+                amount: f.amount || 0,
+                status: f.status || 'SUCCESS',
+                timestamp: f.createdAt,
+                time: new Date(f.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+            });
+        });
+
+        orders.forEach(o => {
+            activities.push({
+                id: o._id.toString(),
+                type: 'TRADE',
+                title: `${o.side} ${o.stockSymbol || 'Order'}`,
+                message: `${o.side} ${o.quantity} qty @ ₹${(o.price || 0).toLocaleString('en-IN')} (${o.productType || 'CNC'})`,
+                symbol: o.stockSymbol,
+                amount: (o.quantity || 0) * (o.price || 0),
+                status: o.status || 'EXECUTED',
+                timestamp: o.createdAt,
+                time: new Date(o.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+            });
+        });
+
+        riskLogs.forEach(r => {
+            activities.push({
+                id: r._id.toString(),
+                type: 'RISK',
+                title: `Risk Alert: ${r.ruleType || 'Violation'}`,
+                message: r.message,
+                status: 'WARNING',
+                timestamp: r.createdAt,
+                time: new Date(r.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+            });
+        });
+
+        activities.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        res.json(activities);
+    } catch (err) {
+        console.error('[student-activity] Error:', err);
+        res.status(500).json({ message: 'Error fetching activity log', error: err.message });
+    }
+});
+
+// ============ SYSTEM NOTIFICATIONS ============
+app.get('/notifications', async (req, res) => {
+    try {
+        const userId = req.user._id;
+        const query = {
+            $or: [
+                { userId },
+                { userId: null },
+            ]
+        };
+
+        const { EnrollmentModel } = require('./model/EnrollmentModel');
+        const { BatchModel } = require('./model/BatchModel');
+
+        if (req.user.role === 'STUDENT') {
+            const enr = await EnrollmentModel.findOne({ userId, status: 'ACTIVE' });
+            if (enr) query.$or.push({ batchId: enr.batchId });
+        } else if (['INSTRUCTOR', 'INSTITUTE_ADMIN', 'ADMIN'].includes(req.user.role)) {
+            const batchQuery = req.user.role === 'INSTRUCTOR' ? { instructorId: userId } : { instituteCode: req.user.instituteCode };
+            const batches = await BatchModel.find(batchQuery).select('_id');
+            const batchIds = batches.map(b => b._id);
+            if (batchIds.length > 0) {
+                query.$or.push({ batchId: { $in: batchIds } });
+            }
+        }
+
+        const notifications = await NotificationModel.find(query).sort({ createdAt: -1 }).limit(40);
+        res.json(notifications);
+    } catch (err) {
+        console.error('[notifications] Error:', err);
+        res.status(500).json({ message: 'Error fetching notifications', error: err.message });
+    }
+});
+
+app.patch('/notifications/mark-read', async (req, res) => {
+    try {
+        const { ids } = req.body;
+        if (Array.isArray(ids) && ids.length > 0) {
+            await NotificationModel.updateMany({ _id: { $in: ids } }, { $set: { read: true } });
+        } else {
+            await NotificationModel.updateMany(
+                { $or: [{ userId: req.user._id }, { userId: null }] },
+                { $set: { read: true } }
+            );
+        }
+        res.json({ success: true, message: 'Notifications marked as read' });
+    } catch (err) {
+        res.status(500).json({ message: 'Error updating notifications', error: err.message });
     }
 });
 
 // ============ FUND TRANSACTIONS ============
 app.get('/funds', async (req, res) => {
     try {
-        const fundTxs = await FundTransactionModel.find({}).sort({ createdAt: -1 });
+        const fundTxs = await FundTransactionModel.find({ userId: req.user._id }).sort({ createdAt: -1 });
         res.status(200).json(fundTxs);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching fund transactions', error: err.message });
@@ -1170,25 +2236,33 @@ app.post('/funds/deposit', async (req, res) => {
     }
 
     try {
-        // Atomic get-or-create — see /wallet route for why the previous
-        // find-then-conditionally-create pattern was a TOCTOU risk.
-        let wallet = await WalletModel.findOneAndUpdate(
-            {},
-            { $setOnInsert: { balance: 100000, usedMargin: 0, blockedMargin: 0, availableMargin: 100000 } },
-            { upsert: true, new: true }
-        );
+        let wallet = await WalletModel.findOne({ userId: req.user._id });
+        if (!wallet) {
+            const { EnrollmentModel } = require('./model/EnrollmentModel');
+            const enrollment = await EnrollmentModel.findOne({ userId: req.user._id, status: 'ACTIVE' }).populate('batchId');
+            const capPaise = enrollment?.batchId?.startingCapitalPaise || 10000000;
+            const capRupees = capPaise / 100;
+            wallet = new WalletModel({
+                userId: req.user._id,
+                balance: capRupees,
+                balancePaise: capPaise,
+                availableMargin: capRupees,
+                usedMargin: 0,
+                blockedMargin: 0,
+                blockedMarginPaise: 0,
+            });
+        }
 
-        wallet.balance += Number(amount);
-        // Must include blockedMargin like every other wallet-write path
-        // (recomputeBlockedMargin, executeOrder, etc.) — omitting it here
-        // silently "unblocked" funds already reserved by resting pending
-        // orders every time a user deposited or withdrew.
+        const numAmt = Number(amount);
+        wallet.balance += numAmt;
+        wallet.balancePaise = (wallet.balancePaise || 0) + Math.round(numAmt * 100);
         wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
         await wallet.save();
 
         const txn = new FundTransactionModel({
+            userId: req.user._id,
             type: 'DEPOSIT',
-            amount: Number(amount),
+            amount: numAmt,
             status: 'SUCCESS',
             method: (method || 'NETBANKING').toUpperCase() === 'UPI' ? 'UPI' : 'NETBANKING',
             upiApp: upiApp || null,
@@ -1196,7 +2270,7 @@ app.post('/funds/deposit', async (req, res) => {
         });
         await txn.save();
 
-        io.emit('walletUpdated', { wallet: wallet.toObject(), transaction: txn });
+        io.to(`user:${req.user._id}`).emit('walletUpdated', { wallet: wallet.toObject(), transaction: txn });
         res.status(200).json({ message: 'Deposit successful', wallet, transaction: txn });
     } catch (err) {
         res.status(500).json({ message: 'Error processing deposit', error: err.message });
@@ -1210,7 +2284,7 @@ app.post('/funds/withdraw', async (req, res) => {
     }
 
     try {
-        let wallet = await WalletModel.findOne({});
+        let wallet = await WalletModel.findOne({ userId: req.user._id });
         if (!wallet) {
             return res.status(400).json({ message: 'No wallet found. Add funds first.' });
         }
@@ -1219,46 +2293,82 @@ app.post('/funds/withdraw', async (req, res) => {
             return res.status(400).json({ message: 'Insufficient available balance' });
         }
 
-        wallet.balance -= Number(amount);
-        // Same fix as /funds/deposit — must include blockedMargin.
+        const numAmt = Number(amount);
+        wallet.balance -= numAmt;
+        wallet.balancePaise = Math.max(0, (wallet.balancePaise || 0) - Math.round(numAmt * 100));
         wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
         await wallet.save();
 
         const txn = new FundTransactionModel({
+            userId: req.user._id,
             type: 'WITHDRAW',
-            amount: Number(amount),
+            amount: numAmt,
             status: 'SUCCESS',
             method: 'BANK',
             reference: `WDR${Date.now()}${Math.floor(Math.random() * 1000)}`,
         });
         await txn.save();
 
-        io.emit('walletUpdated', { wallet: wallet.toObject(), transaction: txn });
+        io.to(`user:${req.user._id}`).emit('walletUpdated', { wallet: wallet.toObject(), transaction: txn });
         res.status(200).json({ message: 'Withdrawal successful', wallet, transaction: txn });
     } catch (err) {
         res.status(500).json({ message: 'Error processing withdrawal', error: err.message });
     }
 });
 
+
 // ============ WATCHLIST ============
 app.get('/watchlists', async (req, res) => {
     try {
-        const watchlists = await WatchlistModel.find({});
+        const uid = req.user?._id;
+        if (!uid) return res.status(401).json({ message: 'Unauthorized' });
+
+        const uidStr = uid.toString();
+        if (!req.query.fresh && !req.query.nocache) {
+            const cached = await CacheService.getWatchlists(uidStr);
+            if (cached) {
+                return res.status(200).json(cached);
+            }
+        }
+
+        let watchlists = await WatchlistModel.find({ userId: uid }).sort({ createdAt: 1 });
+        if (!watchlists || watchlists.length === 0) {
+            const defaultList = await WatchlistModel.create({
+                userId: uid,
+                name: 'My Watchlist',
+                stocks: ['RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'SBIN'],
+            });
+            watchlists = [defaultList];
+        } else if (watchlists.length === 1 && watchlists[0].name === 'My Watchlist' && (!watchlists[0].stocks || watchlists[0].stocks.length === 0)) {
+            watchlists[0].stocks = ['RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'SBIN'];
+            await watchlists[0].save();
+        }
+
+        CacheService.setWatchlists(uidStr, watchlists, 120).catch(() => {});
         res.status(200).json(watchlists);
     } catch (err) {
+        console.error('[Watchlists GET error]', err);
         res.status(500).json({ message: 'Error fetching watchlists', error: err.message });
     }
 });
 
 app.post('/watchlists', async (req, res) => {
     const { name } = req.body;
-    if (!name) {
+    if (!name || !name.trim()) {
         return res.status(400).json({ message: 'Watchlist name is required' });
     }
 
     try {
-        const watchlist = new WatchlistModel({ name, stocks: [] });
-        await watchlist.save();
+        const uid = req.user?._id;
+        if (!uid) return res.status(401).json({ message: 'Unauthorized' });
+
+        const trimmedName = name.trim();
+        const watchlist = await WatchlistModel.create({
+            userId: uid,
+            name: trimmedName,
+            stocks: [],
+        });
+        CacheService.invalidateWatchlists(uid.toString()).catch(() => {});
         res.status(201).json(watchlist);
     } catch (err) {
         res.status(500).json({ message: 'Error creating watchlist', error: err.message });
@@ -1267,19 +2377,32 @@ app.post('/watchlists', async (req, res) => {
 
 app.post('/watchlists/:id/stock', async (req, res) => {
     const { id } = req.params;
-    const { stockSymbol } = req.body;
+    const stockSymbol = req.body.stockSymbol || req.body.symbol;
 
     if (!stockSymbol) {
-        return res.status(400).json({ message: 'stockSymbol is required' });
+        return res.status(400).json({ message: 'stockSymbol or symbol is required' });
     }
 
     try {
-        const watchlist = await WatchlistModel.findById(id);
+        let watchlist = null;
+        if (mongoose.Types.ObjectId.isValid(id)) {
+            watchlist = await WatchlistModel.findOne({ _id: id, userId: req.user._id });
+            if (!watchlist) watchlist = await WatchlistModel.findById(id);
+        }
         if (!watchlist) {
-            return res.status(404).json({ message: 'Watchlist not found' });
+            // Fallback to user's first watchlist or create one
+            watchlist = await WatchlistModel.findOne({ userId: req.user._id });
+            if (!watchlist) {
+                watchlist = await WatchlistModel.create({
+                    userId: req.user._id,
+                    name: 'My Watchlist',
+                    stocks: [],
+                });
+            }
         }
 
         const symbol = stockSymbol.toUpperCase();
+        if (!watchlist.stocks) watchlist.stocks = [];
         if (!watchlist.stocks.includes(symbol)) {
             watchlist.stocks.push(symbol);
             await watchlist.save();
@@ -1290,6 +2413,7 @@ app.post('/watchlists/:id/stock', async (req, res) => {
             marketDataService.fetchAllStockPrices().catch(() => {});
         }
 
+        CacheService.invalidateWatchlists(req.user._id.toString()).catch(() => {});
         res.status(200).json(watchlist);
     } catch (err) {
         res.status(500).json({ message: 'Error adding stock to watchlist', error: err.message });
@@ -1300,14 +2424,20 @@ app.delete('/watchlists/:id/stock/:symbol', async (req, res) => {
     const { id, symbol } = req.params;
 
     try {
-        const watchlist = await WatchlistModel.findById(id);
+        let watchlist = null;
+        if (mongoose.Types.ObjectId.isValid(id)) {
+            watchlist = await WatchlistModel.findOne({ _id: id, userId: req.user._id });
+            if (!watchlist) watchlist = await WatchlistModel.findById(id);
+        }
         if (!watchlist) {
             return res.status(404).json({ message: 'Watchlist not found' });
         }
 
-        watchlist.stocks = watchlist.stocks.filter(s => s !== symbol.toUpperCase());
+        const symUpper = symbol.toUpperCase();
+        watchlist.stocks = (watchlist.stocks || []).filter(s => s !== symUpper);
         await watchlist.save();
 
+        CacheService.invalidateWatchlists(req.user._id.toString()).catch(() => {});
         res.status(200).json(watchlist);
     } catch (err) {
         res.status(500).json({ message: 'Error removing stock from watchlist', error: err.message });
@@ -1319,6 +2449,15 @@ app.delete('/watchlists/:id', async (req, res) => {
 
     try {
         await WatchlistModel.findByIdAndDelete(id);
+        const remaining = await WatchlistModel.countDocuments({ userId: req.user._id });
+        if (remaining === 0) {
+            await WatchlistModel.create({
+                userId: req.user._id,
+                name: 'My Watchlist',
+                stocks: ['RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'SBIN'],
+            });
+        }
+        CacheService.invalidateWatchlists(req.user._id.toString()).catch(() => {});
         res.status(200).json({ message: 'Watchlist deleted' });
     } catch (err) {
         res.status(500).json({ message: 'Error deleting watchlist', error: err.message });
@@ -1406,7 +2545,7 @@ app.get('/market/stocks', (req, res) => {
 // ============ PRICE ALERTS ============
 app.get('/alerts', async (req, res) => {
     try {
-        const alerts = await PriceAlertModel.find({});
+        const alerts = await PriceAlertModel.find({ userId: req.user._id });
         res.status(200).json(alerts);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching alerts', error: err.message });
@@ -1434,6 +2573,7 @@ app.post('/alerts', async (req, res) => {
 
     try {
         const alert = new PriceAlertModel({
+            userId: req.user._id,
             stockSymbol: stockSymbol.toUpperCase(),
             targetPrice: Number(targetPrice),
             condition,
@@ -1499,14 +2639,14 @@ async function applyDueCorporateActions() {
     const due = await CorporateActionModel.find({ applied: false, exDate: { $lte: new Date() } });
     if (due.length === 0) return 0;
 
-    const wallet = await WalletModel.findOne({});
-    let dividendCredit = 0;
+    const dividendCredits = {};
 
     for (const action of due) {
         const holdings = await HoldingsModel.find({ stockSymbol: action.stockSymbol });
         for (const holding of holdings) {
             if (action.type === 'DIVIDEND' && action.dividendPerShare) {
-                dividendCredit += action.dividendPerShare * holding.quantity;
+                const uid = holding.userId.toString();
+                dividendCredits[uid] = (dividendCredits[uid] || 0) + (action.dividendPerShare * holding.quantity);
             } else if ((action.type === 'SPLIT' || action.type === 'BONUS') && action.ratio > 1) {
                 const newQty = Math.round(holding.quantity * action.ratio);
                 holding.avgPrice = Math.round((holding.avgPrice * holding.quantity / newQty) * 100) / 100;
@@ -1521,12 +2661,19 @@ async function applyDueCorporateActions() {
         await action.save();
     }
 
-    if (wallet && dividendCredit !== 0) {
-        wallet.balance += Math.round(dividendCredit * 100) / 100;
-        wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
-        await wallet.save();
+    for (const [uid, credit] of Object.entries(dividendCredits)) {
+        if (credit !== 0) {
+            const wallet = await WalletModel.findOne({ userId: uid });
+            if (wallet) {
+                wallet.balance += Math.round(credit * 100) / 100;
+                wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
+                await wallet.save();
+            }
+        }
     }
-    if (ioInstance) ioInstance.emit('corporateActionsApplied', { count: due.length, dividendCredit });
+    
+    const totalDividend = Object.values(dividendCredits).reduce((a, b) => a + b, 0);
+    if (ioInstance) ioInstance.emit('corporateActionsApplied', { count: due.length, dividendCredit: totalDividend });
     return due.length;
 }
 
@@ -1558,6 +2705,7 @@ app.post('/seed', async (req, res) => {
         let wallet = await WalletModel.findOne({});
         if (!wallet) {
             wallet = new WalletModel({
+                userId: req.user._id,
                 balance: TOTAL_BALANCE,
                 usedMargin: USED_MARGIN,
                 misMargin: 0,
@@ -1580,19 +2728,20 @@ app.post('/seed', async (req, res) => {
         await wallet.save();
 
         // Fund transactions showing the capital journey — clear & reseed
-        await FundTransactionModel.deleteMany({});
+        await FundTransactionModel.deleteMany({ userId: req.user._id });
         const fundDocs = [
-            { type: 'DEPOSIT',  amount: 9765569.35, status: 'SUCCESS', createdAt: new Date('2025-11-01T09:15:00.000Z'), updatedAt: new Date('2025-11-01T09:15:00.000Z') },  // ~₹97.66 Lakh — Nov 1 opening balance
-            { type: 'DEPOSIT',  amount: 12000000,   status: 'SUCCESS', createdAt: new Date('2025-06-01T09:15:00.000Z'), updatedAt: new Date('2025-06-01T09:15:00.000Z') },  // ₹1.20 Cr — additional capital for stock purchases
-            { type: 'WITHDRAW', amount: 19949322,   status: 'SUCCESS', createdAt: new Date('2025-08-15T10:00:00.000Z'), updatedAt: new Date('2025-08-15T10:00:00.000Z') }, // ₹1.99 Cr — deployed into stock holdings
+            { userId: req.user._id, type: 'DEPOSIT',  amount: 9765569.35, status: 'SUCCESS', createdAt: new Date('2025-11-01T09:15:00.000Z'), updatedAt: new Date('2025-11-01T09:15:00.000Z') },  // ~₹97.66 Lakh — Nov 1 opening balance
+            { userId: req.user._id, type: 'DEPOSIT',  amount: 12000000,   status: 'SUCCESS', createdAt: new Date('2025-06-01T09:15:00.000Z'), updatedAt: new Date('2025-06-01T09:15:00.000Z') },  // ₹1.20 Cr — additional capital for stock purchases
+            { userId: req.user._id, type: 'WITHDRAW', amount: 19949322,   status: 'SUCCESS', createdAt: new Date('2025-08-15T10:00:00.000Z'), updatedAt: new Date('2025-08-15T10:00:00.000Z') }, // ₹1.99 Cr — deployed into stock holdings
         ];
         await FundTransactionModel.collection.insertMany(fundDocs);
         console.log('[Seed] Fund transactions: ~₹97.66 Lakh opening + ₹1.20 Cr deposit − ₹1.99 Cr stock purchase');
 
         // Seed a default watchlist
-        let watchlist = await WatchlistModel.findOne({ name: 'Nifty 50' });
+        let watchlist = await WatchlistModel.findOne({ userId: req.user._id, name: 'Nifty 50' });
         if (!watchlist) {
             watchlist = new WatchlistModel({
+                userId: req.user._id,
                 name: 'Nifty 50',
                 stocks: ['INFY', 'TCS', 'ONGC', 'RELIANCE', 'WIPRO', 'KPITTECH', 'M&M', 'HDFCBANK', 'SBIN'],
             });
@@ -1600,7 +2749,7 @@ app.post('/seed', async (req, res) => {
         }
 
         // Seed realistic stock holdings — always refresh for consistent demo
-        await HoldingsModel.deleteMany({});
+        await HoldingsModel.deleteMany({ userId: req.user._id });
         
         const base = new Date();
         const daysAgo = (d) => new Date(base.getTime() - d * 86400000);
@@ -1643,6 +2792,7 @@ app.post('/seed', async (req, res) => {
             const ltp = fallbackPrices[symbol];
             const avgPrice = Math.round(ltp * (1 + pct) * 100) / 100;
             return {
+                userId: req.user._id,
                 stockSymbol: symbol,
                 quantity: qty,
                 avgPrice,
@@ -1658,48 +2808,48 @@ app.post('/seed', async (req, res) => {
         console.log(`[Seed] Inserted ${holdingsDocs.length} holdings`);
 
         // Seed sample positions if empty
-        const positionsCount = await PositionsModel.countDocuments({});
+        const positionsCount = await PositionsModel.countDocuments({ userId: req.user._id });
         if (positionsCount === 0) {
             const samplePositions = [
-                { stockSymbol: 'EVEREADY', quantity: 2, avgPrice: 316.27, ltp: 312.35, productType: 'MIS', isIntraday: true },
-                { stockSymbol: 'JUBLFOOD', quantity: 1, avgPrice: 3124.75, ltp: 3082.65, productType: 'MIS', isIntraday: true },
+                { userId: req.user._id, stockSymbol: 'EVEREADY', quantity: 2, avgPrice: 316.27, ltp: 312.35, productType: 'MIS', isIntraday: true },
+                { userId: req.user._id, stockSymbol: 'JUBLFOOD', quantity: 1, avgPrice: 3124.75, ltp: 3082.65, productType: 'MIS', isIntraday: true },
             ];
             await PositionsModel.insertMany(samplePositions);
         }
 
         // Seed trade history if empty (drives P&L screen)
-        const tradesCount = await TradeModel.countDocuments({});
+        const tradesCount = await TradeModel.countDocuments({ userId: req.user._id });
         if (tradesCount === 0) {
             const base = new Date();
             const daysAgo = (d) => new Date(base.getTime() - d * 86400000);
 
             const sampleTrades = [
                 // Open holdings (BUY only — unrealized)
-                { stockSymbol: 'BHARTIARTL', quantity: 2, price: 538.05, side: 'BUY', productType: 'CNC', totalValue: 1076.10, charges: 0.54, createdAt: daysAgo(45) },
-                { stockSymbol: 'HDFCBANK',   quantity: 2, price: 1383.40, side: 'BUY', productType: 'CNC', totalValue: 2766.80, charges: 1.38, createdAt: daysAgo(38) },
-                { stockSymbol: 'HINDUNILVR', quantity: 1, price: 2335.85, side: 'BUY', productType: 'CNC', totalValue: 2335.85, charges: 1.17, createdAt: daysAgo(32) },
-                { stockSymbol: 'INFY',       quantity: 1, price: 1350.50, side: 'BUY', productType: 'CNC', totalValue: 1350.50, charges: 0.68, createdAt: daysAgo(28) },
-                { stockSymbol: 'ITC',        quantity: 5, price: 202.00,  side: 'BUY', productType: 'CNC', totalValue: 1010.00, charges: 0.51, createdAt: daysAgo(25) },
-                { stockSymbol: 'KPITTECH',   quantity: 5, price: 250.30,  side: 'BUY', productType: 'CNC', totalValue: 1251.50, charges: 0.63, createdAt: daysAgo(21) },
-                { stockSymbol: 'SBIN',       quantity: 4, price: 324.35,  side: 'BUY', productType: 'CNC', totalValue: 1297.40, charges: 0.65, createdAt: daysAgo(18) },
-                { stockSymbol: 'TATAPOWER',  quantity: 5, price: 104.20,  side: 'BUY', productType: 'CNC', totalValue: 521.00,  charges: 0.26, createdAt: daysAgo(15) },
-                { stockSymbol: 'TCS',        quantity: 1, price: 3041.70, side: 'BUY', productType: 'CNC', totalValue: 3041.70, charges: 1.52, createdAt: daysAgo(12) },
-                { stockSymbol: 'WIPRO',      quantity: 4, price: 489.30,  side: 'BUY', productType: 'CNC', totalValue: 1957.20, charges: 0.98, createdAt: daysAgo(10) },
-                { stockSymbol: 'RELIANCE',   quantity: 1, price: 2193.70, side: 'BUY', productType: 'CNC', totalValue: 2193.70, charges: 1.10, createdAt: daysAgo(8)  },
+                { userId: req.user._id, stockSymbol: 'BHARTIARTL', quantity: 2, price: 538.05, side: 'BUY', productType: 'CNC', totalValue: 1076.10, charges: 0.54, createdAt: daysAgo(45) },
+                { userId: req.user._id, stockSymbol: 'HDFCBANK',   quantity: 2, price: 1383.40, side: 'BUY', productType: 'CNC', totalValue: 2766.80, charges: 1.38, createdAt: daysAgo(38) },
+                { userId: req.user._id, stockSymbol: 'HINDUNILVR', quantity: 1, price: 2335.85, side: 'BUY', productType: 'CNC', totalValue: 2335.85, charges: 1.17, createdAt: daysAgo(32) },
+                { userId: req.user._id, stockSymbol: 'INFY',       quantity: 1, price: 1350.50, side: 'BUY', productType: 'CNC', totalValue: 1350.50, charges: 0.68, createdAt: daysAgo(28) },
+                { userId: req.user._id, stockSymbol: 'ITC',        quantity: 5, price: 202.00,  side: 'BUY', productType: 'CNC', totalValue: 1010.00, charges: 0.51, createdAt: daysAgo(25) },
+                { userId: req.user._id, stockSymbol: 'KPITTECH',   quantity: 5, price: 250.30,  side: 'BUY', productType: 'CNC', totalValue: 1251.50, charges: 0.63, createdAt: daysAgo(21) },
+                { userId: req.user._id, stockSymbol: 'SBIN',       quantity: 4, price: 324.35,  side: 'BUY', productType: 'CNC', totalValue: 1297.40, charges: 0.65, createdAt: daysAgo(18) },
+                { userId: req.user._id, stockSymbol: 'TATAPOWER',  quantity: 5, price: 104.20,  side: 'BUY', productType: 'CNC', totalValue: 521.00,  charges: 0.26, createdAt: daysAgo(15) },
+                { userId: req.user._id, stockSymbol: 'TCS',        quantity: 1, price: 3041.70, side: 'BUY', productType: 'CNC', totalValue: 3041.70, charges: 1.52, createdAt: daysAgo(12) },
+                { userId: req.user._id, stockSymbol: 'WIPRO',      quantity: 4, price: 489.30,  side: 'BUY', productType: 'CNC', totalValue: 1957.20, charges: 0.98, createdAt: daysAgo(10) },
+                { userId: req.user._id, stockSymbol: 'RELIANCE',   quantity: 1, price: 2193.70, side: 'BUY', productType: 'CNC', totalValue: 2193.70, charges: 1.10, createdAt: daysAgo(8)  },
                 // Realized trades (BUY + SELL round trips)
-                { stockSymbol: 'TATAMOTORS', quantity: 3, price: 780.00,  side: 'BUY',  productType: 'CNC', totalValue: 2340.00, charges: 1.17, createdAt: daysAgo(60) },
-                { stockSymbol: 'TATAMOTORS', quantity: 3, price: 850.00,  side: 'SELL', productType: 'CNC', totalValue: 2550.00, charges: 1.28, createdAt: daysAgo(50) },
-                { stockSymbol: 'HCLTECH',    quantity: 2, price: 1200.00, side: 'BUY',  productType: 'CNC', totalValue: 2400.00, charges: 1.20, createdAt: daysAgo(55) },
-                { stockSymbol: 'HCLTECH',    quantity: 2, price: 1380.00, side: 'SELL', productType: 'CNC', totalValue: 2760.00, charges: 1.38, createdAt: daysAgo(42) },
-                { stockSymbol: 'AXISBANK',   quantity: 5, price: 920.00,  side: 'BUY',  productType: 'CNC', totalValue: 4600.00, charges: 2.30, createdAt: daysAgo(70) },
-                { stockSymbol: 'AXISBANK',   quantity: 5, price: 985.00,  side: 'SELL', productType: 'CNC', totalValue: 4925.00, charges: 2.46, createdAt: daysAgo(62) },
-                { stockSymbol: 'SUNPHARMA',  quantity: 2, price: 1050.00, side: 'BUY',  productType: 'CNC', totalValue: 2100.00, charges: 1.05, createdAt: daysAgo(90) },
-                { stockSymbol: 'SUNPHARMA',  quantity: 2, price: 1140.00, side: 'SELL', productType: 'CNC', totalValue: 2280.00, charges: 1.14, createdAt: daysAgo(75) },
-                { stockSymbol: 'NTPC',       quantity: 10, price: 220.00, side: 'BUY',  productType: 'CNC', totalValue: 2200.00, charges: 1.10, createdAt: daysAgo(30) },
-                { stockSymbol: 'NTPC',       quantity: 10, price: 195.00, side: 'SELL', productType: 'CNC', totalValue: 1950.00, charges: 0.98, createdAt: daysAgo(20) },
+                { userId: req.user._id, stockSymbol: 'TATAMOTORS', quantity: 3, price: 780.00,  side: 'BUY',  productType: 'CNC', totalValue: 2340.00, charges: 1.17, createdAt: daysAgo(60) },
+                { userId: req.user._id, stockSymbol: 'TATAMOTORS', quantity: 3, price: 850.00,  side: 'SELL', productType: 'CNC', totalValue: 2550.00, charges: 1.28, createdAt: daysAgo(50) },
+                { userId: req.user._id, stockSymbol: 'HCLTECH',    quantity: 2, price: 1200.00, side: 'BUY',  productType: 'CNC', totalValue: 2400.00, charges: 1.20, createdAt: daysAgo(55) },
+                { userId: req.user._id, stockSymbol: 'HCLTECH',    quantity: 2, price: 1380.00, side: 'SELL', productType: 'CNC', totalValue: 2760.00, charges: 1.38, createdAt: daysAgo(42) },
+                { userId: req.user._id, stockSymbol: 'AXISBANK',   quantity: 5, price: 920.00,  side: 'BUY',  productType: 'CNC', totalValue: 4600.00, charges: 2.30, createdAt: daysAgo(70) },
+                { userId: req.user._id, stockSymbol: 'AXISBANK',   quantity: 5, price: 985.00,  side: 'SELL', productType: 'CNC', totalValue: 4925.00, charges: 2.46, createdAt: daysAgo(62) },
+                { userId: req.user._id, stockSymbol: 'SUNPHARMA',  quantity: 2, price: 1050.00, side: 'BUY',  productType: 'CNC', totalValue: 2100.00, charges: 1.05, createdAt: daysAgo(90) },
+                { userId: req.user._id, stockSymbol: 'SUNPHARMA',  quantity: 2, price: 1140.00, side: 'SELL', productType: 'CNC', totalValue: 2280.00, charges: 1.14, createdAt: daysAgo(75) },
+                { userId: req.user._id, stockSymbol: 'NTPC',       quantity: 10, price: 220.00, side: 'BUY',  productType: 'CNC', totalValue: 2200.00, charges: 1.10, createdAt: daysAgo(30) },
+                { userId: req.user._id, stockSymbol: 'NTPC',       quantity: 10, price: 195.00, side: 'SELL', productType: 'CNC', totalValue: 1950.00, charges: 0.98, createdAt: daysAgo(20) },
                 // Intraday MIS trades
-                { stockSymbol: 'EVEREADY',   quantity: 2, price: 316.27, side: 'BUY',  productType: 'MIS', totalValue: 632.54,  charges: 0.32, createdAt: daysAgo(5) },
-                { stockSymbol: 'JUBLFOOD',   quantity: 1, price: 3124.75, side: 'BUY', productType: 'MIS', totalValue: 3124.75, charges: 1.56, createdAt: daysAgo(3) },
+                { userId: req.user._id, stockSymbol: 'EVEREADY',   quantity: 2, price: 316.27, side: 'BUY',  productType: 'MIS', totalValue: 632.54,  charges: 0.32, createdAt: daysAgo(5) },
+                { userId: req.user._id, stockSymbol: 'JUBLFOOD',   quantity: 1, price: 3124.75, side: 'BUY', productType: 'MIS', totalValue: 3124.75, charges: 1.56, createdAt: daysAgo(3) },
             ];
 
             await TradeModel.insertMany(
@@ -1904,18 +3054,55 @@ app.get('/market/live-candles/:indexName', (req, res) => {
 // NIFTY IT was removed — it has no F&O contract on NSE (index-only, no chain).
 const SUPPORTED_INDICES = ['NIFTY 50', 'BANK NIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTY NEXT 50', 'SENSEX', 'BANKEX'];
 
+const INDEX_ALIASES = {
+    'NIFTY': 'NIFTY 50',
+    'NIFTY50': 'NIFTY 50',
+    'NIFTY-50': 'NIFTY 50',
+    'CNX NIFTY': 'NIFTY 50',
+    'BANKNIFTY': 'BANK NIFTY',
+    'NIFTY BANK': 'BANK NIFTY',
+    'FINNIFTY': 'FINNIFTY',
+    'NIFTY FIN SERVICE': 'FINNIFTY',
+    'MIDCAP': 'MIDCPNIFTY',
+    'MIDCPNIFTY': 'MIDCPNIFTY',
+    'NIFTY MIDCAP 50': 'MIDCPNIFTY',
+    'NIFTY NEXT 50': 'NIFTY NEXT 50',
+    'NEXT50': 'NIFTY NEXT 50',
+    'SENSEX': 'SENSEX',
+    'BSE SENSEX': 'SENSEX',
+    'BANKEX': 'BANKEX',
+};
+
+function normalizeIndexName(raw) {
+    if (!raw) return 'NIFTY 50';
+    const clean = raw.trim().toUpperCase();
+    if (INDEX_ALIASES[clean]) return INDEX_ALIASES[clean];
+    const match = SUPPORTED_INDICES.find(n => 
+        n === clean || 
+        n.replace(/\s+/g, '') === clean.replace(/\s+/g, '') ||
+        clean.includes(n.replace(/\s+/g, '')) ||
+        n.includes(clean)
+    );
+    return match || 'NIFTY 50';
+}
+
 app.get('/market/optionchain/:symbol', async (req, res) => {
     const rawSymbol = decodeURIComponent(req.params.symbol).toUpperCase();
-    const indexName = SUPPORTED_INDICES.find(n => n === rawSymbol || n.replace(' ', '') === rawSymbol.replace(' ', ''));
-    if (!indexName) {
-        return res.status(400).json({ message: `Unsupported index. Supported: ${SUPPORTED_INDICES.join(', ')}` });
-    }
+    const indexName = normalizeIndexName(rawSymbol);
     try {
         // Real NFO chain from Dhan (LTP, OI, IV, greeks); simulated fallback
-        const chain = await marketDataService.getOptionChain(indexName, req.query.expiry || null);
+        let chain = await marketDataService.getOptionChain(indexName, req.query.expiry || null);
+        if (!chain) {
+            chain = await marketDataService.getOptionChain('NIFTY 50', req.query.expiry || null);
+        }
         res.status(200).json(chain);
     } catch (err) {
-        res.status(500).json({ message: 'Error fetching option chain', error: err.message });
+        try {
+            const fallbackChain = await marketDataService.getOptionChain('NIFTY 50', null);
+            return res.status(200).json(fallbackChain);
+        } catch (e2) {
+            res.status(500).json({ message: 'Error fetching option chain', error: err.message });
+        }
     }
 });
 
@@ -1926,18 +3113,25 @@ app.delete('/orders/:id', async (req, res) => {
         if (!order) {
             return res.status(404).json({ message: 'Order not found' });
         }
+        if (req.user.role === 'STUDENT' && order.userId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: 'Unauthorized to cancel this order' });
+        }
         if (order.status === 'EXECUTED') {
             return res.status(400).json({ message: 'Cannot cancel an executed order' });
         }
         order.status = 'CANCELLED';
         await order.save();
-        const wallet = await orderEngine.recomputeBlockedMargin();
-        io.emit('orderCancelled', { order: order.toObject(), wallet: wallet?.toObject() });
+        const wallet = await orderEngine.recomputeBlockedMargin(order.userId);
+        const orderObj = order.toObject ? order.toObject() : order;
+        const walletObj = wallet ? (wallet.toObject ? wallet.toObject() : wallet) : null;
+        io.to(`user:${order.userId}`).emit('orderCancelled', { order: orderObj, wallet: walletObj });
+        io.to(order.userId.toString()).emit('orderCancelled', { order: orderObj, wallet: walletObj });
         res.status(200).json({ message: 'Order cancelled', order });
     } catch (err) {
         res.status(500).json({ message: 'Error cancelling order', error: err.message });
     }
 });
+
 
 // ============ CANDLE DATA ============
 app.get('/market/candles/:symbol', async (req, res) => {
@@ -1985,7 +3179,8 @@ app.get('/market/history/:symbol', async (req, res) => {
 
 // ============ SOCKET.IO ============
 io.on('connection', async (socket) => {
-    console.log('Client connected:', socket.id);
+    const userId = socket.userId || socket.request.user?._id;
+    console.log('Client connected:', socket.id, userId ? `User: ${userId}` : '(unauthenticated)');
 
     // Push market data immediately so the client doesn't wait 30s
     socket.emit('marketData', {
@@ -1995,20 +3190,65 @@ io.on('connection', async (socket) => {
         lastUpdated: marketDataService.getLastUpdated(),
     });
 
-    // Push holdings, positions, wallet instantly on connect so every screen
-    // auto-populates without needing a manual pull-to-refresh.
-    try {
-        const [holdings, positions, wallet] = await Promise.all([
-            HoldingsModel.find({}),
-            PositionsModel.find({}),
-            WalletModel.findOne({}),
-        ]);
-        socket.emit('initialData', {
-            holdings: holdings.map(withLiveLtp),
-            positions: positions.map(withLiveLtp),
-            wallet: wallet?.toObject(),
-        });
-    } catch (e) { /* non-fatal */ }
+    if (userId) {
+        // Join private user room for strict data isolation
+        socket.join(`user:${userId}`);
+        socket.join(userId.toString());
+
+        // Auto-join batch room if user is enrolled
+        const { EnrollmentModel } = require('./model/EnrollmentModel');
+        EnrollmentModel.findOne({ userId, status: 'ACTIVE' }).then(enr => {
+            if (enr) {
+                socket.join(`batch:${enr.batchId}`);
+            }
+        }).catch(() => {});
+
+        if (socket.user && ['INSTRUCTOR', 'INSTITUTE_ADMIN', 'ADMIN'].includes(socket.user.role)) {
+            const { BatchModel } = require('./model/BatchModel');
+            const batchQuery = socket.user.role === 'INSTRUCTOR' ? { instructorId: socket.user._id } : { instituteCode: socket.user.instituteCode };
+            BatchModel.find(batchQuery).select('_id').then(batches => {
+                batches.forEach(b => socket.join(`batch:${b._id.toString()}`));
+            }).catch(() => {});
+        }
+
+        // Push holdings, positions, wallet instantly on connect so every screen
+        // auto-populates without needing a manual pull-to-refresh.
+        try {
+            let [holdings, positions, wallet] = await Promise.all([
+                HoldingsModel.find({ userId }),
+                PositionsModel.find({ userId }),
+                WalletModel.findOne({ userId }),
+            ]);
+            if (!wallet) {
+                const { EnrollmentModel } = require('./model/EnrollmentModel');
+                const enrollment = await EnrollmentModel.findOne({ userId, status: 'ACTIVE' }).populate('batchId');
+                const capPaise = enrollment?.batchId?.startingCapitalPaise || 10000000;
+                const capRupees = capPaise / 100;
+                wallet = await WalletModel.create({
+                    userId,
+                    balance: capRupees,
+                    balancePaise: capPaise,
+                    availableMargin: capRupees,
+                    usedMargin: 0,
+                    misMargin: 0,
+                    optionMargin: 0,
+                    blockedMargin: 0,
+                    blockedMarginPaise: 0,
+                });
+            }
+            const totalUsed = Math.round((wallet.usedMargin || 0) + (wallet.misMargin || 0) + (wallet.optionMargin || 0));
+            const walletObj = wallet ? {
+                ...(wallet.toObject ? wallet.toObject() : wallet),
+                totalUsedMargin: totalUsed,
+                usedMargin: totalUsed,
+            } : null;
+            socket.emit('initialData', {
+                holdings: holdings.map(withLiveLtp),
+                positions: positions.map(withLiveLtp),
+                wallet: walletObj,
+            });
+        } catch (e) { /* non-fatal */ }
+    }
 
     socket.on('subscribe', (symbols) => {
         if (Array.isArray(symbols)) {
@@ -2016,17 +3256,42 @@ io.on('connection', async (socket) => {
         }
     });
 
-    // Live Chat
+    socket.on('joinBatch', async (batchId) => {
+        if (!batchId) return;
+        // Verify user is permitted to join this batch room
+        if (socket.user) {
+            if (['ADMIN', 'SUPER_ADMIN', 'INSTITUTE_ADMIN', 'INSTRUCTOR'].includes(socket.user.role)) {
+                socket.join(`batch:${batchId}`);
+            } else if (socket.user.role === 'STUDENT') {
+                const { EnrollmentModel } = require('./model/EnrollmentModel');
+                const enr = await EnrollmentModel.findOne({ batchId, userId: socket.userId, status: 'ACTIVE' });
+                if (enr) socket.join(`batch:${batchId}`);
+            }
+        } else {
+            socket.join(`batch:${batchId}`);
+        }
+    });
+
+
+    // Live Chat & Announcements
     socket.on('chatMessage', async (data) => {
-        const { username, message, room } = data;
+        const { username, message, room, messageType } = data;
         if (!message || !message.trim()) return;
+        const chatRoom = room || 'general';
         const chatMsg = new ChatModel({
+            userId,
             username: username || 'Trader',
             message: message.trim(),
-            room: room || 'general',
+            room: chatRoom,
+            messageType: messageType || 'CHAT'
         });
         await chatMsg.save();
-        io.emit('chatMessage', chatMsg);
+        
+        if (chatRoom !== 'general') {
+            io.to(chatRoom).emit('chatMessage', chatMsg);
+        } else {
+            io.emit('chatMessage', chatMsg);
+        }
     });
 
     socket.on('disconnect', () => {
@@ -2072,6 +3337,7 @@ let _fastTickBusy = false;
 // tick handles live LTP movement between these.
 async function broadcastMarketData() {
     if (_fullBroadcastBusy) return;
+    if (!isLiveMarketActive('EQ') && marketDataService.getLastUpdated()) return; // Keep market data frozen during off-hours
     _fullBroadcastBusy = true;
     try {
         await marketDataService.fetchAllStockPrices();
@@ -2085,7 +3351,7 @@ async function broadcastMarketData() {
 // Fast LTP-only refresh — runs every 1s during market hours. Uses 'FO' (the
 // wider 15:40 window) since this feeds both equity and option live ticks.
 async function fastTickBroadcast() {
-    if (!isMarketOpen('FO') || _fastTickBusy) return;
+    if (!isLiveMarketActive('FO') || _fastTickBusy) return;
     _fastTickBusy = true;
     try {
         await marketDataService.fastRefresh();
@@ -2109,13 +3375,16 @@ async function fastTickBroadcast() {
 // Sync wallet.usedMargin with actual holdings on startup
 (async () => {
     try {
-        const [holdings, wallet] = await Promise.all([HoldingsModel.find({}), WalletModel.findOne({})]);
-        if (wallet && holdings.length > 0) {
-            const actualUsed = holdings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
-            wallet.usedMargin      = Math.round(actualUsed);
-            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
-            await wallet.save();
-            console.log(`[Wallet] Synced usedMargin = ₹${wallet.usedMargin.toLocaleString('en-IN')} from ${holdings.length} holdings`);
+        const users = await WalletModel.distinct('userId');
+        for (const userId of users) {
+            const [holdings, wallet] = await Promise.all([HoldingsModel.find({ userId }), WalletModel.findOne({ userId })]);
+            if (wallet && holdings.length > 0) {
+                const actualUsed = holdings.reduce((s, h) => s + h.avgPrice * h.quantity, 0);
+                wallet.usedMargin      = Math.round(actualUsed);
+                wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
+                await wallet.save();
+                console.log(`[Wallet] Synced usedMargin = ₹${wallet.usedMargin.toLocaleString('en-IN')} from ${holdings.length} holdings for user ${userId}`);
+            }
         }
     } catch (e) { console.error('[Wallet] Sync error:', e.message); }
 })();
@@ -2132,7 +3401,8 @@ const cron = require('node-cron');
 
 // Tiny key-value state doc to remember the last prep date across restarts
 const AppStateModel = mongoose.model('AppState', new mongoose.Schema({
-    key:   { type: String, unique: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    key:   { type: String },
     value: { type: String },
 }, { timestamps: true }));
 
@@ -2149,8 +3419,8 @@ function classifySegment(symbol) {
     return /CE$|PE$|FUT$/.test(symbol) ? 'fno' : 'equity';
 }
 
-async function archivePastTradesToPLRecords(beforeDate) {
-    const trades = await TradeModel.find({ archived: { $ne: true }, createdAt: { $lt: beforeDate } })
+async function archivePastTradesToPLRecords(userId, beforeDate) {
+    const trades = await TradeModel.find({ userId, archived: { $ne: true }, createdAt: { $lt: beforeDate } })
         .sort({ createdAt: 1 }).lean();
     if (trades.length === 0) return 0;
 
@@ -2158,7 +3428,7 @@ async function archivePastTradesToPLRecords(beforeDate) {
     for (const t of trades) {
         const day = rules.istDateStr(t.createdAt);
         const key = `${day}|${t.stockSymbol}|${t.productType}`;
-        if (!groups.has(key)) groups.set(key, []);
+        if (!groups.has(key)) groups.get(key, []);
         groups.get(key).push(t);
     }
 
@@ -2190,6 +3460,7 @@ async function archivePastTradesToPLRecords(beforeDate) {
         const realizedPLPct = buyValue > 0 ? Math.round((realizedPL / buyValue) * 10000) / 100 : 0;
 
         docs.push({
+            userId,
             tradeDate: new Date(`${day}T09:15:00.000Z`),
             symbol, quantity, buyValue, sellValue, realizedPL, charges, netPL, realizedPLPct,
             segment: classifySegment(symbol), source: 'live',
@@ -2201,41 +3472,41 @@ async function archivePastTradesToPLRecords(beforeDate) {
     return docs.length;
 }
 
-async function prepareNewTradingDay(force = false) {
+async function prepareNewTradingDay(userId, force = false) {
     try {
         const { start, dateStr } = istDayRange();
-        const state = await AppStateModel.findOne({ key: 'lastTradingDayPrep' });
+        const state = await AppStateModel.findOne({ userId, key: 'lastTradingDayPrep' });
         if (!force && state?.value === dateStr) return; // already prepared today
 
         // 1. Roll every not-yet-archived trade into the permanent P&L books
         // BEFORE anything gets cleared — orders/positions are transient, but
         // the trade history + its realised P&L must survive forever.
-        const archivedCount = await archivePastTradesToPLRecords(start);
+        const archivedCount = await archivePastTradesToPLRecords(userId, start);
 
         // 2. Yesterday's orders vanish (DAY validity — unfilled orders expire at EOD)
-        const oldOrders = await OrdersModel.deleteMany({ createdAt: { $lt: start } });
+        const oldOrders = await OrdersModel.deleteMany({ userId, createdAt: { $lt: start } });
 
         // 3. Safety-net square-off for any MIS position that somehow survived
         // past the same-day 3:20 PM auto square-off (e.g. server was down).
-        const misSquaredOff = await orderEngine.squareOffAllMIS('Day-prep safety-net square-off');
+        const misSquaredOff = await orderEngine.squareOffAllMIS(userId, 'Day-prep safety-net square-off');
 
         // 3.5. T1 settlement — quantity bought yesterday-or-earlier is now
         // fully settled into demat and sellable.
         const t1Result = await HoldingsModel.updateMany(
-            { t1Date: { $lt: start } },
+            { userId, t1Date: { $lt: start } },
             { $set: { t1Quantity: 0 } }
         );
 
-        const wallet = await WalletModel.findOne({});
+        const wallet = await WalletModel.findOne({ userId });
 
         // 4. Settle expired option positions at their last premium
-        const optionPositions = await OptionPositionsModel.find({ expiry: { $lt: dateStr } });
+        const optionPositions = await OptionPositionsModel.find({ userId, expiry: { $lt: dateStr } });
         for (const pos of optionPositions) {
             const ltp = (await getLiveOptionLTP(pos.underlyingSymbol, pos.strikePrice, pos.optionType, pos.expiry)) ?? pos.ltp;
             const sellValue = ltp * pos.quantity;
             const costBasis = pos.avgPremium * pos.quantity;
             await new TradeModel({
-                stockSymbol: pos.symbol, quantity: pos.quantity, price: ltp,
+                userId, stockSymbol: pos.symbol, quantity: pos.quantity, price: ltp,
                 side: 'SELL', productType: 'NRML',
                 charges: Math.round(sellValue * 0.001 * 100) / 100, totalValue: sellValue,
             }).save();
@@ -2258,13 +3529,13 @@ async function prepareNewTradingDay(force = false) {
             wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
             await wallet.save();
         }
-        await orderEngine.recomputeBlockedMargin();
+        await orderEngine.recomputeBlockedMargin(userId);
 
         // 5. Apply any corporate actions (dividend/split/bonus) whose ex-date has passed
         const corpActionsApplied = await applyDueCorporateActions();
 
         await AppStateModel.updateOne(
-            { key: 'lastTradingDayPrep' },
+            { userId, key: 'lastTradingDayPrep' },
             { $set: { value: dateStr } },
             { upsert: true }
         );
@@ -2273,18 +3544,21 @@ async function prepareNewTradingDay(force = false) {
         // reference closes that anchor Day's-P&L (fire-and-forget, throttled).
         marketDataService.seedReferenceCloses(marketDataService.getTrackedSymbols()).catch(() => {});
 
-        console.log(`[DayPrep] ${dateStr} ready | trade groups archived to P&L: ${archivedCount} | orders cleared: ${oldOrders.deletedCount} | MIS squared off: ${misSquaredOff} | options settled: ${optionPositions.length} | T1 rolled: ${t1Result.modifiedCount} | corp actions: ${corpActionsApplied}`);
+        console.log(`[DayPrep] ${dateStr} ready for ${userId} | archived: ${archivedCount} | cleared: ${oldOrders.deletedCount}`);
     } catch (e) {
         console.error('[DayPrep] error:', e.message);
     }
 }
 
 // 8:45 AM IST every weekday, before market open
-cron.schedule('45 8 * * 1-5', () => prepareNewTradingDay(), { timezone: 'Asia/Kolkata' });
+cron.schedule('45 8 * * 1-5', async () => {
+    const users = await UserModel.find({});
+    for (const u of users) await prepareNewTradingDay(u._id);
+}, { timezone: 'Asia/Kolkata' });
 
 // Manual trigger for testing / ops
 app.post('/admin/prepare-day', async (req, res) => {
-    await prepareNewTradingDay(true);
+    await prepareNewTradingDay(req.user._id, true);
     res.json({ message: 'Trading day prepared' });
 });
 
@@ -2315,7 +3589,6 @@ async function trackPortfolioSymbols() {
     // wrong-instrument quote value can't seed a symbol as a stuck bad anchor.
     await marketDataService.fastRefresh();
     await broadcastMarketData();
-    await prepareNewTradingDay();
 })();
 // Dhan-only, two-tier (no Groww/Yahoo):
 //  • fast tick every 1s → LTP endpoint (light, safely sustains 1 req/s) for
@@ -2326,47 +3599,102 @@ async function trackPortfolioSymbols() {
 //    extend gradually. 4 quote calls/min stays well within Dhan's limit.
 setInterval(fastTickBroadcast, 1000);
 setInterval(broadcastMarketData, 15000);
+setInterval(() => broadcastInstructorFeed(io), 2000); // 2s instructor feed broadcast
 
 // Real-time position P&L push: every 1s during market hours, recomputed from
 // already-cached prices (no extra Dhan calls) so both equity and option open
 // positions re-price continuously without the client ever polling for it.
 let _pnlTickBusy = false;
 setInterval(async () => {
-    // 'FO' (15:40 close) — this loop re-prices both equity and option positions.
-    if (!isMarketOpen('FO') || _pnlTickBusy) return;
+    if (_pnlTickBusy) return;
+    if (!isLiveMarketActive('FO')) return; // Freeze position ticks during off-market hours!
     _pnlTickBusy = true;
     try {
         const { dateStr } = istDayRange();
-        const [equityPositions, optionPositionsRaw, totalRealizedPnl, closedRaw] = await Promise.all([
-            PositionsModel.find({}),
-            OptionPositionsModel.find({}),
-            computeTotalRealizedPnlToday(),
-            ClosedPositionModel.find({ dateStr }).sort({ closedAt: -1 }).lean(),
-        ]);
+        const activeUsers = await UserModel.find({});
+        for (const user of activeUsers) {
+            const userId = user._id;
+            const [equityPositions, optionPositionsRaw, holdingsRaw, totalRealizedPnl, closedRaw, userWallet, allClosed] = await Promise.all([
+                PositionsModel.find({ userId }),
+                OptionPositionsModel.find({ userId }),
+                HoldingsModel.find({ userId }),
+                computeTotalRealizedPnlToday(userId),
+                ClosedPositionModel.find({ userId, dateStr }).sort({ closedAt: -1 }).lean(),
+                WalletModel.findOne({ userId }).lean(),
+                ClosedPositionModel.find({ userId }).select('pnl').lean(),
+            ]);
 
-        const equity = equityPositions.length > 0 ? await Promise.all(equityPositions.map(enrichEquityPosition)) : [];
-        const options = optionPositionsRaw.length > 0 ? await enrichOptionPositions(optionPositionsRaw) : [];
+            const allTimeRealizedPnl = (allClosed || []).reduce((sum, c) => sum + (c.pnl || 0), 0);
 
-        // Squared-off rows keep their booked pnl frozen forever, but the LTP
-        // shown alongside them still tracks the live market — re-priced here
-        // from the same already-cached quotes as the open positions above,
-        // so it costs nothing extra per tick.
-        const closed = await Promise.all(closedRaw.map(async (c) => {
-            if (c.kind === 'option' && c.underlyingSymbol) {
-                const liveLtp = await getLiveOptionLTP(c.underlyingSymbol, c.strikePrice, c.optionType, c.expiry);
-                return { ...c, ltp: liveLtp ?? c.exitPrice };
-            }
-            const live = marketDataService.getStockPrice(c.symbol);
-            return { ...c, ltp: live?.ltp ?? c.exitPrice };
-        }));
+            const equity = equityPositions.length > 0 ? await Promise.all(equityPositions.map(enrichEquityPosition)) : [];
+            const options = optionPositionsRaw.length > 0 ? await enrichOptionPositions(userId, optionPositionsRaw) : [];
+            const holdings = holdingsRaw.map(h => {
+                const live = marketDataService.getStockPrice(h.stockSymbol);
+                const avg = Number(h.avgPrice || 0);
+                const curPrice = Number(live?.ltp ?? (typeof h.ltp === 'number' ? h.ltp : avg));
+                const posPnl = Math.round((curPrice - avg) * (h.quantity || 1) * 100) / 100;
+                const pnlPct = avg > 0 ? Math.round(((curPrice - avg) / avg) * 10000) / 100 : 0;
+                return {
+                    ...(h.toObject ? h.toObject() : h),
+                    kind: 'holding',
+                    side: 'BUY',
+                    symbol: h.stockSymbol,
+                    avgPrice: avg,
+                    ltp: curPrice,
+                    pnl: isNaN(posPnl) ? 0 : posPnl,
+                    pnlPercent: isNaN(pnlPct) ? 0 : pnlPct,
+                    productType: 'CNC'
+                };
+            });
 
-        // Total P&L = every symbol's realised P&L today (even ones already
-        // squared off and gone from the open-position lists) + unrealised
-        // mark-to-market on whatever is still open — so booking a profit/loss
-        // on one leg keeps moving the total even after that position closes.
-        const totalUnrealizedPnl = equity.reduce((s, p) => s + p.unrealizedPnl, 0) + options.reduce((s, p) => s + p.unrealizedPnl, 0);
-        const totalPnl = Math.round((totalRealizedPnl + totalUnrealizedPnl) * 100) / 100;
-        io.emit('positionsTick', { positions: equity, optionPositions: options, closedPositions: closed, totalPnl, totalRealizedPnl, at: Date.now() });
+            // Squared-off rows keep their booked pnl frozen forever, but the LTP
+            // shown alongside them still tracks the live market — re-priced here
+            // from the same already-cached quotes as the open positions above,
+            // so it costs nothing extra per tick.
+            const closed = await Promise.all(closedRaw.map(async (c) => {
+                if (c.kind === 'option' && c.underlyingSymbol) {
+                    const liveLtp = await getLiveOptionLTP(c.underlyingSymbol, c.strikePrice, c.optionType, c.expiry);
+                    return { ...c, ltp: liveLtp ?? c.exitPrice };
+                }
+                const live = marketDataService.getStockPrice(c.symbol);
+                return { ...c, ltp: live?.ltp ?? c.exitPrice };
+            }));
+
+            const allOpen = [...equity, ...options, ...holdings];
+            const totalUnrealizedPnl = allOpen.reduce((s, p) => s + (p.unrealizedPnl || p.pnl || 0), 0);
+            const todayPnl = Math.round((totalRealizedPnl + totalUnrealizedPnl) * 100) / 100;
+            const totalPnl = Math.round((allTimeRealizedPnl + totalUnrealizedPnl) * 100) / 100;
+
+            const bal = userWallet ? (userWallet.balancePaise ? userWallet.balancePaise / 100 : userWallet.balance) : 500000;
+            const used = Math.round((userWallet?.usedMargin || 0) + (userWallet?.misMargin || 0) + (userWallet?.optionMargin || 0));
+            const blocked = userWallet?.blockedMargin || 0;
+            const avail = (userWallet && typeof userWallet.availableMargin === 'number' && userWallet.availableMargin > 0)
+                ? userWallet.availableMargin
+                : Math.max(0, bal - used - blocked);
+
+            const tickPayload = {
+                positions: allOpen,
+                equityPositions: equity,
+                optionPositions: options,
+                holdings,
+                closedPositions: closed,
+                todayPnl,
+                totalPnl,
+                totalRealizedPnl,
+                allTimeRealizedPnl,
+                wallet: {
+                    balance: bal,
+                    availableMargin: avail,
+                    usedMargin: used,
+                    totalUsedMargin: used,
+                    blockedMargin: blocked,
+                },
+                at: Date.now()
+            };
+
+            io.to(`user:${userId}`).emit('positionsTick', tickPayload);
+            io.to(userId.toString()).emit('positionsTick', tickPayload);
+        }
     } catch { /* next tick */ }
     finally { _pnlTickBusy = false; }
 }, 1000);
@@ -2378,6 +3706,7 @@ app.get('/positions/day', async (req, res) => {
         const { start: startUTC, end: endUTC } = istDayRange();
 
         const trades = await TradeModel.find({
+            userId:      req.user._id,
             createdAt:   { $gte: startUTC, $lte: endUTC },
             productType: { $in: ['NRML', 'MIS'] },
         }).sort({ stockSymbol: 1, createdAt: 1 });
@@ -2444,6 +3773,7 @@ app.get('/positions/day', async (req, res) => {
 
         // Individual trades sorted chronologically (for trade log view)
         const tradeLog = await TradeModel.find({
+            userId:      req.user._id,
             createdAt:   { $gte: startUTC, $lte: endUTC },
             productType: { $in: ['NRML', 'MIS'] },
         }).sort({ createdAt: 1 }).lean();
@@ -2479,7 +3809,13 @@ const OPTION_LOT_SIZES = {
 };
 
 function buildOptionSymbol(underlying, expiry, strike, optionType) {
-    const d   = new Date(expiry + 'T12:00:00');
+    let resolvedExpiry = expiry;
+    let d = new Date((resolvedExpiry || '') + 'T12:00:00');
+    if (isNaN(d.getTime()) || !resolvedExpiry || resolvedExpiry === 'NEAR') {
+        const expList = marketDataService.getExpiryDates ? marketDataService.getExpiryDates(underlying) : [];
+        resolvedExpiry = expList[0] || new Date().toISOString().slice(0, 10);
+        d = new Date(resolvedExpiry + 'T12:00:00');
+    }
     const mon = d.toLocaleDateString('en-US', { month: 'short' }).toUpperCase();
     const yr  = String(d.getFullYear()).slice(2);
     return `${underlying.replace(/\s+/g, '')}${yr}${mon}${strike}${optionType}`;
@@ -2491,31 +3827,40 @@ async function getLiveOptionLTP(underlyingSymbol, strikePrice, optionType, expir
 }
 
 // Enrich open option positions with live LTP + mark-to-market P&L
-async function enrichOptionPositions(positions) {
+async function enrichOptionPositions(userId, positions) {
     return Promise.all(positions.map(async pos => {
         const liveLTP = await getLiveOptionLTP(pos.underlyingSymbol, pos.strikePrice, pos.optionType, pos.expiry);
-        const ltp     = liveLTP ?? pos.ltp;
-        // Mark-to-market on the quantity still open (sign-correct for shorts:
-        // quantity < 0 for a written option, so a falling premium profits).
-        const unrealizedPnl = Math.round(pos.quantity * (ltp - pos.avgPremium) * 100) / 100;
-        const realizedPnl   = await computeRealizedPnlToday(pos.symbol, pos.productType || 'NRML');
+        const avg     = Number(pos.avgPremium || pos.avgPrice || 100);
+        const ltp     = liveLTP ?? (typeof pos.ltp === 'number' ? pos.ltp : avg);
+        const side    = pos.side || (pos.quantity >= 0 ? 'BUY' : 'SELL');
+        const dir     = side.toUpperCase() === 'BUY' ? 1 : -1;
+        // Mark-to-market on the quantity still open
+        const unrealizedPnl = Math.round(pos.quantity * (ltp - avg) * dir * 100) / 100;
+        const realizedPnl   = await computeRealizedPnlToday(userId, pos.symbol, pos.productType || 'NRML');
         const pnl     = Math.round((realizedPnl + unrealizedPnl) * 100) / 100;
-        const pnlPct  = pos.avgPremium > 0 ? (unrealizedPnl / (Math.abs(pos.quantity) * pos.avgPremium)) * 100 : 0;
+        const pnlPct  = avg > 0 ? (unrealizedPnl / (Math.abs(pos.quantity) * avg)) * 100 : 0;
         return {
-            ...pos.toObject(),
+            ...(pos.toObject ? pos.toObject() : pos),
+            kind: 'option',
+            symbol: `${pos.underlyingSymbol} ${pos.strikePrice} ${pos.optionType}`,
+            contractSymbol: pos.symbol,
+            side,
+            avgPrice: avg,
+            avgPremium: avg,
             ltp,
             realizedPnl,
             unrealizedPnl,
             pnl,
             pnlPct: Math.round(pnlPct * 100) / 100,
+            productType: pos.productType || 'NRML',
         };
     }));
 }
 
 app.get('/optionPositions', async (req, res) => {
     try {
-        const positions = await OptionPositionsModel.find({});
-        res.status(200).json(await enrichOptionPositions(positions));
+        const positions = await OptionPositionsModel.find({ userId: req.user._id });
+        res.status(200).json(await enrichOptionPositions(req.user._id, positions));
     } catch (err) {
         res.status(500).json({ message: 'Error fetching option positions', error: err.message });
     }
@@ -2525,19 +3870,38 @@ app.get('/optionPositions', async (req, res) => {
 // and /optionPositions/:id/squareoff (closes an existing position at market).
 // Returns { status, body } instead of writing to a response directly so both
 // callers can shape their own HTTP reply.
-async function executeOptionOrder({ underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action }) {
+async function executeOptionOrder(userId, { underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action, orderType, existingOrderId }) {
+    const { EnrollmentModel } = require('./model/EnrollmentModel');
+    const enr = await EnrollmentModel.findOne({ userId, status: 'ACTIVE' });
+    const haltCheck = await marketControlService.isBatchHalted(enr?.batchId);
+    if (haltCheck.isHalted) {
+        return { status: 403, body: { message: `Trading is halted: ${haltCheck.reason || 'Trading paused'}` } };
+    }
+
     const lotSize = OPTION_LOT_SIZES[underlyingSymbol] || 50;
     const qty     = Number(lots) * lotSize;
-    const prem    = Number(premium);
+    let resolvedPrem = Number(typeof premium === 'number' ? premium : (premium?.ltp ?? premium));
+    if (!Number.isFinite(resolvedPrem) || resolvedPrem <= 0) {
+        resolvedPrem = 100;
+    }
+    const prem    = resolvedPrem;
     const total   = qty * prem;
+
+    let resolvedExpiry = expiry;
+    if (!resolvedExpiry || resolvedExpiry === 'NEAR' || isNaN(new Date((resolvedExpiry || '') + 'T12:00:00').getTime())) {
+        const expList = marketDataService.getExpiryDates ? marketDataService.getExpiryDates(underlyingSymbol) : [];
+        resolvedExpiry = expList[0] || new Date().toISOString().slice(0, 10);
+    }
+    expiry = resolvedExpiry;
+
     const symbol  = buildOptionSymbol(underlyingSymbol, expiry, strikePrice, optionType);
     const charges = calcCharges({ segment: 'options', side: action, turnover: total });
     const underlyingPrice = marketDataService.getStockPrice(underlyingSymbol)?.ltp
         ?? marketDataService.getIndexData()[underlyingSymbol]?.ltp ?? 0;
 
     try {
-        const wallet = await WalletModel.findOne({});
-        let position = await OptionPositionsModel.findOne({ underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry });
+        const wallet = await WalletModel.findOne({ userId });
+        let position = await OptionPositionsModel.findOne({ userId, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry });
         let realizedPnl = 0;
         let marginDelta = 0; // change in wallet.usedMargin
 
@@ -2555,7 +3919,7 @@ async function executeOptionOrder({ underlyingSymbol, strikePrice, optionType, e
                 const oldAvgPremium = position.avgPremium;
                 if (overflow > 0) {
                     await recordClosedOptionPosition({
-                        symbol, productType: 'NRML', quantity: -shortQty, lots: -shortQty / lotSize,
+                        userId, symbol, productType: 'NRML', quantity: -shortQty, lots: -shortQty / lotSize,
                         avgPrice: oldAvgPremium, exitPrice: prem, pnl: coverPnl,
                         underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
                     });
@@ -2570,7 +3934,7 @@ async function executeOptionOrder({ underlyingSymbol, strikePrice, optionType, e
                 position.ltp = prem;
                 if (position.quantity === 0) {
                     await recordClosedOptionPosition({
-                        symbol, productType: 'NRML', quantity: -shortQty, lots: -shortQty / lotSize,
+                        userId, symbol, productType: 'NRML', quantity: -shortQty, lots: -shortQty / lotSize,
                         avgPrice: oldAvgPremium, exitPrice: prem, pnl: coverPnl,
                         underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
                     });
@@ -2589,7 +3953,7 @@ async function executeOptionOrder({ underlyingSymbol, strikePrice, optionType, e
                     position.ltp = prem;
                 } else {
                     position = new OptionPositionsModel({
-                        symbol, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
+                        userId, symbol, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
                         lotSize, lots: Number(lots), quantity: qty, avgPremium: prem, ltp: prem,
                     });
                 }
@@ -2607,13 +3971,13 @@ async function executeOptionOrder({ underlyingSymbol, strikePrice, optionType, e
                 const oldAvgPremium = position.avgPremium;
                 if (remainder > 0) {
                     await recordClosedOptionPosition({
-                        symbol, productType: 'NRML', quantity: closeQty, lots: closeQty / lotSize,
+                        userId, symbol, productType: 'NRML', quantity: closeQty, lots: closeQty / lotSize,
                         avgPrice: oldAvgPremium, exitPrice: prem, pnl: closePnl,
                         underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
                     });
                     await OptionPositionsModel.deleteOne({ _id: position._id });
                     position = new OptionPositionsModel({
-                        symbol, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
+                        userId, symbol, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
                         lotSize, lots: -remainder / lotSize, quantity: -remainder, avgPremium: prem, ltp: prem,
                     });
                     await position.save();
@@ -2624,8 +3988,9 @@ async function executeOptionOrder({ underlyingSymbol, strikePrice, optionType, e
                     position.ltp = prem;
                     if (position.quantity === 0) {
                         await recordClosedOptionPosition({
-                            symbol, productType: 'NRML', quantity: closeQty, lots: closeQty / lotSize,
+                            userId, symbol, productType: 'NRML', quantity: closeQty, lots: closeQty / lotSize,
                             avgPrice: oldAvgPremium, exitPrice: prem, pnl: closePnl,
+                            underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
                         });
                         await OptionPositionsModel.deleteOne({ _id: position._id });
                     } else await position.save();
@@ -2647,7 +4012,7 @@ async function executeOptionOrder({ underlyingSymbol, strikePrice, optionType, e
                     position.lots = position.quantity / lotSize;
                 } else {
                     position = new OptionPositionsModel({
-                        symbol, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
+                        userId, symbol, underlyingSymbol, strikePrice: Number(strikePrice), optionType, expiry,
                         lotSize, lots: -Number(lots), quantity: -qty, avgPremium: prem, ltp: prem,
                     });
                 }
@@ -2657,87 +4022,370 @@ async function executeOptionOrder({ underlyingSymbol, strikePrice, optionType, e
         }
 
         if (wallet) {
-            // Tracked in its own field, not `usedMargin` — `usedMargin` is
-            // recomputed *fresh from CNC holdings* on every equity fill
-            // (orderEngine.js executeOrder()), which would silently wipe
-            // this delta-based option margin the next time the user placed
-            // any unrelated equity trade.
-            wallet.optionMargin = Math.max(0, (wallet.optionMargin || 0) + marginDelta);
-            if (realizedPnl !== 0 || charges.total !== 0) {
-                wallet.balance += Math.round((realizedPnl - charges.total) * 100) / 100;
+            wallet.balance = Number(wallet.balance || 0);
+            const validRealizedPnl = Number.isFinite(Number(realizedPnl)) ? Number(realizedPnl) : 0;
+            const validCharges = Number.isFinite(Number(charges?.total)) ? Number(charges.total) : 0;
+            if (validRealizedPnl !== 0 || validCharges !== 0) {
+                wallet.balance += Math.round((validRealizedPnl - validCharges) * 100) / 100;
             }
-            wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
+            wallet.optionMargin = Math.max(0, (wallet.optionMargin || 0) + marginDelta);
+            wallet.availableMargin = Math.max(0, wallet.balance - (wallet.usedMargin || 0) - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
             await wallet.save();
+            await orderEngine.recomputeBlockedMargin(userId, wallet);
         }
 
-        await new TradeModel({ stockSymbol: symbol, quantity: qty, price: prem, side: action, productType: 'NRML', charges: charges.total, totalValue: total }).save();
-        await new OrdersModel({ stockSymbol: symbol, quantity: qty, price: prem, type: 'MARKET', side: action, status: 'EXECUTED', productType: 'NRML' }).save();
+        const tradeDoc = await new TradeModel({ userId, stockSymbol: symbol, quantity: qty, price: prem, side: action, productType: 'NRML', charges: charges.total, totalValue: total }).save();
 
-        io.emit('optionOrderExecuted', { action, symbol, lots: Number(lots), qty, premium: prem, total, pnl: realizedPnl, wallet: wallet?.toObject() });
+        let orderDoc;
+        if (existingOrderId) {
+            orderDoc = await OrdersModel.findById(existingOrderId);
+            if (orderDoc) {
+                orderDoc.status = 'EXECUTED';
+                orderDoc.price = prem;
+                orderDoc.quantity = qty;
+                await orderDoc.save();
+            }
+        }
+        if (!orderDoc) {
+            orderDoc = await new OrdersModel({
+                userId,
+                stockSymbol: symbol,
+                quantity: qty,
+                price: prem,
+                type: orderType || 'MARKET',
+                side: action,
+                status: 'EXECUTED',
+                productType: 'NRML',
+                underlyingSymbol,
+                strikePrice: Number(strikePrice),
+                optionType,
+                expiry,
+                lots: Number(lots)
+            }).save();
+        }
+
+        const totalUsed = Math.round((wallet?.usedMargin || 0) + (wallet?.misMargin || 0) + (wallet?.optionMargin || 0));
+        const walletPayload = wallet ? {
+            ...(wallet.toObject ? wallet.toObject() : wallet),
+            totalUsedMargin: totalUsed,
+            usedMargin: totalUsed,
+        } : null;
+
+        const orderObj = orderDoc.toObject ? orderDoc.toObject() : orderDoc;
+        io.to(`user:${userId}`).emit('optionOrderExecuted', { action, symbol, lots: Number(lots), qty, premium: prem, total, pnl: realizedPnl, wallet: walletPayload, order: orderObj });
+        io.to(userId.toString()).emit('optionOrderExecuted', { action, symbol, lots: Number(lots), qty, premium: prem, total, pnl: realizedPnl, wallet: walletPayload, order: orderObj });
+        io.to(`user:${userId}`).emit('orderExecuted', { order: orderObj, wallet: walletPayload });
+        io.to(userId.toString()).emit('orderExecuted', { order: orderObj, wallet: walletPayload });
+        io.to(`user:${userId}`).emit('walletUpdated', { wallet: walletPayload });
+        io.to(userId.toString()).emit('walletUpdated', { wallet: walletPayload });
+        io.to(`user:${userId}`).emit('trade_update', { symbol, side: action, lots, price: prem, wallet: walletPayload, order: orderObj });
+        io.to(userId.toString()).emit('trade_update', { symbol, side: action, lots, price: prem, wallet: walletPayload, order: orderObj });
+
+        const { EnrollmentModel } = require('./model/EnrollmentModel');
+        EnrollmentModel.findOne({ userId, status: { $ne: 'DROPPED' } }).then(async enr => {
+            if (enr && io) {
+                const student = await UserModel.findById(userId).select('name');
+                io.to(`batch:${enr.batchId}`).emit('instructorFeed:order', {
+                    studentId: userId.toString(),
+                    order: orderObj,
+                });
+                sendNotification({
+                    userId,
+                    batchId: enr.batchId,
+                    type: 'TRADE',
+                    title: 'Option Trade Executed',
+                    message: `${student?.name || 'Student'} placed ${action} ${qty} ${symbol} @ ₹${prem}`,
+                    data: { symbol, side: action, quantity: qty, price: prem }
+                }).catch(() => {});
+                broadcastInstructorFeed(io);
+            }
+        }).catch(() => {});
         return {
             status: action === 'BUY' ? 201 : 200,
-            body: { message: `Option ${action} executed`, position, wallet, pnl: realizedPnl, charges },
+            body: { message: `Option ${action} executed`, position, wallet: walletPayload, pnl: realizedPnl, charges, order: orderObj },
         };
 
     } catch (err) {
+        console.error('[executeOptionOrder Error Details]:', err);
         return { status: 500, body: { message: 'Error processing option order', error: err.message } };
     }
 }
 
-app.post('/newOptionOrder', async (req, res) => {
-    const { underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action } = req.body;
+// Register option execution handler into orderEngine so trigger engine can evaluate option orders
+orderEngine.registerOptionExecutor(executeOptionOrder);
 
-    if (!underlyingSymbol || !strikePrice || !optionType || !expiry || !lots || !premium || !action) {
-        return res.status(400).json({ message: 'Missing required fields: underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action' });
+app.post('/newOptionOrder', async (req, res) => {
+    if (marketControlService.isHalted()) {
+        const state = marketControlService.getMarketState();
+        return res.status(403).json({ message: `Trading is halted${state.haltReason ? ': ' + state.haltReason : ''}` });
+    }
+
+    // Check institute feature gate for optionsTrading
+    if (req.user?.instituteCode || req.user?.instituteId) {
+        try {
+            const inst = await InstituteModel.findOne({
+                $or: [
+                    { code: req.user.instituteCode },
+                    ...(req.user.instituteId ? [{ _id: req.user.instituteId }] : [])
+                ]
+            }).select('features status');
+            if (inst && inst.features && inst.features.optionsTrading === false) {
+                return res.status(403).json({ message: 'Options trading is disabled for your institute by administrator.' });
+            }
+        } catch (_) {}
+    }
+
+    let { underlyingSymbol, strikePrice, optionType, expiry, lots, premium, price, action, side, symbol, orderType, type, triggerPrice } = req.body;
+
+    underlyingSymbol = normalizeIndexName(underlyingSymbol || symbol || req.body.stockSymbol || 'NIFTY 50');
+    action = (action || side || 'BUY').toUpperCase();
+    lots = Number(lots ?? 1);
+    strikePrice = strikePrice !== null && strikePrice !== undefined ? Number(strikePrice) : 0;
+    optionType = (optionType || 'CE').toUpperCase();
+    expiry = expiry || 'NEAR';
+    const effectiveOrderType = ['MARKET', 'LIMIT', 'SL', 'SLM'].includes(orderType || type) ? (orderType || type) : 'MARKET';
+
+    let currentMarketLtp = 0;
+    if (marketDataService.getOptionLTPSync) {
+        currentMarketLtp = marketDataService.getOptionLTPSync(underlyingSymbol, strikePrice, optionType, expiry);
+    }
+    if (!currentMarketLtp && marketDataService.getOptionLTP) {
+        currentMarketLtp = (await marketDataService.getOptionLTP(underlyingSymbol, strikePrice, optionType, expiry)) || 100;
+    }
+
+    let resolvedPrem = Number(premium !== undefined ? premium : (price !== undefined ? price : 0));
+    if (!Number.isFinite(resolvedPrem) || resolvedPrem <= 0) {
+        resolvedPrem = currentMarketLtp || 100;
+    }
+
+    if (!underlyingSymbol) {
+        return res.status(400).json({ message: 'underlyingSymbol is required' });
     }
     if (!['BUY', 'SELL'].includes(action)) {
         return res.status(400).json({ message: 'action must be BUY or SELL' });
     }
-    // Same class of bug as /newOrder: `!lots`/`!premium` don't catch
-    // negative values, which would invert the margin/premium math downstream.
-    if (!Number.isFinite(Number(lots)) || Number(lots) <= 0 || !Number.isFinite(Number(premium)) || Number(premium) <= 0) {
-        return res.status(400).json({ message: 'lots and premium must be positive numbers' });
+    const lotSize = OPTION_LOT_SIZES[underlyingSymbol] || 50;
+    const qty = lots * lotSize;
+    let resolvedExpiry = expiry;
+    if (!resolvedExpiry || resolvedExpiry === 'NEAR' || isNaN(new Date((resolvedExpiry || '') + 'T12:00:00').getTime())) {
+        const expList = marketDataService.getExpiryDates ? marketDataService.getExpiryDates(underlyingSymbol) : [];
+        resolvedExpiry = expList[0] || new Date().toISOString().slice(0, 10);
     }
-    if (!isMarketOpen('FO')) {
-        return res.status(400).json({
-            message: 'Market is closed',
-            detail: 'NSE F&O trading hours: Mon–Fri, 9:15 AM – 3:40 PM IST.',
-            marketClosed: true,
+    const optSymbol = buildOptionSymbol(underlyingSymbol, resolvedExpiry, strikePrice, optionType);
+
+    // If LIMIT order and not immediately marketable, create PENDING resting order:
+    const isResting = (effectiveOrderType === 'LIMIT' && (
+        (action === 'BUY' && resolvedPrem < currentMarketLtp) ||
+        (action === 'SELL' && resolvedPrem > currentMarketLtp)
+    )) || effectiveOrderType === 'SL' || effectiveOrderType === 'SLM';
+
+    if (isResting) {
+        const wallet = await WalletModel.findOne({ userId: req.user._id });
+        const underlyingPrice = marketDataService.getStockPrice(underlyingSymbol)?.ltp
+            ?? marketDataService.getIndexData()[underlyingSymbol]?.ltp ?? 0;
+        const requiredMargin = action === 'BUY'
+            ? (qty * resolvedPrem)
+            : rules.approxOptionWriteMargin(underlyingPrice, qty, resolvedPrem);
+
+        if (!wallet || (wallet.availableMargin ?? wallet.balance) < requiredMargin) {
+            return res.status(400).json({
+                message: 'Insufficient margin for option order',
+                required: requiredMargin,
+                available: wallet?.availableMargin ?? wallet?.balance ?? 0
+            });
+        }
+
+        // Block margin on wallet
+        wallet.blockedMargin = Math.round((wallet.blockedMargin || 0) + requiredMargin);
+        wallet.availableMargin = Math.max(0, wallet.balance - (wallet.usedMargin || 0) - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - wallet.blockedMargin);
+        await wallet.save();
+
+        const orderDoc = await new OrdersModel({
+            userId: req.user._id,
+            instituteId: req.user.instituteId || null,
+            stockSymbol: optSymbol,
+            quantity: qty,
+            price: resolvedPrem,
+            triggerPrice: triggerPrice ? Number(triggerPrice) : null,
+            type: effectiveOrderType,
+            side: action,
+            status: 'PENDING',
+            productType: 'NRML',
+            exchange: 'NSE',
+            underlyingSymbol,
+            strikePrice,
+            optionType,
+            expiry: resolvedExpiry,
+            lots
+        }).save();
+
+        const totalUsed = Math.round((wallet.usedMargin || 0) + (wallet.misMargin || 0) + (wallet.optionMargin || 0));
+        const walletPayload = {
+            ...(wallet.toObject ? wallet.toObject() : wallet),
+            totalUsedMargin: totalUsed,
+            usedMargin: totalUsed,
+        };
+
+        const orderObj = orderDoc.toObject ? orderDoc.toObject() : orderDoc;
+        io.to(`user:${req.user._id}`).emit('orderCreated', { order: orderObj, wallet: walletPayload });
+        io.to(req.user._id.toString()).emit('orderCreated', { order: orderObj, wallet: walletPayload });
+        io.to(`user:${req.user._id}`).emit('walletUpdated', { wallet: walletPayload });
+        io.to(req.user._id.toString()).emit('walletUpdated', { wallet: walletPayload });
+
+        return res.status(201).json({
+            message: `${effectiveOrderType} option order placed — resting in Open tab`,
+            order: orderObj,
+            resting: true
         });
     }
 
-    const result = await executeOptionOrder({ underlyingSymbol, strikePrice, optionType, expiry, lots, premium, action });
+    const result = await executeOptionOrder(req.user._id, {
+        underlyingSymbol,
+        strikePrice,
+        optionType,
+        expiry: resolvedExpiry,
+        lots,
+        premium: resolvedPrem,
+        action,
+        orderType: effectiveOrderType
+    });
     res.status(result.status).json(result.body);
+});
+
+// Unified simulated trade endpoint for mobile app
+app.post('/trade', async (req, res) => {
+    try {
+        let { symbol, stockSymbol, underlyingSymbol, strikePrice, optionType, expiry, lots, qty, quantity, price, premium, side, action, type, orderType } = req.body;
+        
+        const rawSymbol = symbol || stockSymbol || underlyingSymbol || 'NIFTY';
+        const targetSide = (action || side || 'BUY').toUpperCase();
+        const targetPrice = Number(price !== undefined ? price : (premium !== undefined ? premium : 0));
+        
+        const isOption = optionType || strikePrice || rawSymbol.toUpperCase().includes(' CE') || rawSymbol.toUpperCase().includes(' PE');
+        
+        if (isOption) {
+            let underlying = underlyingSymbol || 'NIFTY 50';
+            let strike = strikePrice !== undefined && strikePrice !== null ? Number(strikePrice) : 0;
+            let optType = (optionType || 'CE').toUpperCase();
+
+            const optMatch = rawSymbol.trim().match(/^(.*?)\s*(\d{4,6})\s*(CE|PE)$/i);
+            if (optMatch) {
+                underlying = underlyingSymbol || optMatch[1].trim();
+                strike = strike || Number(optMatch[2]);
+                optType = optionType || optMatch[3].toUpperCase();
+            } else {
+                let parts = rawSymbol.trim().split(/\s+/);
+                if (parts.length >= 3 && !isNaN(parts[parts.length - 2])) {
+                    optType = optionType || parts[parts.length - 1].toUpperCase();
+                    strike = strike || Number(parts[parts.length - 2]);
+                    underlying = underlyingSymbol || parts.slice(0, parts.length - 2).join(' ');
+                } else if (parts[1] && !isNaN(parts[1])) {
+                    strike = strike || Number(parts[1]);
+                }
+            }
+
+            underlying = normalizeIndexName(underlying);
+            let numLots = Number(lots || (qty ? Math.max(1, Math.round(Number(qty) / 25)) : (quantity ? Math.max(1, Math.round(Number(quantity) / 25)) : 1)));
+            let prem = targetPrice > 0 ? targetPrice : (await marketDataService.getOptionLTP(underlying, strike, optType, expiry) || 100);
+
+            const result = await executeOptionOrder(req.user._id, {
+                underlyingSymbol: underlying,
+                strikePrice: strike,
+                optionType: optType,
+                expiry: expiry || 'NEAR',
+                lots: numLots,
+                premium: prem,
+                action: targetSide
+            });
+
+            if (io) {
+                io.to(`user:${req.user._id}`).emit('trade_update', {
+                    symbol: `${underlying} ${strike} ${optType}`,
+                    side: targetSide,
+                    lots: numLots,
+                    price: prem,
+                    timestamp: new Date()
+                });
+            }
+
+            return res.status(result.status).json(result.body);
+        } else {
+            const targetQty = Number(qty || quantity || lots || 1);
+            let finalPrice = targetPrice;
+            if (!finalPrice || finalPrice <= 0) {
+                const live = marketDataService.getStockPrice(rawSymbol);
+                finalPrice = live?.ltp || 1000;
+            }
+            const orderTyp = ['MARKET', 'LIMIT', 'SL', 'SLM'].includes(type || orderType) ? (type || orderType) : 'MARKET';
+
+            marketDataService.trackSymbol(rawSymbol);
+            const result = await orderEngine.placeOrder(req.user._id, {
+                stockSymbol: rawSymbol,
+                quantity: targetQty,
+                price: finalPrice,
+                type: orderTyp,
+                side: targetSide,
+                productType: 'CNC'
+            });
+
+            if (io) {
+                io.to(`user:${req.user._id}`).emit('trade_update', {
+                    symbol: rawSymbol,
+                    side: targetSide,
+                    quantity: targetQty,
+                    price: finalPrice,
+                    timestamp: new Date()
+                });
+            }
+
+            return res.status(201).json({
+                message: 'Order executed successfully',
+                order: result.order,
+                trade: result.trade
+            });
+        }
+    } catch (err) {
+        if (err instanceof orderEngine.OrderRejectedError) {
+            return res.status(400).json({ message: err.message });
+        }
+        res.status(500).json({ message: 'Error creating trade', error: err.message });
+    }
 });
 
 // Square off (fully or partially close) an existing option position at the
 // current live chain premium — the long-press "Square off" action in the app.
 app.post('/optionPositions/:id/squareoff', async (req, res) => {
-    if (!isMarketOpen('FO')) {
-        return res.status(400).json({ message: 'Market is closed', marketClosed: true });
-    }
     try {
         const position = await OptionPositionsModel.findById(req.params.id);
         if (!position) return res.status(404).json({ message: 'Position not found' });
+
+        if (req.user.role === 'STUDENT' && position.userId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: 'Unauthorized to square off this position' });
+        }
 
         const isShort = position.quantity < 0;
         const action  = isShort ? 'BUY' : 'SELL'; // cover a short, sell a long
         const requestedLots = req.body?.lots ? Number(req.body.lots) : Math.abs(position.lots);
         const lots = Math.min(requestedLots, Math.abs(position.lots));
 
-        const liveLtp = await getLiveOptionLTP(position.underlyingSymbol, position.strikePrice, position.optionType, position.expiry);
-        const premium = liveLtp ?? position.ltp;
+        const rawLive = await getLiveOptionLTP(position.underlyingSymbol, position.strikePrice, position.optionType, position.expiry);
+        let premium = typeof rawLive === 'number' ? rawLive : (rawLive?.ltp ?? (typeof position.ltp === 'number' ? position.ltp : (position.ltp?.ltp ?? position.avgPremium ?? 100)));
+        if (!Number.isFinite(Number(premium)) || Number(premium) <= 0) {
+            premium = Number(position.avgPremium || 100);
+        }
 
-        const result = await executeOptionOrder({
+        const result = await executeOptionOrder(position.userId, {
             underlyingSymbol: position.underlyingSymbol, strikePrice: position.strikePrice,
             optionType: position.optionType, expiry: position.expiry,
             lots, premium, action,
         });
+        CacheService.invalidatePortfolio(position.userId.toString()).catch(() => {});
         res.status(result.status).json(result.body);
     } catch (err) {
         res.status(500).json({ message: 'Error squaring off position', error: err.message });
     }
 });
+
 
 // ============ ADMIN TOKEN WEB PAGE ============
 // Open http://your-server:8080/admin/token in any browser — paste token, save.
@@ -2886,7 +4534,18 @@ app.get('/admin/token-status', (req, res) => {
 });
 
 // ============ START SERVER ============
-server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-    console.log(`Socket.IO is ready`);
-});
+if (require.main === module) {
+    server.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+        console.log(`Socket.IO is ready`);
+    });
+}
+
+module.exports = {
+    app,
+    server,
+    io,
+    executeOptionOrder,
+    getLiveOptionLTP,
+};
+
