@@ -43,7 +43,13 @@ const MONGO_URI = process.env.DATABASE_URL;
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: { origin: '*', methods: ['GET', 'POST'] },
+    cors: {
+        origin: process.env.ALLOWED_ORIGINS
+            ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+            : '*',
+        methods: ['GET', 'POST'],
+        credentials: true,
+    },
 });
 ioInstance = io;
 app.set('io', io);
