@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Trade Lab",
-    "slug": "tradelab-mobile",
+    "slug": "zerodha-kite",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/Icon.png",
