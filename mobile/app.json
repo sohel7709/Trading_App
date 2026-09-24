@@ -67,7 +67,7 @@
       "expo-status-bar"
     ],
     "extra": {
-      "apiUrl": "https://mascot-sneak-cranium.ngrok-free.dev",
+      "apiUrl": "https://backend-api-production-88b1.up.railway.app",
       "eas": {
         "projectId": "f83a41b9-d1f9-4f56-8f0f-fea76d8c078f"
       }

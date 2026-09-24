@@ -14,13 +14,13 @@
       "distribution": "internal",
       "channel": "preview",
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://192.168.1.4:8080"
+        "EXPO_PUBLIC_API_URL": "https://backend-api-production-88b1.up.railway.app"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://192.168.1.4:8080"
+        "EXPO_PUBLIC_API_URL": "https://backend-api-production-88b1.up.railway.app"
       }
     }
   },
