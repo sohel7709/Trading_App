@@ -3,14 +3,16 @@
  * ─────────────────────────────────────────────────────────
  * Institutional Student App Navigation:
  * - 5 Core Bottom Tabs:
- *     1. Home (Real-time Dashboard)
- *     2. Trade (Live Option Chain & Order Execution)
- *     3. Portfolio (Open Positions & Closed Trades)
- *     4. Analytics (Interactive PnL Curve & Win Rates)
- *     5. Profile (Batch, Instructor & Institutional Settings)
+ *     1. Watchlist  (Live Market Watchlist — default landing screen)
+ *     2. Trade      (Live Option Chain & Order Execution)
+ *     3. Orders     (Order Book & History)
+ *     4. Portfolio  (Open Positions & Closed Trades)
+ *     5. Profile    (Capital summary, PnL stats, Batch & Settings)
  *
  * All screens are statically imported to eliminate Metro bundler
  * dynamic chunk resolution errors (e.g. "cannot read property reload").
+ * DashboardScreen is retained as an accessible screen inside stacks
+ * but is no longer the root tab — Watchlist is Tab 1.
  */
 
 import React from 'react';
@@ -21,7 +23,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 
 // ── Static Screen Imports (100% Reliable in Metro) ───────────────────────────
-import DashboardScreen from '../screens/DashboardScreen';
+import DashboardScreen from '../screens/DashboardScreen'; // kept for deep-link access
 import PortfolioScreen from '../screens/PortfolioScreen';
 import OptionChainScreen from '../screens/OptionChainScreen';
 import AnalyticsScreen from '../screens/AnalyticsScreen';
@@ -46,46 +48,28 @@ const screenOptions = {
   animationDuration: 220,
 };
 
-// ── 1. Home Stack ─────────────────────────────────────────────────────────────
-function HomeStack() {
+// ── 1. Watchlist Stack (NEW TAB 1 — replaces Home/Dashboard) ─────────────────
+function WatchlistStack() {
   return (
     <Stack.Navigator screenOptions={screenOptions}>
-      <Stack.Screen name="HomeMain"       component={DashboardScreen} />
-      <Stack.Screen name="Chain"          component={OptionChainScreen} />
-      <Stack.Screen name="OptionChain"    component={OptionChainScreen} />
-      <Stack.Screen name="Trade"          component={OptionChainScreen} />
+      <Stack.Screen name="WatchlistMain"  component={WatchlistScreen} />
+      <Stack.Screen name="StockDetail"    component={StockDetailScreen} />
       <Stack.Screen name="Orders"         component={OrdersScreen} />
-      <Stack.Screen name="Analytics"      component={AnalyticsScreen} />
-      <Stack.Screen name="Notifications"  component={NotificationsScreen} />
-      <Stack.Screen name="TradeJournal"   component={TradeJournalScreen} />
-      <Stack.Screen name="Funds"          component={FundsScreen} />
-      <Stack.Screen name="OrderEntry"     component={OrderEntryScreen} />
-      <Stack.Screen name="StockDetail"    component={StockDetailScreen} />
-      <Stack.Screen name="Chat"           component={ChatScreen} />
-      <Stack.Screen name="Profile"        component={ProfileScreen} />
-      <Stack.Screen name="Watchlist"      component={WatchlistScreen} />
-      <Stack.Screen name="IndexChart"     component={IndexChartScreen} />
-    </Stack.Navigator>
-  );
-}
-
-// ── 2. Orders Stack ───────────────────────────────────────────────────────────
-function OrdersStack() {
-  return (
-    <Stack.Navigator screenOptions={screenOptions}>
-      <Stack.Screen name="OrdersMain"     component={OrdersScreen} />
-      <Stack.Screen name="OrderEntry"     component={OrderEntryScreen} />
-      <Stack.Screen name="StockDetail"    component={StockDetailScreen} />
       <Stack.Screen name="Chain"          component={OptionChainScreen} />
       <Stack.Screen name="OptionChain"    component={OptionChainScreen} />
       <Stack.Screen name="Trade"          component={OptionChainScreen} />
+      <Stack.Screen name="OrderEntry"     component={OrderEntryScreen} />
+      <Stack.Screen name="Analytics"      component={AnalyticsScreen} />
+      <Stack.Screen name="Funds"          component={FundsScreen} />
+      <Stack.Screen name="TradeJournal"   component={TradeJournalScreen} />
       <Stack.Screen name="Positions"      component={PortfolioScreen} />
       <Stack.Screen name="IndexChart"     component={IndexChartScreen} />
+      <Stack.Screen name="Dashboard"      component={DashboardScreen} />
     </Stack.Navigator>
   );
 }
 
-// ── 3. Trade Stack (Option Chain & Execution) ─────────────────────────────────
+// ── 2. Trade Stack (Option Chain & Execution) ─────────────────────────────────
 function TradeStack() {
   return (
     <Stack.Navigator screenOptions={screenOptions}>
@@ -95,6 +79,22 @@ function TradeStack() {
       <Stack.Screen name="Orders"         component={OrdersScreen} />
       <Stack.Screen name="OrderEntry"     component={OrderEntryScreen} />
       <Stack.Screen name="StockDetail"    component={StockDetailScreen} />
+      <Stack.Screen name="Positions"      component={PortfolioScreen} />
+      <Stack.Screen name="IndexChart"     component={IndexChartScreen} />
+    </Stack.Navigator>
+  );
+}
+
+// ── 3. Orders Stack ───────────────────────────────────────────────────────────
+function OrdersStack() {
+  return (
+    <Stack.Navigator screenOptions={screenOptions}>
+      <Stack.Screen name="OrdersMain"     component={OrdersScreen} />
+      <Stack.Screen name="OrderEntry"     component={OrderEntryScreen} />
+      <Stack.Screen name="StockDetail"    component={StockDetailScreen} />
+      <Stack.Screen name="Chain"          component={OptionChainScreen} />
+      <Stack.Screen name="OptionChain"    component={OptionChainScreen} />
+      <Stack.Screen name="Trade"          component={OptionChainScreen} />
       <Stack.Screen name="Positions"      component={PortfolioScreen} />
       <Stack.Screen name="IndexChart"     component={IndexChartScreen} />
     </Stack.Navigator>
@@ -119,39 +119,7 @@ function PortfolioStack() {
   );
 }
 
-// ── 5. Watchlist Stack ────────────────────────────────────────────────────────
-function WatchlistStack() {
-  return (
-    <Stack.Navigator screenOptions={screenOptions}>
-      <Stack.Screen name="WatchlistMain"  component={WatchlistScreen} />
-      <Stack.Screen name="StockDetail"    component={StockDetailScreen} />
-      <Stack.Screen name="Orders"         component={OrdersScreen} />
-      <Stack.Screen name="Chain"          component={OptionChainScreen} />
-      <Stack.Screen name="OptionChain"    component={OptionChainScreen} />
-      <Stack.Screen name="Trade"          component={OptionChainScreen} />
-      <Stack.Screen name="OrderEntry"     component={OrderEntryScreen} />
-      <Stack.Screen name="Analytics"      component={AnalyticsScreen} />
-      <Stack.Screen name="Funds"          component={FundsScreen} />
-      <Stack.Screen name="TradeJournal"   component={TradeJournalScreen} />
-      <Stack.Screen name="Positions"      component={PortfolioScreen} />
-      <Stack.Screen name="IndexChart"     component={IndexChartScreen} />
-    </Stack.Navigator>
-  );
-}
-
-// ── Analytics Stack (accessible via Profile & Home) ───────────────────────────
-function AnalyticsStack() {
-  return (
-    <Stack.Navigator screenOptions={screenOptions}>
-      <Stack.Screen name="AnalyticsMain"  component={AnalyticsScreen} />
-      <Stack.Screen name="TradeJournal"   component={TradeJournalScreen} />
-      <Stack.Screen name="Funds"          component={FundsScreen} />
-      <Stack.Screen name="Orders"         component={OrdersScreen} />
-    </Stack.Navigator>
-  );
-}
-
-// ── 6. Profile Stack ──────────────────────────────────────────────────────────
+// ── 5. Profile Stack ──────────────────────────────────────────────────────────
 function ProfileStack() {
   return (
     <Stack.Navigator screenOptions={screenOptions}>
@@ -243,16 +211,7 @@ export default function AppNavigator() {
         tabBarShowLabel: false,
       }}
     >
-      <Tab.Screen
-        name="Home"
-        component={HomeStack}
-        options={{
-          tabBarIcon: ({ focused }) => (
-            <TabIcon icon="home" iconOutline="home-outline" focused={focused} label="Home" />
-          ),
-        }}
-      />
-
+      {/* Tab 1: Watchlist — default landing screen */}
       <Tab.Screen
         name="Watchlist"
         component={WatchlistStack}
@@ -263,6 +222,18 @@ export default function AppNavigator() {
         }}
       />
 
+      {/* Tab 2: Trade — Live Option Chain & Order Execution */}
+      <Tab.Screen
+        name="Trade"
+        component={TradeStack}
+        options={{
+          tabBarIcon: ({ focused }) => (
+            <TabIcon icon="bar-chart" iconOutline="bar-chart-outline" focused={focused} label="Trade" />
+          ),
+        }}
+      />
+
+      {/* Tab 3: Orders — Order Book & History */}
       <Tab.Screen
         name="Orders"
         component={OrdersStack}
@@ -273,6 +244,7 @@ export default function AppNavigator() {
         }}
       />
 
+      {/* Tab 4: Portfolio — Open Positions & Closed Trades */}
       <Tab.Screen
         name="Positions"
         component={PortfolioStack}
@@ -283,6 +255,7 @@ export default function AppNavigator() {
         }}
       />
 
+      {/* Tab 5: Profile — Capital summary, PnL stats, Batch & Settings */}
       <Tab.Screen
         name="ProfileTab"
         component={ProfileStack}
@@ -295,3 +268,4 @@ export default function AppNavigator() {
     </Tab.Navigator>
   );
 }
+

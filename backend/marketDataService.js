@@ -487,15 +487,43 @@ function getStockPrice(symbol) {
 // on NSE — it's tracked for its index price/chart elsewhere, just not here).
 // NSE: NIFTY 50, BANK NIFTY, FINNIFTY, MIDCPNIFTY, NIFTY NEXT 50.
 // BSE: SENSEX, BANKEX.
+// Supported F&O indices (canonical names)
 const OPTION_CONFIG = {
     'NIFTY 50':      { strikeGap: 50,  atmPremium: 120, weeklyExpiry: true,  expiryDay: 2 }, // Tuesday
     'BANK NIFTY':    { strikeGap: 100, atmPremium: 280, weeklyExpiry: false, expiryDay: 2 }, // last Tuesday
     'SENSEX':        { strikeGap: 100, atmPremium: 350, weeklyExpiry: true,  expiryDay: 4 }, // Thursday
-    'FINNIFTY':       { strikeGap: 50,  atmPremium: 80,  weeklyExpiry: false, expiryDay: 4 }, // last Thursday
+    'FINNIFTY':      { strikeGap: 50,  atmPremium: 80,  weeklyExpiry: false, expiryDay: 4 }, // last Thursday
     'MIDCPNIFTY':    { strikeGap: 25,  atmPremium: 70,  weeklyExpiry: false, expiryDay: 4 }, // last Thursday
     'NIFTY NEXT 50': { strikeGap: 100, atmPremium: 250, weeklyExpiry: false, expiryDay: 4 }, // last Thursday
     'BANKEX':        { strikeGap: 100, atmPremium: 280, weeklyExpiry: false, expiryDay: 2 }, // last Tuesday (BSE)
 };
+
+// Normalize common index name aliases to canonical key
+const INDEX_NAME_ALIASES = {
+    'NIFTY':          'NIFTY 50',
+    'NIFTY50':        'NIFTY 50',
+    'N50':            'NIFTY 50',
+    'BANKNIFTY':      'BANK NIFTY',
+    'BNKNIFTY':       'BANK NIFTY',
+    'BANKN':          'BANK NIFTY',
+    'BNF':            'BANK NIFTY',
+    'FINNIFTY':       'FINNIFTY',
+    'MIDCAP':         'MIDCPNIFTY',
+    'MIDCP':          'MIDCPNIFTY',
+    'SNX':            'SENSEX',
+    'BSE':            'SENSEX',
+    'NIFTYNXT50':     'NIFTY NEXT 50',
+    'NIFTYNEXT50':    'NIFTY NEXT 50',
+    'NIFTYNXT':       'NIFTY NEXT 50',
+    'BANKEX':         'BANKEX',
+};
+
+function normalizeOptionIndexName(name) {
+    if (!name) return 'NIFTY 50';
+    const upper = String(name).toUpperCase().trim();
+    if (OPTION_CONFIG[upper]) return upper;
+    return INDEX_NAME_ALIASES[upper] || upper;
+}
 
 function localDateStr(d) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -562,38 +590,30 @@ function generateOptionChainForIndex(indexName, expiry) {
     const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
     const { strikeGap, atmPremium } = cfg;
     const expiries = getExpiryDates(indexName);
-    // Default to the nearest expiry; accept any explicit expiry (needed for
-    // settlement pricing of past-dated contracts and Dhan expiry dates)
     const resolvedExpiry = expiry || expiries[0];
     const dte = daysToExpiry(resolvedExpiry);
     const atmStrike = Math.round(indexPrice / strikeGap) * strikeGap;
     const rows = [];
-    const isLive = isLiveMarketActive('FO');
 
     for (let i = -12; i <= 12; i++) {
         const strike = atmStrike + i * strikeGap;
         const stepsFromATM = Math.abs(i);
-        const iv = Math.round((14 + stepsFromATM * 0.4 + (isLive ? Math.random() * 1.5 : 0.5)) * 100) / 100;
+        // IV is realistic but not random — stable between renders
+        const iv = Math.round((14 + stepsFromATM * 0.4) * 100) / 100;
         const ceLtp = calcOptionPrice('CE', indexPrice, strike, atmPremium, strikeGap, dte);
         const peLtp = calcOptionPrice('PE', indexPrice, strike, atmPremium, strikeGap, dte);
-        const oiBase = Math.round((5000000 - stepsFromATM * 200000) * 0.9);
+        // OI/volume shown as 0 for synthetic data — UI renders '--' instead of fake numbers
         rows.push({
             strike,
             isATM: i === 0,
             ce: {
-                oi: Math.max(100000, oiBase + (isLive ? Math.floor(Math.random() * 500000) : 50000)),
-                oiChange: isLive ? Math.floor((Math.random() - 0.3) * 300000) : 0,
-                volume: isLive ? Math.floor(Math.random() * 150000) + 10000 : 25000,
-                iv, ltp: ceLtp,
-                change: isLive ? Math.round((Math.random() - 0.5) * ceLtp * 0.3 * 100) / 100 : 0,
+                oi: 0, oiChange: 0, volume: 0,
+                iv, ltp: ceLtp, change: 0,
                 delta: Math.max(0, Math.min(1, Math.round((0.5 - i * 0.07) * 100) / 100)),
             },
             pe: {
-                oi: Math.max(100000, oiBase + (isLive ? Math.floor(Math.random() * 500000) : 50000)),
-                oiChange: isLive ? Math.floor((Math.random() - 0.3) * 300000) : 0,
-                volume: isLive ? Math.floor(Math.random() * 150000) + 10000 : 25000,
-                iv, ltp: peLtp,
-                change: isLive ? Math.round((Math.random() - 0.5) * peLtp * 0.3 * 100) / 100 : 0,
+                oi: 0, oiChange: 0, volume: 0,
+                iv, ltp: peLtp, change: 0,
                 delta: Math.max(-1, Math.min(0, Math.round((-0.5 + i * 0.07) * 100) / 100)),
             },
         });
@@ -664,25 +684,17 @@ function updateOptionChainPrices(chain) {
     const strikeGap = cfg.strikeGap;
     const atmPremium = cfg.atmPremium;
     
-    // Live underlying price from 1-second tick
-    let currentPrice = idxEntry?.ltp || chain.indexPrice || DEFAULT_INDEX_PRICES[indexName] || 24000;
-    
-    if (chain._lastPrice !== undefined && chain._lastPrice === currentPrice) {
-        const microOffset = Math.random() > 0.5 ? 0.05 : -0.05;
-        currentPrice = Math.round((currentPrice + microOffset) * 100) / 100;
-    }
+    // Always use the live Dhan index price as ground truth — never drift from it
+    const currentPrice = idxEntry?.ltp || chain.indexPrice || DEFAULT_INDEX_PRICES[indexName]?.ltp || 24000;
     chain._lastPrice = currentPrice;
 
     const dte = daysToExpiry(chain.expiry);
     const atmStrike = Math.round(currentPrice / strikeGap) * strikeGap;
 
-    const basePrice = chain.baseUnderlyingPrice || chain.indexPrice || currentPrice;
-    const underlyingDiff = currentPrice - basePrice;
-
     chain.indexPrice = currentPrice;
-    chain.indexChange = Math.round(((idxEntry?.change ?? chain.indexChange ?? 0) + (currentPrice - (idxEntry?.ltp || currentPrice))) * 100) / 100;
-    const pc = idxEntry?.previousClose || (currentPrice - (chain.indexChange || 0));
-    chain.indexChangePercent = pc > 0 ? Math.round((chain.indexChange / pc) * 10000) / 100 : 0;
+    const pc = idxEntry?.previousClose || chain.indexPrice;
+    chain.indexChange = idxEntry?.change ?? chain.indexChange ?? 0;
+    chain.indexChangePercent = idxEntry?.changePercent ?? chain.indexChangePercent ?? 0;
     chain.atmStrike = atmStrike;
     chain.daysToExpiry = Math.round(dte * 100) / 100;
     chain.lastUpdated = new Date().toISOString();
@@ -692,35 +704,44 @@ function updateOptionChainPrices(chain) {
         row.isATM = (row.strike === atmStrike);
 
         if (chain.source === 'BROKER_LIVE') {
-            // Live delta-based movement derived from real-time underlying index tick
-            const steps = (row.strike - currentPrice) / (strikeGap * 10);
-            const approxCeDelta = Math.max(0.01, Math.min(0.99, Math.round((0.5 - steps) * 100) / 100));
-            const approxPeDelta = Math.max(-0.99, Math.min(-0.01, Math.round((-0.5 - steps) * 100) / 100));
-
-            const ceDelta = (typeof row.ce?.delta === 'number' && Math.abs(row.ce.delta) > 0.001) ? row.ce.delta : approxCeDelta;
-            const peDelta = (typeof row.pe?.delta === 'number' && Math.abs(row.pe.delta) > 0.001) ? row.pe.delta : approxPeDelta;
-
+            // For BROKER_LIVE: use real LTP from Dhan snapshot (set by syncBrokerOptionChain)
+            // and only micro-adjust from delta if the real LTP anchor exists.
+            // This prevents the 1-second interpolation from drifting away from actual prices.
             if (row.ce) {
-                const baseLtp = row.ce.baseLtp !== undefined ? row.ce.baseLtp : row.ce.ltp;
-                const baseChg = row.ce.baseChange !== undefined ? row.ce.baseChange : (row.ce.change || 0);
-                const ceMove = Math.round(underlyingDiff * ceDelta * 100) / 100;
+                // baseLtp was set from actual Dhan option-chain data at sync time
+                const baseLtp = row.ce.baseLtp;
+                const baseUnderlyingAtSync = chain.baseUnderlyingPrice || currentPrice;
+                const underlyingDiff = currentPrice - baseUnderlyingAtSync;
+                // Clamp delta movement: max 2% price move between sync intervals (prevents drift)
+                const steps = (row.strike - currentPrice) / (strikeGap * 10);
+                const approxCeDelta = Math.max(0.01, Math.min(0.99, Math.round((0.5 - steps) * 100) / 100));
+                const ceDelta = (typeof row.ce.delta === 'number' && Math.abs(row.ce.delta) > 0.001) ? row.ce.delta : approxCeDelta;
+                const ceMove = Math.max(-baseLtp * 0.02, Math.min(baseLtp * 0.02,
+                    Math.round(underlyingDiff * ceDelta * 100) / 100
+                ));
                 const newLtp = Math.max(0.05, Math.round((baseLtp + ceMove) * 100) / 100);
                 row.ce.ltp = newLtp;
-                row.ce.change = Math.round((baseChg + (newLtp - baseLtp)) * 100) / 100;
+                row.ce.change = Math.round((newLtp - (row.ce.prevClose || row.ce.baseLtp || newLtp)) * 100) / 100;
                 row.ce.delta = ceDelta;
             }
 
             if (row.pe) {
-                const baseLtp = row.pe.baseLtp !== undefined ? row.pe.baseLtp : row.pe.ltp;
-                const baseChg = row.pe.baseChange !== undefined ? row.pe.baseChange : (row.pe.change || 0);
-                const peMove = Math.round(underlyingDiff * peDelta * 100) / 100;
+                const baseLtp = row.pe.baseLtp;
+                const baseUnderlyingAtSync = chain.baseUnderlyingPrice || currentPrice;
+                const underlyingDiff = currentPrice - baseUnderlyingAtSync;
+                const steps = (row.strike - currentPrice) / (strikeGap * 10);
+                const approxPeDelta = Math.max(-0.99, Math.min(-0.01, Math.round((-0.5 - steps) * 100) / 100));
+                const peDelta = (typeof row.pe.delta === 'number' && Math.abs(row.pe.delta) > 0.001) ? row.pe.delta : approxPeDelta;
+                const peMove = Math.max(-baseLtp * 0.02, Math.min(baseLtp * 0.02,
+                    Math.round(underlyingDiff * peDelta * 100) / 100
+                ));
                 const newLtp = Math.max(0.05, Math.round((baseLtp + peMove) * 100) / 100);
                 row.pe.ltp = newLtp;
-                row.pe.change = Math.round((baseChg + (newLtp - baseLtp)) * 100) / 100;
+                row.pe.change = Math.round((newLtp - (row.pe.prevClose || row.pe.baseLtp || newLtp)) * 100) / 100;
                 row.pe.delta = peDelta;
             }
         } else {
-            // Simulated mathematical pricing
+            // Simulated mathematical pricing — no random noise (stable between renders)
             const ceLtp = calcOptionPrice('CE', currentPrice, row.strike, atmPremium, strikeGap, dte);
             const peLtp = calcOptionPrice('PE', currentPrice, row.strike, atmPremium, strikeGap, dte);
 
@@ -783,14 +804,16 @@ async function syncBrokerOptionChain() {
                 const rows = liveData.rows.map(r => ({
                     ...r,
                     isATM: r.strike === atmStrike,
-                    ce: r.ce ? { ...r.ce, baseLtp: r.ce.ltp, baseChange: r.ce.change } : null,
-                    pe: r.pe ? { ...r.pe, baseLtp: r.pe.ltp, baseChange: r.pe.change } : null,
+                    // Re-anchor baseLtp from actual broker data every sync cycle.
+                    // This prevents the 1-second delta interpolation from accumulating drift.
+                    ce: r.ce ? { ...r.ce, baseLtp: r.ce.ltp, baseChange: r.ce.change, prevClose: r.ce.change !== undefined ? (r.ce.ltp - r.ce.change) : r.ce.ltp } : null,
+                    pe: r.pe ? { ...r.pe, baseLtp: r.pe.ltp, baseChange: r.pe.change, prevClose: r.pe.change !== undefined ? (r.pe.ltp - r.pe.change) : r.pe.ltp } : null,
                 }));
 
                 activeOptionChains[indexName] = {
                     indexName,
                     indexPrice,
-                    baseUnderlyingPrice: indexPrice,
+                    baseUnderlyingPrice: indexPrice, // re-anchored every 12s sync
                     expiry: resolvedExpiry,
                     daysToExpiry: Math.round(daysToExpiry(resolvedExpiry) * 100) / 100,
                     indexChange: indexData[indexName]?.change ?? 0,
@@ -801,6 +824,7 @@ async function syncBrokerOptionChain() {
                     source: 'BROKER_LIVE',
                     lastUpdated: new Date().toISOString(),
                 };
+                console.log(`[MarketData] ✅ Broker sync: ${indexName} ${resolvedExpiry} — ${rows.length} strikes @ underlying ${indexPrice}`);
             }
             // 1.5s pause between index queries to never burst broker or exceed 1 req/s
             await new Promise(r => setTimeout(r, 1500));
