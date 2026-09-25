@@ -26,7 +26,7 @@ export default function OrderEntryScreen({ route, navigation }) {
   const { isHalted, reason: haltReason } = useMarketState();
   const {
     symbol = 'NIFTY 24850 CE',
-    ltp = 167.05,
+    ltp = 0,
     initialMode = 'BUY',
     lotSize = 25,
     expiry = 'NEAR'
@@ -35,7 +35,7 @@ export default function OrderEntryScreen({ route, navigation }) {
   const [mode, setMode] = useState(initialMode); // 'BUY' or 'SELL'
   const [type, setType] = useState('MARKET'); // 'MARKET' or 'LIMIT'
   const [lots, setLots] = useState(1);
-  const [price, setPrice] = useState(ltp ? ltp.toString() : '100');
+  const [price, setPrice] = useState(ltp > 0 ? ltp.toString() : '');
   const [stopLoss, setStopLoss] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');

@@ -349,7 +349,7 @@ app.get('/portfolio', async (req, res) => {
             if (!rawLtp && marketDataService.getOptionLTP && p.underlyingSymbol) {
                 try { rawLtp = await marketDataService.getOptionLTP(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry); } catch {}
             }
-            const avg = Number(p.avgPremium || p.avgPrice || 100);
+            const avg = Number(p.avgPremium || p.avgPrice || 0); // 0 not 100 — renders '--' not fake price
             const curPrice = Number(typeof rawLtp === 'number' ? rawLtp : (rawLtp?.ltp ?? (typeof p.ltp === 'number' && p.ltp > 0 ? p.ltp : avg)));
             const side = p.side || (p.quantity >= 0 ? 'BUY' : 'SELL');
             const dir = side.toUpperCase() === 'BUY' ? 1 : -1;
@@ -486,7 +486,7 @@ app.get('/dashboard-summary', async (req, res) => {
             if (!liveLtp && marketDataService.getOptionLTP) {
                 try { liveLtp = await marketDataService.getOptionLTP(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry); } catch {}
             }
-            const avg = Number(p.avgPremium || p.avgPrice || 100);
+            const avg = Number(p.avgPremium || p.avgPrice || 0); // 0 not 100 — renders '--' not fake price
             const cur = Number(typeof liveLtp === 'number' ? liveLtp : (liveLtp?.ltp ?? (typeof p.ltp === 'number' ? p.ltp : avg)));
             const dir = (p.side || 'BUY').toUpperCase() === 'BUY' ? 1 : -1;
             const diff = Math.round((cur - avg) * (p.quantity || 1) * dir * 100) / 100;
@@ -893,7 +893,10 @@ app.post('/newOrder', async (req, res) => {
     let price = req.body.price;
     if (!price || Number(price) <= 0) {
         const live = marketDataService.getStockPrice(stockSymbol);
-        price = live?.ltp || 1000;
+        price = live?.ltp || null;
+        if (!price || Number(price) <= 0) {
+            return res.status(422).json({ message: `Live price not available for ${stockSymbol}. Please retry.` });
+        }
     }
 
     if (!stockSymbol || !quantity || !price) {
@@ -3875,7 +3878,7 @@ async function getLiveOptionLTP(underlyingSymbol, strikePrice, optionType, expir
 async function enrichOptionPositions(userId, positions) {
     return Promise.all(positions.map(async pos => {
         const liveLTP = await getLiveOptionLTP(pos.underlyingSymbol, pos.strikePrice, pos.optionType, pos.expiry);
-        const avg     = Number(pos.avgPremium || pos.avgPrice || 100);
+        const avg     = Number(pos.avgPremium || pos.avgPrice || 0); // 0 not 100
         const ltp     = liveLTP ?? (typeof pos.ltp === 'number' ? pos.ltp : avg);
         const side    = pos.side || (pos.quantity >= 0 ? 'BUY' : 'SELL');
         const dir     = side.toUpperCase() === 'BUY' ? 1 : -1;
@@ -4201,12 +4204,15 @@ app.post('/newOptionOrder', async (req, res) => {
         currentMarketLtp = marketDataService.getOptionLTPSync(underlyingSymbol, strikePrice, optionType, expiry);
     }
     if (!currentMarketLtp && marketDataService.getOptionLTP) {
-        currentMarketLtp = (await marketDataService.getOptionLTP(underlyingSymbol, strikePrice, optionType, expiry)) || 100;
+        currentMarketLtp = (await marketDataService.getOptionLTP(underlyingSymbol, strikePrice, optionType, expiry)) || 0;
     }
 
     let resolvedPrem = Number(premium !== undefined ? premium : (price !== undefined ? price : 0));
-    if (!Number.isFinite(resolvedPrem) || resolvedPrem <= 0) {
-        resolvedPrem = currentMarketLtp || 100;
+        if (!Number.isFinite(resolvedPrem) || resolvedPrem <= 0) {
+        if (!currentMarketLtp || currentMarketLtp <= 0) {
+            return res.status(422).json({ message: 'Live price unavailable for this option. Please retry in a moment.' });
+        }
+        resolvedPrem = currentMarketLtp;
     }
 
     if (!underlyingSymbol) {
@@ -4337,7 +4343,10 @@ app.post('/trade', async (req, res) => {
 
             underlying = normalizeIndexName(underlying);
             let numLots = Number(lots || (qty ? Math.max(1, Math.round(Number(qty) / 25)) : (quantity ? Math.max(1, Math.round(Number(quantity) / 25)) : 1)));
-            let prem = targetPrice > 0 ? targetPrice : (await marketDataService.getOptionLTP(underlying, strike, optType, expiry) || 100);
+            let prem = targetPrice > 0 ? targetPrice : (await marketDataService.getOptionLTP(underlying, strike, optType, expiry) || 0);
+            if (!prem || prem <= 0) {
+                return res.status(422).json({ message: 'Live price unavailable for this option. Please retry in a moment.' });
+            }
 
             const result = await executeOptionOrder(req.user._id, {
                 underlyingSymbol: underlying,
@@ -4365,7 +4374,10 @@ app.post('/trade', async (req, res) => {
             let finalPrice = targetPrice;
             if (!finalPrice || finalPrice <= 0) {
                 const live = marketDataService.getStockPrice(rawSymbol);
-                finalPrice = live?.ltp || 1000;
+                finalPrice = live?.ltp || null;
+                if (!finalPrice || finalPrice <= 0) {
+                    return res.status(422).json({ message: `Live price not available for ${rawSymbol}. Please retry.` });
+                }
             }
             const orderTyp = ['MARKET', 'LIMIT', 'SL', 'SLM'].includes(type || orderType) ? (type || orderType) : 'MARKET';
 
