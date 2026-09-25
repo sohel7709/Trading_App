@@ -69,12 +69,31 @@ router.get('/portfolio', authenticate, async (req, res) => {
             };
         }));
 
-        const enrichedOpt = optPositions.map((p) => {
-            const avg = Number(p.avgPremium || p.avgPrice || 100);
-            const curPrice = Number(p.ltp || avg);
+        // Fetch live LTP for option positions (async, like equity positions above)
+        const enrichedOpt = await Promise.all(optPositions.map(async (p) => {
+            let liveLtp = null;
+            if (marketDataService.getOptionLTPSync) {
+                liveLtp = marketDataService.getOptionLTPSync(
+                    p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry
+                );
+            }
+            if (!liveLtp && marketDataService.getOptionLTP) {
+                try {
+                    liveLtp = await marketDataService.getOptionLTP(
+                        p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry
+                    );
+                } catch {}
+            }
+            // Use 0 (not 100) when avgPremium/avgPrice unavailable — shows '--' not fake 100
+            const avg = Number(p.avgPremium || p.avgPrice || 0);
+            const livePrem = typeof liveLtp === 'number' ? liveLtp
+                : (typeof liveLtp?.ltp === 'number' ? liveLtp.ltp : null);
+            const curPrice = livePrem !== null && livePrem > 0
+                ? livePrem
+                : Number(p.ltp || avg);
             const side = p.side || (p.quantity >= 0 ? 'BUY' : 'SELL');
             const dir = side.toUpperCase() === 'BUY' ? 1 : -1;
-            const posPnl = Math.round((curPrice - avg) * (p.quantity || 1) * dir * 100) / 100;
+            const posPnl = avg > 0 ? Math.round((curPrice - avg) * (p.quantity || 1) * dir * 100) / 100 : 0;
             unrealizedPnl += (isNaN(posPnl) ? 0 : posPnl);
             const pnlPct = avg > 0 ? Math.round(((curPrice - avg) / avg) * dir * 10000) / 100 : 0;
             return {
@@ -91,7 +110,7 @@ router.get('/portfolio', authenticate, async (req, res) => {
                 pnl: isNaN(posPnl) ? 0 : posPnl,
                 pnlPercent: isNaN(pnlPct) ? 0 : pnlPct
             };
-        });
+        }));
 
         const enrichedHoldings = await Promise.all(holdings.map(async (h) => {
             const cachedPrice = await redis.getPrice(h.stockSymbol);
@@ -208,7 +227,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
             if (!liveLtp && marketDataService.getOptionLTP) {
                 try { liveLtp = await marketDataService.getOptionLTP(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry); } catch {}
             }
-            const avg = Number(p.avgPremium || p.avgPrice || 100);
+            const avg = Number(p.avgPremium || p.avgPrice || 0); // 0, not 100 — prevents fake LTP display
             const cur = Number(typeof liveLtp === 'number' ? liveLtp : (liveLtp?.ltp ?? (typeof p.ltp === 'number' ? p.ltp : avg)));
             const dir = (p.side || 'BUY').toUpperCase() === 'BUY' ? 1 : -1;
             const diff = Math.round((cur - avg) * (p.quantity || 1) * dir * 100) / 100;
@@ -363,8 +382,15 @@ router.post('/trade/square-off', authenticate, async (req, res) => {
             const lots = Math.min(requestedLots, Math.abs(optPos.lots || 1));
 
             const rawLive = await getLiveOptionLTP(optPos.underlyingSymbol, optPos.strikePrice, optPos.optionType, optPos.expiry);
-            let premium = typeof rawLive === 'number' ? rawLive : (rawLive?.ltp ?? (typeof optPos.ltp === 'number' ? optPos.ltp : (optPos.avgPremium || 100)));
-            if (!Number.isFinite(Number(premium)) || Number(premium) <= 0) premium = Number(optPos.avgPremium || 100);
+            let premium = typeof rawLive === 'number' ? rawLive
+                : (rawLive?.ltp ?? (typeof optPos.ltp === 'number' ? optPos.ltp : (optPos.avgPremium || 0)));
+            if (!Number.isFinite(Number(premium)) || Number(premium) <= 0) {
+                // Reject square-off if we can't determine real market price
+                if (!optPos.avgPremium || Number(optPos.avgPremium) <= 0) {
+                    return res.status(422).json({ message: 'Live price unavailable for this option. Please retry in a moment.' });
+                }
+                premium = Number(optPos.avgPremium);
+            }
 
             const result = await executeOptionOrder(optPos.userId, {
                 underlyingSymbol: optPos.underlyingSymbol, strikePrice: optPos.strikePrice,

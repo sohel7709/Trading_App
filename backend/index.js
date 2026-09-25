@@ -693,9 +693,13 @@ app.post('/trade/square-off', async (req, res) => {
             const lots = Math.min(requestedLots, Math.abs(optPos.lots || 1));
 
             const rawLive = await getLiveOptionLTP(optPos.underlyingSymbol, optPos.strikePrice, optPos.optionType, optPos.expiry);
-            let premium = typeof rawLive === 'number' ? rawLive : (rawLive?.ltp ?? (typeof optPos.ltp === 'number' ? optPos.ltp : (optPos.ltp?.ltp ?? optPos.avgPremium ?? 100)));
+            let premium = typeof rawLive === 'number' ? rawLive
+                : (rawLive?.ltp ?? (typeof optPos.ltp === 'number' ? optPos.ltp : (optPos.ltp?.ltp ?? optPos.avgPremium ?? 0)));
             if (!Number.isFinite(Number(premium)) || Number(premium) <= 0) {
-                premium = Number(optPos.avgPremium || 100);
+                if (!optPos.avgPremium || Number(optPos.avgPremium) <= 0) {
+                    return res.status(422).json({ message: 'Live price unavailable. Please retry in a moment.' });
+                }
+                premium = Number(optPos.avgPremium);
             }
 
             const result = await executeOptionOrder(optPos.userId, {
@@ -3923,7 +3927,13 @@ async function executeOptionOrder(userId, { underlyingSymbol, strikePrice, optio
     const qty     = Number(lots) * lotSize;
     let resolvedPrem = Number(typeof premium === 'number' ? premium : (premium?.ltp ?? premium));
     if (!Number.isFinite(resolvedPrem) || resolvedPrem <= 0) {
-        resolvedPrem = 100;
+        // Don't silently execute at ₹100 — use entry premium or reject
+        const fallbackPrem = Number(premium?.avgPremium ?? 0);
+        if (fallbackPrem > 0) {
+            resolvedPrem = fallbackPrem;
+        } else {
+            return { status: 422, body: { message: 'Live price unavailable for this option. Please retry in a moment.' } };
+        }
     }
     const prem    = resolvedPrem;
     const total   = qty * prem;
@@ -4410,9 +4420,13 @@ app.post('/optionPositions/:id/squareoff', async (req, res) => {
         const lots = Math.min(requestedLots, Math.abs(position.lots));
 
         const rawLive = await getLiveOptionLTP(position.underlyingSymbol, position.strikePrice, position.optionType, position.expiry);
-        let premium = typeof rawLive === 'number' ? rawLive : (rawLive?.ltp ?? (typeof position.ltp === 'number' ? position.ltp : (position.ltp?.ltp ?? position.avgPremium ?? 100)));
+        let premium = typeof rawLive === 'number' ? rawLive
+            : (rawLive?.ltp ?? (typeof position.ltp === 'number' ? position.ltp : (position.ltp?.ltp ?? position.avgPremium ?? 0)));
         if (!Number.isFinite(Number(premium)) || Number(premium) <= 0) {
-            premium = Number(position.avgPremium || 100);
+            if (!position.avgPremium || Number(position.avgPremium) <= 0) {
+                return res.status(422).json({ message: 'Live price unavailable. Please retry in a moment.' });
+            }
+            premium = Number(position.avgPremium);
         }
 
         const result = await executeOptionOrder(position.userId, {

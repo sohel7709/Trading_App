@@ -84,7 +84,10 @@ router.post(['/trade', '/newOrder'], authenticate, async (req, res) => {
 
         // Get latest price from Redis
         const cached = await redis.getPrice(finalSymbol);
-        const execPrice = finalType === 'LIMIT' ? Number(price) : Number(cached?.ltp || price || 100);
+        const execPrice = finalType === 'LIMIT' ? Number(price) : Number(cached?.ltp || price || 0);
+        if (!execPrice || execPrice <= 0) {
+            return res.status(422).json({ message: 'Live price not available yet. Please retry in a moment.' });
+        }
 
         const result = await orderEngine.placeOrder(req.user._id, {
             stockSymbol: finalSymbol,
