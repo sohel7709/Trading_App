@@ -18,7 +18,11 @@ router.use((req, res, next) => {
   next();
 });
 
-const getTenantId = (req) => req.user.instituteCode || String(req.user._id || 'ADMIN');
+const getTenantId = (req) => {
+  if (req.user?.instituteCode) return req.user.instituteCode;
+  if (req.user?.role === 'ADMIN' || req.user?.role === 'SUPER_ADMIN') return 'ADMIN';
+  return String(req.user?._id || 'ADMIN');
+};
 
 // GET all broker credentials for tenant
 router.get('/', async (req, res) => {

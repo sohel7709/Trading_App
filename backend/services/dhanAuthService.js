@@ -272,9 +272,13 @@ async function renewInstituteToken(tenantId) {
             }), 'EX', ttlSeconds);
         }
 
-        // If this is the ADMIN or primary tenant, keep platform fallback in sync
-        if (tenantId === 'ADMIN') {
+        // If this is the ADMIN or primary active tenant, keep platform fallback in sync
+        if (tenantId === 'ADMIN' || cred.isActiveProvider) {
             await tokenService.saveToken(decrypted.apiKey, result.accessToken);
+            try {
+                const dhanDataService = require('../dhanDataService');
+                dhanDataService.setCachedConfig({ clientId: decrypted.apiKey, accessToken: result.accessToken });
+            } catch (_) {}
         }
 
         console.log(`[DhanAuth] ✅ Successfully renewed token for ${tenantId} | Expires: ${result.expiresAt.toISOString()}`);
@@ -317,6 +321,12 @@ async function renewAllActiveInstitutes() {
     const results = [];
 
     for (const cred of activeCreds) {
+        const dec = typeof cred.getDecrypted === 'function' ? cred.getDecrypted() : cred;
+        if (!dec.apiKey || !dec.pin || !dec.totpSecret) {
+            console.log(`[DhanAuth] ⏭️ Skipping tenant ${cred.tenantId} — missing ClientId, PIN, or TOTP Secret for automated renewal`);
+            continue;
+        }
+
         try {
             const res = await renewInstituteToken(cred.tenantId);
             results.push({ tenantId: cred.tenantId, success: true, expiresAt: res.expiresAt });
