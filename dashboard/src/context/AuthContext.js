@@ -1,6 +1,8 @@
 import React, { createContext, useState, useEffect } from 'react';
 import axios from 'axios';
 
+export const AuthContext = createContext(null);
+
 export const API_URL = process.env.REACT_APP_API_URL 
   || (typeof window !== 'undefined' && window.location.hostname.includes('railway.app') 
       ? 'https://backend-api-production-88b1.up.railway.app' 
