@@ -505,9 +505,10 @@ export default function OrdersScreen({ navigation, route }) {
           keyExtractor={(item, i) => item._id ?? String(i)}
           renderItem={tab === 3 ? renderBasket : renderOrder}
           contentContainerStyle={{ flexGrow: 1, paddingBottom: 110, paddingHorizontal: 16, paddingTop: 8 }}
-          initialNumToRender={15}
+          initialNumToRender={10}
           maxToRenderPerBatch={10}
-          windowSize={10}
+          windowSize={5}
+          removeClippedSubviews={Platform.OS !== 'web'}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}

@@ -192,6 +192,7 @@ const tabStyles = StyleSheet.create({
 export default function AppNavigator() {
   return (
     <Tab.Navigator
+      initialRouteName="Watchlist"
       screenOptions={{
         headerShown: false,
         tabHideOnKeyboard: true,
@@ -246,7 +247,7 @@ export default function AppNavigator() {
 
       {/* Tab 4: Portfolio — Open Positions & Closed Trades */}
       <Tab.Screen
-        name="Positions"
+        name="Portfolio"
         component={PortfolioStack}
         options={{
           tabBarIcon: ({ focused }) => (
@@ -257,12 +258,42 @@ export default function AppNavigator() {
 
       {/* Tab 5: Profile — Capital summary, PnL stats, Batch & Settings */}
       <Tab.Screen
-        name="ProfileTab"
+        name="Profile"
         component={ProfileStack}
         options={{
           tabBarIcon: ({ focused }) => (
             <TabIcon icon="person" iconOutline="person-outline" focused={focused} label="Profile" />
           ),
+        }}
+      />
+
+      {/* Hidden Aliases for backward-compatibility with existing stack routes */}
+      <Tab.Screen
+        name="Positions"
+        component={PortfolioStack}
+        options={{
+          tabBarItemStyle: { display: 'none' },
+        }}
+      />
+      <Tab.Screen
+        name="Options"
+        component={TradeStack}
+        options={{
+          tabBarItemStyle: { display: 'none' },
+        }}
+      />
+      <Tab.Screen
+        name="ProfileTab"
+        component={ProfileStack}
+        options={{
+          tabBarItemStyle: { display: 'none' },
+        }}
+      />
+      <Tab.Screen
+        name="Home"
+        component={HomeStack}
+        options={{
+          tabBarItemStyle: { display: 'none' },
         }}
       />
     </Tab.Navigator>

@@ -11,26 +11,77 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors } from '../theme/colors';
 import { api } from '../api/client';
 import useThrottledSocket from '../hooks/useThrottledSocket';
+import { useLiveSymbol, marketStore } from '../store/marketStore';
 import OrderBottomSheet from '../components/order/OrderBottomSheet';
 import RejectionReasonModal from '../components/order/RejectionReasonModal';
 import SkeletonLoader from '../components/SkeletonLoader';
+import IndexTicker from '../components/IndexTicker';
+
+// ── Option pattern parser ─────────────────────────────────────────────────────
+// Matches queries like: "NIFTY 23450 CE", "BANKNIFTY 48000 PE", "NIFTY 50 23450 CE"
+// Returns { underlyingSymbol, strikePrice, optionType, compositeSymbol } or null
+function parseOptionQuery(q) {
+  if (!q) return null;
+  const raw = q.trim().toUpperCase();
+
+  // Pattern: UNDERLYING STRIKE CE|PE  (e.g. NIFTY 23450 CE)
+  const strict = raw.match(/^([A-Z\s]+?)\s+(\d{3,6})(?:\.\d+)?\s+(CE|PE)$/);
+  if (strict) {
+    const underlying = strict[1].trim();
+    const strike = parseInt(strict[2], 10);
+    const optType = strict[3];
+    return {
+      underlyingSymbol: underlying,
+      strikePrice: strike,
+      optionType: optType,
+      compositeSymbol: `${underlying} ${strike} ${optType}`,
+      name: `${underlying} ${strike} ${optType} Option`,
+      isOption: true,
+    };
+  }
+  return null;
+}
+
+// Build search results fused with option pattern
+function buildSearchResults(apiResults, query) {
+  const optionHit = parseOptionQuery(query);
+  if (!optionHit) return apiResults || [];
+
+  // Prepend the parsed option contract as a top result
+  const filtered = (apiResults || []).filter(
+    (r) => r.symbol.toUpperCase() !== optionHit.compositeSymbol
+  );
+  return [optionHit, ...filtered];
+}
 
 const fmt = (n) => '₹' + Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const InstrumentRow = React.memo(function InstrumentRow({ item, onPress, onRemove }) {
-  const chg = Number(item.change || 0);
-  const chgPct = Number(item.changePercent || 0);
+const InstrumentRow = React.memo(function InstrumentRow({ symbol, name, initialLtp, initialChange, initialChangePercent, onPress, onRemove }) {
+  const live = useLiveSymbol(symbol);
+  const ltp = live?.ltp ?? initialLtp ?? 0;
+  const chg = Number(live?.change ?? initialChange ?? 0);
+  const chgPct = Number(live?.changePercent ?? initialChangePercent ?? 0);
   const isGain = chg >= 0;
+
+  const handlePress = useCallback(() => {
+    onPress?.(symbol);
+  }, [onPress, symbol]);
+
+  const handleRemove = useCallback((e) => {
+    e.stopPropagation();
+    onRemove?.(symbol);
+  }, [onRemove, symbol]);
+
   return (
-    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.75}>
+    <TouchableOpacity style={styles.card} onPress={handlePress} activeOpacity={0.75}>
       <View style={styles.cardLeft}>
-        <Text style={styles.symbolText}>{item.symbol}</Text>
-        {item.name && item.name !== item.symbol && (
-          <Text style={styles.companyText} numberOfLines={1}>{item.name}</Text>
+        <Text style={styles.symbolText}>{symbol}</Text>
+        {name && name !== symbol && (
+          <Text style={styles.companyText} numberOfLines={1}>{name}</Text>
         )}
       </View>
       <View style={styles.cardRight}>
-        <Text style={styles.priceText}>{fmt(item.ltp || 0)}</Text>
+        <Text style={styles.priceText}>{fmt(ltp)}</Text>
         <Text style={[styles.changeText, { color: isGain ? colors.gain : colors.loss }]}>
           {isGain ? '+' : ''}{chg.toFixed(2)} ({isGain ? '+' : ''}{chgPct.toFixed(2)}%)
         </Text>
@@ -38,10 +89,7 @@ const InstrumentRow = React.memo(function InstrumentRow({ item, onPress, onRemov
       {onRemove && (
         <TouchableOpacity
           style={styles.removeBtn}
-          onPress={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
+          onPress={handleRemove}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
         >
           <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
@@ -120,6 +168,7 @@ export default function WatchlistScreen({ navigation }) {
       const liveData = await api.getLiveMarket().catch(() => null);
       if (liveData?.prices) {
         setLivePrices(liveData.prices);
+        marketStore.seed(liveData.prices, liveData.indexes);
       }
     } catch (e) {
       console.warn('Watchlist fetch error:', e.message);
@@ -146,13 +195,21 @@ export default function WatchlistScreen({ navigation }) {
       setSearchResults([]);
       return;
     }
+    // Immediately show parsed option result (no network round-trip needed)
+    const optionHit = parseOptionQuery(searchQuery);
+    if (optionHit) {
+      setSearchResults([optionHit]);
+    }
+
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
         const res = await api.searchInstruments(searchQuery);
-        setSearchResults(res || []);
+        setSearchResults(buildSearchResults(res, searchQuery));
       } catch (e) {
         console.warn('Search error', e);
+        // If API fails but we have an option match, keep it
+        if (optionHit) setSearchResults([optionHit]);
       } finally {
         setSearching(false);
       }
@@ -224,7 +281,7 @@ export default function WatchlistScreen({ navigation }) {
   };
 
   // Direct remove stock from watchlist main view
-  const handleRemoveStock = async (symbol) => {
+  const handleRemoveStock = useCallback(async (symbol) => {
     if (!activeWatchlist) return;
     const symUpper = symbol.toUpperCase();
     
@@ -243,7 +300,7 @@ export default function WatchlistScreen({ navigation }) {
       Alert.alert('Error', e.message || 'Failed to remove script');
       fetchWatchlists(true, activeWatchlist._id);
     }
-  };
+  }, [activeWatchlist, fetchWatchlists]);
 
   const handleCreateWatchlist = () => {
     setNewListName(`Watchlist ${watchlists.length + 1}`);
@@ -314,8 +371,8 @@ export default function WatchlistScreen({ navigation }) {
     );
   };
 
-  const openOrderSheet = (symbol) => {
-    const p = livePrices[symbol] || { ltp: 0 };
+  const openOrderSheet = useCallback((symbol) => {
+    const p = marketStore.getPrice(symbol) || livePrices[symbol] || { ltp: 0 };
     setSheetInstrument({
       underlyingSymbol: symbol,
       strikePrice: null,
@@ -325,9 +382,9 @@ export default function WatchlistScreen({ navigation }) {
       lotSize: 1,
     });
     setSheetVisible(true);
-  };
+  }, [livePrices]);
 
-  const handleOrderResult = ({ success, result, error }) => {
+  const handleOrderResult = useCallback(({ success, result, error }) => {
     if (!success) {
       setRejectionReason(typeof error === 'string' ? error : (error?.message || 'Order was rejected'));
       setRejectionOrderInfo(sheetInstrument ? {
@@ -337,22 +394,33 @@ export default function WatchlistScreen({ navigation }) {
       } : null);
       setRejectionVisible(true);
     }
-  };
+  }, [sheetInstrument]);
 
-  const watchItems = activeStocks.map(sym => {
-    const live = livePrices[sym] || {};
-    return {
-      symbol: sym,
-      ltp: live.ltp || 0,
-      change: live.change || 0,
-      changePercent: live.changePercent || 0,
-    };
-  });
+  const renderWatchItem = useCallback(({ item }) => {
+    const sym = typeof item === 'string' ? item : item.symbol;
+    const initial = livePrices[sym];
+    return (
+      <InstrumentRow 
+        symbol={sym}
+        initialLtp={initial?.ltp}
+        initialChange={initial?.change}
+        initialChangePercent={initial?.changePercent}
+        onPress={openOrderSheet} 
+        onRemove={handleRemoveStock}
+      />
+    );
+  }, [openOrderSheet, handleRemoveStock, livePrices]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-      
+
+      {/* Live Index Ticker — same as Orders screen */}
+      <IndexTicker
+        indexes={{}}
+        onIndexPress={(name) => navigation.navigate('OptionChain', { indexName: name })}
+      />
+
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Watchlist</Text>
@@ -422,7 +490,7 @@ export default function WatchlistScreen({ navigation }) {
         <TextInput
           ref={searchInputRef}
           style={styles.searchInput}
-          placeholder="Search stocks to add (e.g. RELIANCE, TCS)..."
+          placeholder="Stock or option (e.g. RELIANCE, NIFTY 23450 CE)..."
           placeholderTextColor={colors.textMuted}
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -468,32 +536,46 @@ export default function WatchlistScreen({ navigation }) {
             ) : (
               <FlatList
                 data={searchResults}
-                keyExtractor={(item) => item.symbol}
+                keyExtractor={(item) => item.compositeSymbol || item.symbol}
                 renderItem={({ item }) => {
-                  const symUpper = item.symbol.toUpperCase();
-                  const isAdded = activeStocks.includes(symUpper);
-                  const live = livePrices[symUpper] || {};
+                  // Options have compositeSymbol; stocks just have symbol
+                  const sym = item.compositeSymbol || item.symbol;
+                  const symUpper = sym.toUpperCase();
+                  const isAdded = activeStocks.map(s => (typeof s === 'string' ? s : s.symbol).toUpperCase()).includes(symUpper);
+                  const live = livePrices[symUpper] || livePrices[item.symbol?.toUpperCase()] || {};
                   return (
                     <View style={styles.searchRow}>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.searchSymbol}>{item.symbol}</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <Text style={styles.searchSymbol}>{sym}</Text>
+                          {item.isOption && (
+                            <View style={[styles.optionBadge, { backgroundColor: item.optionType === 'CE' ? '#DCFCE7' : '#FEE2E2' }]}>
+                              <Text style={[styles.optionBadgeText, { color: item.optionType === 'CE' ? '#16A34A' : '#DC2626' }]}>
+                                {item.optionType}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
                         {item.name && <Text style={styles.searchName} numberOfLines={1}>{item.name}</Text>}
+                        {item.isOption && (
+                          <Text style={styles.searchOptionMeta}>Strike {item.strikePrice} • {item.underlyingSymbol}</Text>
+                        )}
                         {live.ltp ? (
                           <Text style={styles.searchLtp}>LTP: {fmt(live.ltp)}</Text>
                         ) : null}
                       </View>
-                      
+
                       {/* Multi-Add Toggle Button */}
                       <TouchableOpacity
                         style={[
                           styles.addScriptToggleBtn,
                           isAdded ? styles.addScriptToggleBtnAdded : styles.addScriptToggleBtnAdd
                         ]}
-                        onPress={() => handleToggleStockInSearch(item.symbol)}
+                        onPress={() => handleToggleStockInSearch(sym)}
                         activeOpacity={0.7}
                       >
                         <Ionicons
-                          name={isAdded ? "checkmark-circle" : "add"}
+                          name={isAdded ? 'checkmark-circle' : 'add'}
                           size={16}
                           color={isAdded ? colors.gain : '#FFFFFF'}
                         />
@@ -519,7 +601,7 @@ export default function WatchlistScreen({ navigation }) {
              <View style={{ padding: 16, gap: 12 }}>
                  {[...Array(6)].map((_, i) => <SkeletonLoader key={i} width="100%" height={72} borderRadius={8} />)}
              </View>
-          ) : watchItems.length === 0 ? (
+          ) : activeStocks.length === 0 ? (
             <View style={styles.emptyState}>
               <View style={styles.emptyIconCircle}>
                 <Ionicons name="list-outline" size={42} color={colors.primary} />
@@ -540,16 +622,11 @@ export default function WatchlistScreen({ navigation }) {
             </View>
           ) : (
             <FlatList
-              data={watchItems}
-              keyExtractor={item => item.symbol}
-              renderItem={({ item }) => (
-                <InstrumentRow 
-                  item={item} 
-                  onPress={() => openOrderSheet(item.symbol)} 
-                  onRemove={() => handleRemoveStock(item.symbol)}
-                />
-              )}
-              initialNumToRender={12}
+              data={activeStocks}
+              keyExtractor={(item) => (typeof item === 'string' ? item : item.symbol)}
+              renderItem={renderWatchItem}
+              getItemLayout={(_, index) => ({ length: 68, offset: 68 * index, index })}
+              initialNumToRender={10}
               maxToRenderPerBatch={10}
               windowSize={5}
               removeClippedSubviews={Platform.OS !== 'web'}
@@ -806,6 +883,13 @@ const styles = StyleSheet.create({
   searchSymbol: { fontSize: 15, fontWeight: '700', color: colors.text },
   searchName: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
   searchLtp: { fontSize: 12, color: colors.primary, fontWeight: '600', marginTop: 3 },
+  searchOptionMeta: { fontSize: 11, color: '#6366f1', fontWeight: '600', marginTop: 2 },
+  optionBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  optionBadgeText: { fontSize: 10, fontWeight: '800' },
   
   addScriptToggleBtn: {
     flexDirection: 'row',

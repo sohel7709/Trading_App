@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-nati
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { api, getSocket } from '../api/client';
+import { marketStore } from '../store/marketStore';
 
 // Hoisted out of IndexTicker (and memoized) so a `marketData` tick — which
 // gives `indexes` a new object identity every ~1s — doesn't redefine this
@@ -49,19 +50,16 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
     };
     refetch();
 
-    const socket = getSocket();
-    const handler = (data) => {
-      if (data.indexes && Object.keys(data.indexes).length > 0) {
-        setIndexes(data.indexes);
+    const unsub = marketStore.subscribeIndexes((nextIndexes) => {
+      if (nextIndexes && Object.keys(nextIndexes).length > 0) {
+        setIndexes(nextIndexes);
       }
-    };
-    socket.on('marketData', handler);
-    // A dropped/reconnected socket (backend restart, network blip) would
-    // otherwise leave `indexes` frozen at the last tick until the next
-    // broadcast — refetch on every (re)connect so it self-heals immediately.
+    });
+
+    const socket = getSocket();
     socket.on('connect', refetch);
     return () => {
-      socket.off('marketData', handler);
+      unsub();
       socket.off('connect', refetch);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

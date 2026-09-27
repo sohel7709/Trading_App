@@ -578,8 +578,14 @@ async function fetchDhanIndices(creds = null) {
             if (!name) continue;
 
             const ltp       = q.last_price ?? 0;
-            const prevClose = q.ohlc?.close ?? 0;
-            const change    = q.net_change ?? (ltp - prevClose);
+            let prevClose   = q.ohlc?.close ?? 0;
+            let change      = q.net_change ?? (ltp - prevClose);
+            // Dhan off-market post-close returns ohlc.close === last_price with net_change === 0.
+            // Fall back to ohlc.open so day's change percentage does not flatten to 0.00%.
+            if ((change === 0 || prevClose === ltp) && q.ohlc?.open > 0 && q.ohlc.open !== ltp) {
+                prevClose = q.ohlc.open;
+                change = Math.round((ltp - prevClose) * 100) / 100;
+            }
             const chgPct    = prevClose > 0 ? (change / prevClose) * 100 : 0;
 
             results[name] = {
@@ -732,8 +738,12 @@ async function fetchDhanSnapshot(symbols, creds = null) {
                 const name = idxIdToName[secIdStr];
                 if (!name) continue;
                 const ltp       = q.last_price ?? 0;
-                const prevClose = q.ohlc?.close ?? 0;
-                const change    = q.net_change ?? (ltp - prevClose);
+                let prevClose   = q.ohlc?.close ?? 0;
+                let change      = q.net_change ?? (ltp - prevClose);
+                if ((change === 0 || prevClose === ltp) && q.ohlc?.open > 0 && q.ohlc.open !== ltp) {
+                    prevClose = q.ohlc.open;
+                    change = Math.round((ltp - prevClose) * 100) / 100;
+                }
                 indexes[name] = {
                     name,
                     ltp:           Math.round(ltp * 100) / 100,

@@ -566,7 +566,7 @@ const IntegrationSettings = () => {
                                 Last Token Update: {new Date(dhanForm.lastAutoRenewAt).toLocaleString('en-IN')} — Status: {dhanForm.lastAutoRenewStatus || 'OK'}
                               </Typography>
                             )}
-                            {dhanForm.lastAutoRenewError && (
+                            {dhanForm.lastAutoRenewError && !hasActive && (
                               <Typography variant="caption" sx={{ color: '#dc2626', display: 'block', mt: 0.5, fontWeight: 600 }}>
                                 Warning: {dhanForm.lastAutoRenewError}
                               </Typography>

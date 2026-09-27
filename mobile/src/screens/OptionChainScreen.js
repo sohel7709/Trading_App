@@ -351,10 +351,30 @@ export default function OptionChainScreen({ navigation, route }) {
     return () => clearInterval(intervalRef.current);
   }, [selectedIndex]);
 
-  // 1-Second Real-Time Option Chain Socket Listener
+  // 250ms Real-Time Batched Option Chain Socket Listener
+  const pendingChainRef = useRef(null);
+
   useEffect(() => {
+    const flushTimer = setInterval(() => {
+      if (pendingChainRef.current) {
+        const data = pendingChainRef.current;
+        pendingChainRef.current = null;
+        setChain(prev => ({
+          ...data,
+          expiries: data.expiries?.length ? data.expiries : (prev?.expiries || []),
+        }));
+        if (data.expiries?.length > 0 && !selectedExpiryRef.current) {
+          setExpiries(data.expiries);
+          setSelectedExpiry(data.expiries[0]);
+        }
+        setLoading(false);
+      }
+    }, 250);
+
     const socket = getSocket();
-    if (!socket || typeof socket.on !== 'function') return;
+    if (!socket || typeof socket.on !== 'function') {
+      return () => clearInterval(flushTimer);
+    }
 
     // Join room for this underlying index & expiry
     if (typeof socket.emit === 'function') {
@@ -372,22 +392,14 @@ export default function OptionChainScreen({ navigation, route }) {
       const dataExp = data.expiry ? String(data.expiry).split(' ')[0] : null;
       const userExp = selectedExpiryRef.current ? String(selectedExpiryRef.current).split(' ')[0] : null;
       if (!userExp || !dataExp || dataExp === userExp) {
-        setChain(prev => ({
-          ...data,
-          expiries: data.expiries?.length ? data.expiries : (prev?.expiries || []),
-        }));
-        if (data.expiries?.length > 0 && !selectedExpiryRef.current) {
-          setExpiries(data.expiries);
-          setSelectedExpiry(data.expiries[0]);
-        }
-        setLoading(false);
+        pendingChainRef.current = data;
       }
     };
 
     const handleMarketData = (data) => {
       if (!data?.indexes) return;
       setAllIndexes(data.indexes);
-      const idxData = data.indexes[selectedIndex];
+      const idxData = data.indexes[selectedIndexRef.current];
       if (!idxData) return;
       setChain(prev => prev
         ? { ...prev, indexPrice: idxData.ltp, indexChange: idxData.change, indexChangePercent: idxData.changePercent }
@@ -400,6 +412,7 @@ export default function OptionChainScreen({ navigation, route }) {
     socket.on('marketData', handleMarketData);
 
     return () => {
+      clearInterval(flushTimer);
       if (typeof socket.emit === 'function') {
         socket.emit('unsubscribeOptionChain', { indexName: selectedIndex, expiry: selectedExpiry });
       }
