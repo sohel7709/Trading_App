@@ -419,13 +419,14 @@ app.get('/portfolio', async (req, res) => {
             totalPnl,
             pnl: totalPnl,
             todayPnl,
-            realizedPnl: Math.round(realizedPnl * 100) / 100,
+            realizedPnl: Math.round(todayRealized * 100) / 100,
+            allTimeRealizedPnl: Math.round(realizedPnl * 100) / 100,
             unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
             winRate,
             openPositionsCount: allOpenPositions.length,
             totalTrades: userOrders.length,
             positions: allOpenPositions,
-            closedTrades: closedPositions.slice(0, 50),
+            closedTrades: todayClosed,
             holdings: enrichedHoldings,
             orders: userOrders.slice(0, 50)
         };

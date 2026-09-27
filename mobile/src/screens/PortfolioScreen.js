@@ -558,24 +558,30 @@ export default function PortfolioScreen({ navigation }) {
   const safeClosedTrades = Array.isArray(closedTrades) ? closedTrades : [];
 
   // Only show closed trades from TODAY in Portfolio screen.
-  // Yesterday's (and older) trades are cleared at the start of each new day —
-  // they remain accessible in the Trade Journal via api.getTrades().
-  const todayStart = (() => {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    return d.getTime();
+  // Yesterday's (and older) trades naturally vanish at the start of each new trading day —
+  // they remain 100% accessible in the permanent Trade Journal (api.getTrades).
+  const todayIst = (() => {
+    try {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+    } catch {
+      return new Date().toISOString().slice(0, 10);
+    }
   })();
 
   const todayClosedTrades = safeClosedTrades.filter((trade) => {
     if (!trade) return false;
-    // Try closedAt first, then dateStr, then fall back to showing it
-    const dateField = trade.closedAt || trade.exitTime || trade.updatedAt || trade.createdAt;
-    if (!dateField) return true; // No date = keep (show conservatively)
+    // 1. If dateStr is present, match directly against today's IST trading day string
+    if (trade.dateStr) {
+      return trade.dateStr === todayIst;
+    }
+    // 2. Check closedAt or exitTime in IST
+    const dateField = trade.closedAt || trade.exitTime || trade.updatedAt;
+    if (!dateField) return false;
     try {
-      const t = new Date(dateField).getTime();
-      return !isNaN(t) && t >= todayStart;
+      const tradeDateIst = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(dateField));
+      return tradeDateIst === todayIst;
     } catch {
-      return true;
+      return false;
     }
   });
 
