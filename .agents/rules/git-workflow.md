@@ -28,25 +28,22 @@ Whenever the user asks to create a new branch (e.g., "create branch", "naya bran
 
 ---
 
-## 2. When User Says "Push the Code" (Push Protocol)
+## 2. When User Says "Push the Code" (Fully Automated Pipeline)
 
-1. **Active Development Target: NEVER push directly to `main`**.
-   - Standard development work MUST target **`develop`** or an active `feature/*` branch.
-   - `main` is strictly reserved for production releases.
-   - `staging` is strictly reserved for QA / pre-production validation.
+The user wants all PRs and merges completely automated. Whenever asked to push code:
 
-2. **Pre-Push Security Protocol**:
+1. **Pre-Push Security Protocol**:
    - ALWAYS verify that no `.env`, secret tokens, passwords, private keys, or credentials are staged.
    - Run `git status` and verify that only intended files are staged.
 
-3. **Conventional Commits**:
+2. **Commit with Conventional Prefix**:
    - Use standard prefixes: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `style:`.
-   - Keep messages clear, concise, and descriptive in English.
 
-4. **Sync Before Push**:
-   - Pull latest remote changes with rebase before pushing to avoid conflicts: `git pull origin <branch> --rebase`.
-   - Push to `origin <branch>`.
+3. **Automated Multi-Branch Sync (Zero Manual PRs)**:
+   - **Step A:** Push to the active feature branch (`git pull origin <branch> --rebase && git push origin <branch>`).
+   - **Step B:** Switch to `develop`, pull latest, merge the feature branch cleanly, and push to `origin develop`.
+   - **Step C:** Switch to `staging`, pull latest, merge `develop`, and push to `origin staging` (triggering Railway cloud deployment automatically).
+   - **Step D:** Switch back to the active working branch so the user can continue development without interruption.
 
-5. **Promotion Requests**:
-   - Only promote `develop` to `staging` when user explicitly requests staging/testing deployment.
-   - Only promote `staging` to `main` when user explicitly approves production release.
+4. **Production Protection**:
+   - `main` remains protected for official production release. Only merge `staging` into `main` when the user explicitly requests production release.
