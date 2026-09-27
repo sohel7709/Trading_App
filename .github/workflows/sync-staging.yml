@@ -1,0 +1,31 @@
+name: Auto Sync Develop to Staging
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  sync-to-staging:
+    name: Auto Merge to Staging
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync develop into staging
+        run: |
+          git checkout staging
+          git pull origin staging --rebase
+          git merge origin/develop --no-edit -m "chore: automated sync from develop to staging [skip ci]" || git merge origin/develop --strategy-option theirs --no-edit -m "chore: automated sync from develop to staging"
+          git push origin staging

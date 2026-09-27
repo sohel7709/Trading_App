@@ -4,13 +4,16 @@
 
 These rules are strictly binding across ALL sessions, tasks, and conversations for this repository:
 
-### 1. Pushing Code ("push the code", "commit and push", etc.)
-- **Rule 1 (Protected Main):** NEVER push directly to the `main` branch.
-- **Rule 2 (Active Target):** All daily development, feature work, and fixes MUST target `develop` (or an active `feature/*` branch).
-- **Rule 3 (Zero Secrets):** Always verify `git status` before commit to ensure NO `.env`, API keys, JWT secrets, passwords, or tokens are staged.
-- **Rule 4 (Conventional Commits):** Format commit messages using conventional prefixes (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `style:`).
-- **Rule 5 (Sync First):** Always sync before pushing: `git pull origin <branch> --rebase` then `git push origin <branch>`.
-- **Rule 6 (Release Approval):** Only merge `develop` into `staging` when testing/QA deployment is requested. Only merge `staging` into `main` when the user explicitly requests production release.
+### 1. Pushing Code ("push code", "commit and push", etc. — FULLY AUTOMATIC)
+- **Zero Manual PRs:** The user wants all PRs and merges completely automated. Whenever asked to push code:
+  1. Commit and push cleanly to the active feature branch.
+  2. Automatically merge the feature branch into `develop` and push to `origin develop`.
+  3. Automatically merge `develop` into `staging` and push to `origin staging` (so Railway auto-deploys instantly).
+  4. Return the user back to their active working branch so they can keep coding seamlessly.
+- **Rule 1 (Protected Main):** NEVER auto-push directly to `main`. `main` is production release only upon explicit user request.
+- **Rule 2 (Zero Secrets):** Always verify `git status` before commit to ensure NO `.env`, API keys, JWT secrets, passwords, or tokens are staged.
+- **Rule 3 (Conventional Commits):** Format commit messages using conventional prefixes (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `style:`).
+- **Rule 4 (Sync First):** Always sync before pushing: `git pull origin <branch> --rebase` then `git push origin <branch>`.
 
 ---
 

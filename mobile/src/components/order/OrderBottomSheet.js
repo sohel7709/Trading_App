@@ -192,7 +192,15 @@ export default function OrderBottomSheet({
     }
     setLoading(true);
     try {
-      const execP = orderType === 'MARKET' ? (ltp > 0 ? ltp : 100) : (parseFloat(limitPrice) || (ltp > 0 ? ltp : 100));
+      // If LTP is unavailable, don't silently execute at ₹100
+      const execP = orderType === 'MARKET'
+        ? (ltp > 0 ? ltp : 0)
+        : (parseFloat(limitPrice) || 0);
+      if (execP <= 0) {
+        alert('Price data not available yet. Please wait a moment and try again.');
+        setLoading(false);
+        return;
+      }
       let result;
       if (isEquity) {
         result = await api.placeOrder({
