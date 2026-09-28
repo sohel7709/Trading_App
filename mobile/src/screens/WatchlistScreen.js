@@ -17,25 +17,44 @@ import RejectionReasonModal from '../components/order/RejectionReasonModal';
 import SkeletonLoader from '../components/SkeletonLoader';
 import IndexTicker from '../components/IndexTicker';
 
-// ── Option pattern parser ─────────────────────────────────────────────────────
-// Matches queries like: "NIFTY 23450 CE", "BANKNIFTY 48000 PE", "NIFTY 50 23450 CE"
-// Returns { underlyingSymbol, strikePrice, optionType, compositeSymbol } or null
+// ── Option lot sizes & pattern parser ─────────────────────────────────────────
+const OPTION_LOT_SIZES = {
+  'NIFTY': 75,
+  'NIFTY 50': 75,
+  'BANKNIFTY': 30,
+  'BANK NIFTY': 30,
+  'SENSEX': 20,
+  'FINNIFTY': 65,
+  'MIDCPNIFTY': 120,
+  'BANKEX': 30,
+};
+
+// Matches queries like: "NIFTY 23100 CE", "BANKNIFTY 54800 PE", "NIFTY 50 23100 CE", "FINNIFTY 24700 PE"
 function parseOptionQuery(q) {
   if (!q) return null;
   const raw = q.trim().toUpperCase();
 
-  // Pattern: UNDERLYING STRIKE CE|PE  (e.g. NIFTY 23450 CE)
-  const strict = raw.match(/^([A-Z\s]+?)\s+(\d{3,6})(?:\.\d+)?\s+(CE|PE)$/);
-  if (strict) {
-    const underlying = strict[1].trim();
-    const strike = parseInt(strict[2], 10);
-    const optType = strict[3];
+  // Pattern: UNDERLYING STRIKE CE|PE
+  const match = raw.match(/^([A-Z0-9\s]+?)\s*(\d{3,6})(?:\.\d+)?\s*(CE|PE)$/i);
+  if (match) {
+    let underlying = match[1].trim();
+    const strike = parseInt(match[2], 10);
+    const optType = match[3].toUpperCase();
+    const cleanUnderlying = underlying.replace(/\s+/g, '');
+    if (cleanUnderlying === 'NIFTY') underlying = 'NIFTY 50';
+    else if (cleanUnderlying === 'BANKNIFTY') underlying = 'BANK NIFTY';
+    else if (cleanUnderlying === 'FINNIFTY') underlying = 'FINNIFTY';
+    else if (cleanUnderlying === 'MIDCPNIFTY' || cleanUnderlying === 'MIDCAP') underlying = 'MIDCPNIFTY';
+    else if (cleanUnderlying === 'SENSEX' || cleanUnderlying === 'BSE') underlying = 'SENSEX';
+
+    const shortIdx = underlying === 'NIFTY 50' ? 'NIFTY' : (underlying === 'BANK NIFTY' ? 'BANKNIFTY' : underlying);
     return {
       underlyingSymbol: underlying,
       strikePrice: strike,
       optionType: optType,
-      compositeSymbol: `${underlying} ${strike} ${optType}`,
-      name: `${underlying} ${strike} ${optType} Option`,
+      compositeSymbol: `${shortIdx} ${strike} ${optType}`,
+      name: `${shortIdx} ${strike} ${optType}`,
+      lotSize: OPTION_LOT_SIZES[underlying] || 50,
       isOption: true,
     };
   }
@@ -45,13 +64,16 @@ function parseOptionQuery(q) {
 // Build search results fused with option pattern
 function buildSearchResults(apiResults, query) {
   const optionHit = parseOptionQuery(query);
-  if (!optionHit) return apiResults || [];
-
-  // Prepend the parsed option contract as a top result
-  const filtered = (apiResults || []).filter(
-    (r) => r.symbol.toUpperCase() !== optionHit.compositeSymbol
-  );
-  return [optionHit, ...filtered];
+  const results = [...(apiResults || [])];
+  if (optionHit) {
+    const alreadyPresent = results.some(
+      (r) => (r.compositeSymbol || r.symbol || '').toUpperCase() === optionHit.compositeSymbol.toUpperCase()
+    );
+    if (!alreadyPresent) {
+      results.unshift(optionHit);
+    }
+  }
+  return results;
 }
 
 const fmt = (n) => '₹' + Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -62,6 +84,12 @@ const InstrumentRow = React.memo(function InstrumentRow({ symbol, name, initialL
   const chg = Number(live?.change ?? initialChange ?? 0);
   const chgPct = Number(live?.changePercent ?? initialChangePercent ?? 0);
   const isGain = chg >= 0;
+
+  const opt = parseOptionQuery(symbol) || (live?.isOption ? {
+    underlyingSymbol: live.underlyingSymbol,
+    strikePrice: live.strikePrice,
+    optionType: live.optionType,
+  } : null);
 
   const handlePress = useCallback(() => {
     onPress?.(symbol);
@@ -75,10 +103,21 @@ const InstrumentRow = React.memo(function InstrumentRow({ symbol, name, initialL
   return (
     <TouchableOpacity style={styles.card} onPress={handlePress} activeOpacity={0.75}>
       <View style={styles.cardLeft}>
-        <Text style={styles.symbolText}>{symbol}</Text>
-        {name && name !== symbol && (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text style={styles.symbolText}>{symbol}</Text>
+          {opt && (
+            <View style={[styles.optionBadge, { backgroundColor: opt.optionType === 'CE' ? '#DCFCE7' : '#FEE2E2', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }]}>
+              <Text style={[styles.optionBadgeText, { color: opt.optionType === 'CE' ? '#16A34A' : '#DC2626', fontSize: 10, fontWeight: '700' }]}>
+                {opt.optionType}
+              </Text>
+            </View>
+          )}
+        </View>
+        {opt ? (
+          <Text style={styles.companyText} numberOfLines={1}>Strike {opt.strikePrice} • {opt.underlyingSymbol}</Text>
+        ) : (name && name !== symbol ? (
           <Text style={styles.companyText} numberOfLines={1}>{name}</Text>
-        )}
+        ) : null)}
       </View>
       <View style={styles.cardRight}>
         <Text style={styles.priceText}>{fmt(ltp)}</Text>
@@ -373,14 +412,31 @@ export default function WatchlistScreen({ navigation }) {
 
   const openOrderSheet = useCallback((symbol) => {
     const p = marketStore.getPrice(symbol) || livePrices[symbol] || { ltp: 0 };
-    setSheetInstrument({
-      underlyingSymbol: symbol,
-      strikePrice: null,
-      optionType: null,
-      expiry: null,
-      ltp: p.ltp,
-      lotSize: 1,
-    });
+    const opt = parseOptionQuery(symbol);
+    if (opt || p.isOption) {
+      const underlying = opt?.underlyingSymbol || p.underlyingSymbol || 'NIFTY 50';
+      const strike = opt?.strikePrice || p.strikePrice;
+      const optType = opt?.optionType || p.optionType;
+      const expiry = opt?.expiry || p.expiry || 'NEAR';
+      const lotSize = p.lotSize || OPTION_LOT_SIZES[underlying] || 50;
+      setSheetInstrument({
+        underlyingSymbol: underlying,
+        strikePrice: strike,
+        optionType: optType,
+        expiry: expiry,
+        ltp: p.ltp || 0,
+        lotSize: lotSize,
+      });
+    } else {
+      setSheetInstrument({
+        underlyingSymbol: symbol,
+        strikePrice: null,
+        optionType: null,
+        expiry: null,
+        ltp: p.ltp || 0,
+        lotSize: 1,
+      });
+    }
     setSheetVisible(true);
   }, [livePrices]);
 
@@ -560,8 +616,8 @@ export default function WatchlistScreen({ navigation }) {
                         {item.isOption && (
                           <Text style={styles.searchOptionMeta}>Strike {item.strikePrice} • {item.underlyingSymbol}</Text>
                         )}
-                        {live.ltp ? (
-                          <Text style={styles.searchLtp}>LTP: {fmt(live.ltp)}</Text>
+                        {(live.ltp || item.ltp) ? (
+                          <Text style={styles.searchLtp}>LTP: {fmt(live.ltp || item.ltp)}</Text>
                         ) : null}
                       </View>
 

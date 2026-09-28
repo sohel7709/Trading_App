@@ -32,12 +32,23 @@ const NSE_STOCKS = [
 
 // GET /market/search
 router.get('/market/search', (req, res) => {
-    const q = (req.query.q || '').trim().toLowerCase();
+    const q = (req.query.q || '').trim();
     if (!q) return res.json([]);
+    const query = q.toUpperCase();
+
+    let optionHits = [];
+    if (marketDataService.searchOptionInstruments) {
+        try {
+            optionHits = marketDataService.searchOptionInstruments(query, 15);
+        } catch (e) {
+            console.warn('[MarketRoutes] Option search error:', e.message);
+        }
+    }
+
     const matches = NSE_STOCKS.filter(s =>
-        s.symbol.toLowerCase().includes(q) || s.name.toLowerCase().includes(q)
+        s.symbol.toUpperCase().includes(query) || s.name.toUpperCase().includes(query)
     );
-    res.json(matches.slice(0, 10));
+    res.json([...optionHits, ...matches].slice(0, 25));
 });
 
 // GET /market/live - All prices from Redis cache (Zero broker call!)

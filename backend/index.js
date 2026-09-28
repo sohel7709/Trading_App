@@ -2497,6 +2497,14 @@ app.get('/watchlists', async (req, res) => {
             await watchlists[0].save();
         }
 
+        for (const wl of watchlists) {
+            if (Array.isArray(wl.stocks)) {
+                for (const s of wl.stocks) {
+                    marketDataService.trackSymbol(s);
+                }
+            }
+        }
+
         CacheService.setWatchlists(uidStr, watchlists, 120).catch(() => {});
         res.status(200).json(watchlists);
     } catch (err) {
@@ -2671,24 +2679,37 @@ const NSE_STOCKS = [
     { symbol: "SHREECEM", name: "Shree Cement Ltd", sector: "Cement" },
 ];
 
-// Searches the full NSE equity universe (Dhan scrip master ≈ 2000+ symbols),
-// falling back to the curated list if the scrip master hasn't loaded.
+// Searches option instruments (NIFTY/BANKNIFTY/SENSEX/FINNIFTY/MIDCPNIFTY strikes)
+// and full NSE equity universe (Dhan scrip master ≈ 2000+ symbols).
 app.get('/market/search', (req, res) => {
     const { q } = req.query;
     if (!q) {
         return res.status(400).json({ message: 'Search query (q) is required' });
     }
 
-    const query = q.toUpperCase();
+    const query = q.toUpperCase().trim();
+
+    // 1. Search options instruments (real live option strikes from Dhan broker)
+    let optionHits = [];
+    if (marketDataService.searchOptionInstruments) {
+        try {
+            optionHits = marketDataService.searchOptionInstruments(query, 20);
+        } catch (e) {
+            console.warn('[MarketSearch] Option search note:', e.message);
+        }
+    }
+
+    // 2. Curated stock search
     const curated = NSE_STOCKS.filter(stock =>
         stock.symbol.includes(query) || stock.name.toUpperCase().includes(query)
     );
 
+    // 3. Dhan scrip master equity search
     const scripHits = dhanDataService.searchScrips(query, 25)
         .filter(hit => !curated.some(c => c.symbol === hit.symbol))
         .map(hit => ({ symbol: hit.symbol, name: hit.name, sector: null }));
 
-    res.status(200).json([...curated, ...scripHits].slice(0, 25));
+    res.status(200).json([...optionHits, ...curated, ...scripHits].slice(0, 30));
 });
 
 app.get('/market/stocks', (req, res) => {

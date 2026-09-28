@@ -22,4 +22,5 @@ dist/
 .DS_Store
 *.log
 npm-debug.log*
+# Runtime cache
 backend/cache/
