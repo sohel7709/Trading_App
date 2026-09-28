@@ -14,6 +14,8 @@ async function authenticate(req, res, next) {
       req.path === '/' ||
       req.path === '/health' ||
       req.path.startsWith('/dhan/token-postback') ||
+      req.path.startsWith('/admin/token') ||
+      req.path.startsWith('/admin/update-token') ||
       (req.method === 'GET' && req.path.startsWith('/market'));
 
     const authHeader = req.headers['authorization'];
