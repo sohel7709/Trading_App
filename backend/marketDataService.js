@@ -8,6 +8,7 @@ const dhanDataService = require('./dhanDataService');
 const kotakNeoService = require('./kotakNeoService');
 const candleDataService = require('./candleDataService');
 const { isMarketOpen, isActualMarketHours } = require('./marketRules');
+const DhanWebSocketFeed = require('./services/DhanWebSocketFeed');
 
 function isLiveMarketActive(segment = 'FO') {
     try {
@@ -196,6 +197,15 @@ function trackSymbol(symbol) {
     if (!sym || trackedSymbols.has(sym)) return false;
     trackedSymbols.add(sym);
     console.log(`[Market] Now tracking ${sym} (${trackedSymbols.size} symbols)`);
+
+    // Auto-subscribe to live Dhan WebSocket feed if streaming
+    if (dhanWsFeed && isWsStreaming) {
+        const secId = dhanDataService.getSecurityId(sym);
+        if (secId) {
+            const seg = dhanDataService.isCommoditySymbol(sym) ? 'MCX_COMM' : 'NSE_EQ';
+            dhanWsFeed.subscribe([{ ExchangeSegment: seg, SecurityId: secId }], 15);
+        }
+    }
     return true;
 }
 
@@ -411,13 +421,192 @@ async function fetchAllStockPrices() {
     }
 }
 
-// The 1s live tick — Dhan LTP endpoint only (light, safely sustains 1 req/s;
-// the heavier /marketfeed/quote endpoint rate-limits and 429s at that rate).
-// LTP is all that moves tick-to-tick; OHLC/prevClose/52W are refreshed by the
-// slower snapshot below. change/changePercent are recomputed against the
-// stored previousClose so Day's P&L stays consistent with the LTP.
+// ─── Real-Time Dhan Binary WebSocket Integration ─────────────────────────────
+let dhanWsFeed = null;
+let isWsStreaming = false;
+
+function initDhanWebSocket() {
+    if (!dhanDataService.isConfigured()) return;
+    const creds = dhanDataService.getGlobalCredentials();
+    if (!creds?.clientId || !creds?.accessToken) return;
+
+    if (!dhanWsFeed) {
+        dhanWsFeed = new DhanWebSocketFeed({
+            clientId: creds.clientId,
+            accessToken: creds.accessToken,
+            requestCode: 15, // Ticker mode for watchlist & fast ticks
+        });
+
+        dhanWsFeed.on('connected', () => {
+            isWsStreaming = true;
+            dataSource = 'DHAN_WS';
+            console.log('[Market] 🚀 Dhan Binary WebSocket connected! Zero-latency ticks active.');
+            syncSubscriptionsToWebSocket();
+        });
+
+        dhanWsFeed.on('disconnected', () => {
+            isWsStreaming = false;
+            dataSource = 'DHAN_LIVE';
+            console.warn('[Market] ⚠️ Dhan WebSocket disconnected. Automatic failover to 1s REST polling active.');
+        });
+
+        // Binary Ticker Packet (LTP)
+        dhanWsFeed.on('tick', ({ securityId, segment, ltp }) => {
+            handleIncomingWsTick(securityId, segment, ltp);
+        });
+
+        // Binary Quote Packet (OHLC, VWAP, Volume)
+        dhanWsFeed.on('quote', (q) => {
+            handleIncomingWsQuote(q);
+        });
+
+        // Binary Index Packet
+        dhanWsFeed.on('index', (idx) => {
+            handleIncomingWsIndex(idx);
+        });
+
+        dhanWsFeed.connect();
+    } else {
+        dhanWsFeed.updateCredentials(creds);
+    }
+}
+
+function syncSubscriptionsToWebSocket() {
+    if (!dhanWsFeed || !dhanWsFeed.isConnected) return;
+    const instruments = [];
+
+    // Subscribe all indices in IDX_I
+    for (const [, secId] of Object.entries(dhanDataService.INDEX_SECURITY_IDS)) {
+        instruments.push({ ExchangeSegment: 'IDX_I', SecurityId: secId });
+    }
+
+    // Subscribe all tracked stocks and commodities
+    for (const sym of getTrackedSymbols()) {
+        const secId = dhanDataService.getSecurityId(sym);
+        if (secId) {
+            const seg = dhanDataService.isCommoditySymbol(sym) ? 'MCX_COMM' : 'NSE_EQ';
+            instruments.push({ ExchangeSegment: seg, SecurityId: secId });
+        }
+    }
+
+    if (instruments.length > 0) {
+        dhanWsFeed.subscribe(instruments, 15);
+    }
+}
+
+function handleIncomingWsTick(securityId, segment, ltp) {
+    if (!(ltp > 0)) return;
+
+    if (segment === 'IDX_I') {
+        const idToName = Object.fromEntries(
+            Object.entries(dhanDataService.INDEX_SECURITY_IDS).map(([name, id]) => [String(id), name])
+        );
+        const name = idToName[String(securityId)];
+        if (name && indexData[name]) {
+            const idx = indexData[name];
+            idx.ltp = ltp;
+            if (idx.previousClose > 0) {
+                const chg = ltp - idx.previousClose;
+                idx.change = Math.round(chg * 100) / 100;
+                idx.changePercent = Math.round((chg / idx.previousClose) * 10000) / 100;
+            }
+            idx.source = 'DHAN_WS';
+            lastUpdated = new Date().toISOString();
+        }
+        return;
+    }
+
+    // Equity / Commodity
+    const sym = dhanDataService.getSymbolFromId(securityId);
+    if (sym && stockPrices[sym]) {
+        const old = stockPrices[sym];
+        const pc  = refPrevClose(sym, old.previousClose);
+        if (isSaneTick(old.ltp, ltp, pc || old.previousClose)) {
+            const base   = pc || old.previousClose || old.ltp;
+            const change = ltp - base;
+            const chgPct = base > 0 ? (change / base) * 100 : 0;
+            stockPrices[sym] = {
+                ...old,
+                ltp,
+                previousClose: pc > 0 ? pc : old.previousClose,
+                change:        Math.round(change * 100) / 100,
+                changePercent: Math.round(chgPct  * 100) / 100,
+                source:        'DHAN_WS',
+            };
+            lastUpdated = new Date().toISOString();
+        }
+    }
+}
+
+function handleIncomingWsQuote(q) {
+    const sym = dhanDataService.getSymbolFromId(q.securityId);
+    if (!sym || !stockPrices[sym]) return;
+
+    const old = stockPrices[sym];
+    const pc  = refPrevClose(sym, old.previousClose);
+    const base = pc || old.previousClose || q.ltp;
+    const change = q.ltp - base;
+    const chgPct = base > 0 ? (change / base) * 100 : 0;
+
+    stockPrices[sym] = {
+        ...old,
+        ltp: q.ltp,
+        open: q.open || old.open,
+        high: q.high || old.high,
+        low: q.low || old.low,
+        close: q.close || old.close,
+        volume: q.volume || old.volume,
+        vwap: q.vwap || old.vwap,
+        previousClose: pc > 0 ? pc : old.previousClose,
+        change: Math.round(change * 100) / 100,
+        changePercent: Math.round(chgPct * 100) / 100,
+        source: 'DHAN_WS',
+    };
+    lastUpdated = new Date().toISOString();
+}
+
+function handleIncomingWsIndex(idx) {
+    const idToName = Object.fromEntries(
+        Object.entries(dhanDataService.INDEX_SECURITY_IDS).map(([name, id]) => [String(id), name])
+    );
+    const name = idToName[String(idx.securityId)];
+    if (!name || !indexData[name]) return;
+
+    const target = indexData[name];
+    target.ltp = idx.ltp;
+    if (idx.open > 0) target.open = idx.open;
+    if (idx.high > 0) target.high = idx.high;
+    if (idx.low > 0) target.low = idx.low;
+    if (target.previousClose > 0) {
+        const chg = idx.ltp - target.previousClose;
+        target.change = Math.round(chg * 100) / 100;
+        target.changePercent = Math.round((chg / target.previousClose) * 10000) / 100;
+    }
+    target.source = 'DHAN_WS';
+    lastUpdated = new Date().toISOString();
+}
+
+// The 1s live tick — Dual Engine with Automatic Failover:
+// 1. Primary: If Dhan Binary WebSocket is streaming, prices update continuously
+//    at zero latency, so HTTP REST polling is safely suspended to conserve bandwidth.
+// 2. Fallback: If WebSocket disconnects or errors, 1s REST polling immediately takes over.
 async function fastRefresh() {
     if (!dhanDataService.isConfigured()) return;
+
+    // Ensure WebSocket feed is initialized if credentials are ready
+    if (!dhanWsFeed) {
+        initDhanWebSocket();
+    }
+
+    // If WebSocket is actively streaming, prices are updated in real-time.
+    // Skip redundant HTTP REST request.
+    if (isWsStreaming && dhanWsFeed?.isConnected) {
+        dataSource = 'DHAN_WS';
+        lastUpdated = new Date().toISOString();
+        return;
+    }
+
+    // Resilient REST fallback
     try {
         const ltps = await dhanDataService.fetchDhanLTPAll(getTrackedSymbols());
         for (const [key, val] of Object.entries(ltps)) {
@@ -435,10 +624,6 @@ async function fastRefresh() {
             } else if (stockPrices[key]) {
                 const old = stockPrices[key];
                 const pc  = refPrevClose(key, old.previousClose);
-                // Outlier guard: a wrong-instrument tick (seen on LTIM) that
-                // jumps >6% off the last good price (or off the reliable candle
-                // prev close at cold start) is bad data — keep the last good
-                // value. Genuine moves arrive as small incremental ticks.
                 if (val.ltp > 0 && isSaneTick(old.ltp, val.ltp, pc || old.previousClose)) {
                     const base   = pc || old.previousClose || old.ltp;
                     const change = val.ltp - base;
@@ -449,13 +634,10 @@ async function fastRefresh() {
                         previousClose: pc > 0 ? pc : old.previousClose,
                         change:        Math.round(change * 100) / 100,
                         changePercent: Math.round(chgPct  * 100) / 100,
-                        source:        'DHAN_LIVE',  // data is Dhan now — don't inherit a stale source label
+                        source:        'DHAN_LIVE',
                     };
                 }
             } else if (val.ltp > 0) {
-                // First value for this symbol — accept only if it's near the
-                // reliable candle prev close (guards against a wrong first tick
-                // becoming a stuck anchor); recompute change against it.
                 const pc = refPrevClose(key, 0);
                 if (!pc || isSaneTick(0, val.ltp, pc)) {
                     const change = pc > 0 ? val.ltp - pc : 0;
@@ -471,10 +653,10 @@ async function fastRefresh() {
         }
         lastUpdated = new Date().toISOString();
     } catch (e) {
-        // Keep last good prices on a transient Dhan error/429.
-        console.warn('[Market] fastRefresh error:', e.message);
+        console.warn('[Market] fastRefresh fallback error:', e.message);
     }
 }
+
 
 function getDataSource()   { return dataSource; }
 function getStockPrices()  {
@@ -698,7 +880,7 @@ const activeOptionChains = {}; // indexName -> chain object
 let _chainIo = null;
 let _brokerSyncBusy = false;
 let _dhanRateLimitBackoffUntil = 0;
-const SUPPORTED_INDICES = ['NIFTY 50', 'BANK NIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX'];
+const SUPPORTED_INDICES = ['NIFTY 50', 'BANK NIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'];
 
 function updateOptionChainPrices(chain) {
     if (!chain || !Array.isArray(chain.rows)) return chain;
@@ -1089,6 +1271,8 @@ module.exports = {
     getExpiryDates,
     trackSymbol,
     getTrackedSymbols,
+    initDhanWebSocket,
+    getDhanWsFeed: () => dhanWsFeed,
     NSE_SYMBOLS,
     NSE_STOCK_SYMBOLS,
     INDEX_SYMBOLS,

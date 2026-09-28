@@ -113,4 +113,75 @@ router.get('/quote', async (req, res) => {
   }
 });
 
+// GET Expired Options Historical Candles (Dhan POST /v2/charts/historical)
+// Query params: symbol, strike, type, from, to, interval, expiryFlag, expiryCode
+const dhanExpiredOptionsService = require('../services/dhanExpiredOptionsService');
+router.get('/options/expired-candles', async (req, res) => {
+  try {
+    const {
+      symbol = 'NIFTY 50',
+      strike = 'ATM',
+      type = 'CALL',
+      from,
+      to,
+      interval = '5',
+      expiryFlag = 'WEEK',
+      expiryCode = 0,
+      segment = null,
+    } = req.query;
+
+    if (!from || !to) {
+      return res.status(400).json({ message: 'from and to dates are required in YYYY-MM-DD format' });
+    }
+
+    const data = await dhanExpiredOptionsService.fetchExpiredOptionCandles({
+      underlyingSymbol: symbol,
+      strike,
+      drvOptionType: type,
+      fromDate: from,
+      toDate: to,
+      interval,
+      expiryFlag,
+      expiryCode: Number(expiryCode) || 0,
+      exchangeSegment: segment,
+    });
+
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching expired option candles', error: error.message });
+  }
+});
+
+// GET Dynamic Instruments by Segment (Dhan GET /v2/instrument/{exchangeSegment})
+const dhanScripMasterService = require('../services/dhanScripMasterService');
+router.get('/instruments/segment/:segment', async (req, res) => {
+  try {
+    const segment = req.params.segment;
+    if (!segment) return res.status(400).json({ message: 'Exchange segment is required' });
+
+    const list = await dhanScripMasterService.fetchSegmentInstruments(segment);
+    res.json({
+      segment: segment.toUpperCase(),
+      count: list.length,
+      instruments: list.slice(0, req.query.limit ? Number(req.query.limit) : 500),
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching segment instruments', error: error.message });
+  }
+});
+
+// GET Search Instruments in Segment
+router.get('/instruments/search', (req, res) => {
+  try {
+    const { query, segment = 'NSE_EQ', limit = 20 } = req.query;
+    if (!query) return res.json([]);
+
+    const results = dhanScripMasterService.searchSegmentInstruments(query, segment, Number(limit));
+    res.json(results);
+  } catch (error) {
+    res.status(500).json({ message: 'Error searching segment instruments', error: error.message });
+  }
+});
+
 module.exports = router;
+

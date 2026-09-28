@@ -201,6 +201,14 @@ export const api = {
 
   // IPOs — live from NSE
   getIpos: () => get('/market/ipos'),
+
+  // Dhan Advanced Data APIs
+  getExpiredOptionCandles: ({ symbol, strike, type, from, to, interval = 5, expiryFlag = 'WEEK', expiryCode = 0 }) =>
+    get(`/market/options/expired-candles?symbol=${encodeURIComponent(symbol)}&strike=${encodeURIComponent(strike)}&type=${encodeURIComponent(type)}&from=${from}&to=${to}&interval=${interval}&expiryFlag=${expiryFlag}&expiryCode=${expiryCode}`),
+  getSegmentInstruments: (segment, limit = 100) =>
+    get(`/market/instruments/segment/${encodeURIComponent(segment)}?limit=${limit}`),
+  searchSegmentInstruments: (query, segment = 'NSE_EQ', limit = 20) =>
+    get(`/market/instruments/search?query=${encodeURIComponent(query)}&segment=${encodeURIComponent(segment)}&limit=${limit}`),
 };
 
 export const getSocket = () => {
