@@ -64,6 +64,12 @@ async function loadTokenFromDB() {
             _cacheExpiry = rec.expiresAt ? rec.expiresAt.getTime() : 0;
             console.log(`[Token] Loaded Dhan token from DB | expires: ${rec.expiresAt?.toISOString() || 'unknown'}`);
             warnIfExpiringSoon(rec.expiresAt);
+            try {
+                const dhanDataService = require('./dhanDataService');
+                if (typeof dhanDataService.setCachedConfig === 'function') {
+                    dhanDataService.setCachedConfig({ clientId: rec.clientId, accessToken: rec.accessToken });
+                }
+            } catch (_) {}
             return true;
         }
     } catch (e) {
@@ -77,6 +83,12 @@ async function loadTokenFromDB() {
         _cacheExpiry = exp ? exp.getTime() : 0;
         console.log(`[Token] Using .env token | expires: ${exp?.toISOString() || 'unknown'}`);
         warnIfExpiringSoon(exp);
+        try {
+            const dhanDataService = require('./dhanDataService');
+            if (typeof dhanDataService.setCachedConfig === 'function') {
+                dhanDataService.setCachedConfig({ clientId: process.env.DHAN_CLIENT_ID, accessToken: envToken });
+            }
+        } catch (_) {}
     }
     return false;
 }
@@ -102,6 +114,13 @@ async function saveToken(clientId, accessToken) {
     process.env.DHAN_ACCESS_TOKEN = accessToken;
     _cachedToken = accessToken;
     _cacheExpiry = expiresAt ? expiresAt.getTime() : 0;
+
+    try {
+        const dhanDataService = require('./dhanDataService');
+        if (typeof dhanDataService.setCachedConfig === 'function') {
+            dhanDataService.setCachedConfig({ clientId, accessToken });
+        }
+    } catch (_) {}
 
     try {
         await TokenModel.findOneAndUpdate(

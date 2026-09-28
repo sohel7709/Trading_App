@@ -27,6 +27,7 @@ import SkeletonLoader from '../components/SkeletonLoader';
 import OrderBottomSheet from '../components/order/OrderBottomSheet';
 import { useAuth } from '../context/AuthContext';
 import IndexTicker from '../components/IndexTicker';
+import { useLiveSymbol, marketStore } from '../store/marketStore';
 
 const { width } = Dimensions.get('window');
 
@@ -129,15 +130,15 @@ function SquareOffModal({ position, loading, onConfirm, onClose }) {
 // ── Open Position Card ────────────────────────────────────────────────────────
 const PositionCard = React.memo(function PositionCard({ position, onTradeAction, onSquareOff }) {
   if (!position) return null;
+  const sym = position.symbol || position.stockSymbol || position.contractSymbol;
+  const live = useLiveSymbol(sym);
   const avg = Number(position.avgPrice || position.avgPremium || 0);
-  const curLtp = Number(position.ltp || avg || 0);
-  const qty = Number(position.quantity || 0);
+  const curLtp = Number(live?.ltp ?? position.ltp ?? avg ?? 0);
+  const qty = Math.abs(Number(position.quantity || 0));
   const isBuy = String(position.side || 'BUY').toUpperCase() === 'BUY';
   const dir = isBuy ? 1 : -1;
 
-  const pnl = position.pnl !== undefined
-    ? Number(position.pnl) || 0
-    : (curLtp - avg) * qty * dir;
+  const pnl = (curLtp - avg) * qty * dir;
 
   const pnlPct = avg > 0
     ? ((curLtp - avg) / avg) * 100 * dir
@@ -342,10 +343,10 @@ export default function PortfolioScreen({ navigation }) {
   }, []);
 
   // ── Unified Fetch ──────────────────────────────────────────────────────────
-  const fetchPortfolioData = useCallback(async () => {
+  const fetchPortfolioData = useCallback(async (fresh = false) => {
     try {
       const [data, ordersRes] = await Promise.all([
-        api.getPortfolio().catch((e) => { console.warn('[Portfolio] getPortfolio failed:', e.message); return null; }),
+        api.getPortfolio(fresh).catch((e) => { console.warn('[Portfolio] getPortfolio failed:', e.message); return null; }),
         api.getOrders().catch((e) => { console.warn('[Portfolio] getOrders failed:', e.message); return []; }),
       ]);
       if (data) {
@@ -474,19 +475,19 @@ export default function PortfolioScreen({ navigation }) {
   useSocket(SOCKET_EVENTS.POSITION_TICK, handlePositionTick);
 
   useSocket('orderExecuted', () => {
-    fetchPortfolioData();
+    fetchPortfolioData(true);
   });
 
   useSocket('orderCancelled', () => {
-    fetchPortfolioData();
+    fetchPortfolioData(true);
   });
 
   useSocket('trade_update', () => {
-    fetchPortfolioData();
+    fetchPortfolioData(true);
   });
 
   useSocket('optionOrderExecuted', () => {
-    fetchPortfolioData();
+    fetchPortfolioData(true);
   });
 
   useSocket('walletUpdated', (data) => {
@@ -498,7 +499,7 @@ export default function PortfolioScreen({ navigation }) {
         availableMargin: data.wallet.availableMargin ?? prev?.availableMargin,
       }));
     }
-    fetchPortfolioData();
+    fetchPortfolioData(true);
   });
 
   // ── Cancel Open Order Handler ───────────────────────────────────────────────
@@ -529,24 +530,58 @@ export default function PortfolioScreen({ navigation }) {
   // ── Square Off Handler ─────────────────────────────────────────────────────
   const handleSquareOff = async () => {
     if (!squareOffTarget || squareOffLoading) return;
+    const target = squareOffTarget;
     setSquareOffLoading(true);
+
+    const avg = Number(target.avgPrice || target.avgPremium || 0);
+    const live = marketStore.getPrice(target.symbol || target.stockSymbol || target.contractSymbol);
+    const exitPrice = Number(live?.ltp ?? target.ltp ?? avg);
+    const qty = Math.abs(Number(target.quantity || target.lots || 0));
+    const isBuy = String(target.side || 'BUY').toUpperCase() === 'BUY';
+    const dir = isBuy ? 1 : -1;
+    const bookedPnl = Math.round((exitPrice - avg) * qty * dir * 100) / 100;
+
+    // Optimistically update: remove from open positions, add to closed ledger, lock realized P&L
+    setPositions(prev => (Array.isArray(prev) ? prev.filter(p => p._id !== target._id) : []));
+    const closedItem = {
+      _id: 'closed_' + Date.now(),
+      symbol: target.symbol || target.stockSymbol || target.contractSymbol,
+      productType: target.productType || 'NRML',
+      quantity: qty,
+      lots: target.lots,
+      avgPrice: avg,
+      exitPrice,
+      pnl: bookedPnl,
+      dateStr: todayIst,
+      closedAt: new Date().toISOString(),
+      underlyingSymbol: target.underlyingSymbol,
+      strikePrice: target.strikePrice,
+      optionType: target.optionType,
+    };
+    setClosedTrades(prev => [closedItem, ...(Array.isArray(prev) ? prev : [])]);
+    setPortfolioMeta(prev => ({
+      ...prev,
+      realizedPnl: Math.round(((prev?.realizedPnl || 0) + bookedPnl) * 100) / 100,
+    }));
+
     try {
-      await api.squareOffTrade(squareOffTarget._id);
+      await api.squareOffTrade(target._id);
       setSquareOffTarget(null);
-      Alert.alert('Position Closed', 'Position squared off at current market price.');
-      fetchPortfolioData();
+      Alert.alert('Trade Closed', `Position closed at ₹${exitPrice.toFixed(2)}. P&L: ${bookedPnl >= 0 ? '+' : ''}₹${bookedPnl.toFixed(2)}`);
+      fetchPortfolioData(true);
     } catch (e) {
       try {
-        if (squareOffTarget.kind === 'equity' || squareOffTarget.kind === 'holding') {
-          await api.squareOffPosition(squareOffTarget._id);
+        if (target.kind === 'equity' || target.kind === 'holding') {
+          await api.squareOffPosition(target._id);
         } else {
-          await api.squareOffOptionPosition(squareOffTarget._id);
+          await api.squareOffOptionPosition(target._id);
         }
         setSquareOffTarget(null);
-        Alert.alert('Position Closed', 'Position squared off at current market price.');
-        fetchPortfolioData();
+        Alert.alert('Trade Closed', `Position closed at ₹${exitPrice.toFixed(2)}. P&L: ${bookedPnl >= 0 ? '+' : ''}₹${bookedPnl.toFixed(2)}`);
+        fetchPortfolioData(true);
       } catch (err2) {
         Alert.alert('Square Off Failed', err2.message || 'Unable to close position.');
+        fetchPortfolioData(true);
       }
     } finally {
       setSquareOffLoading(false);
@@ -554,7 +589,9 @@ export default function PortfolioScreen({ navigation }) {
   };
 
   // ── Derived Totals ─────────────────────────────────────────────────────────
-  const safePositions = Array.isArray(positions) ? positions : [];
+  // Open positions: strictly only positions with active, non-zero quantity
+  const safePositions = (Array.isArray(positions) ? positions : [])
+    .filter(p => p && Math.abs(Number(p.quantity || 0)) > 0);
   const safeClosedTrades = Array.isArray(closedTrades) ? closedTrades : [];
 
   // Only show closed trades from TODAY in Portfolio screen.
@@ -585,17 +622,28 @@ export default function PortfolioScreen({ navigation }) {
     }
   });
 
+  // Dynamic live calculation of unrealized P&L across all remaining active positions
   const unrealizedPnL = safePositions.reduce((sum, p) => {
     if (!p) return sum;
-    if (p.pnl !== undefined) return sum + (Number(p.pnl) || 0);
+    const qty = Math.abs(Number(p.quantity || 0));
+    if (qty <= 0) return sum;
     const avg = Number(p.avgPrice || p.avgPremium || 0);
-    const cur = Number(p.ltp || avg);
-    const dir = String(p.side || 'BUY').toUpperCase() === 'BUY' ? 1 : -1;
-    return sum + (cur - avg) * (Number(p.quantity) || 0) * dir;
+    const live = marketStore.getPrice(p.symbol || p.stockSymbol || p.contractSymbol);
+    const cur = Number(live?.ltp ?? p.ltp ?? avg);
+    const isBuy = String(p.side || 'BUY').toUpperCase() === 'BUY';
+    const dir = isBuy ? 1 : -1;
+    const posPnl = (cur - avg) * qty * dir;
+    return sum + (isNaN(posPnl) ? 0 : posPnl);
   }, 0);
 
-  const realizedPnL = Number(todayClosedTrades.reduce((sum, c) => sum + (Number(c?.pnl) || 0), 0));
-  const totalPnL = Math.round((unrealizedPnL + realizedPnL) * 100) / 100;
+  // Realized P&L is locked/fixed from today's closed trades
+  const closedListSum = Number(todayClosedTrades.reduce((sum, c) => sum + (Number(c?.pnl) || 0), 0));
+  const realizedPnL = todayClosedTrades.length > 0
+    ? Math.round(closedListSum * 100) / 100
+    : Math.round((Number(portfolioMeta?.realizedPnl) || 0) * 100) / 100;
+
+  // Total Net P&L = Locked Realized P&L + Live Unrealized P&L
+  const totalPnL = Math.round((realizedPnL + unrealizedPnL) * 100) / 100;
   const marginUsed = Number(portfolioMeta?.usedMargin || 0);
 
   return (

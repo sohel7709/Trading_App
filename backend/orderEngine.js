@@ -323,6 +323,9 @@ async function executeOrder(orderDoc, execPrice) {
         _io.to(`user:${uid}`).emit('trade_update', payload);
         _io.to(uid).emit('trade_update', payload);
 
+        // Immediate locked-in PnL broadcast
+        broadcastUserPnl(userId).catch(() => {});
+
         // Also notify batch room if student is in a batch (for instructor live grid & leaderboard)
         const { EnrollmentModel } = require('./model/EnrollmentModel');
         EnrollmentModel.findOne({ userId, status: { $ne: 'DROPPED' } }).then(async enr => {
@@ -717,6 +720,68 @@ async function checkSameDayMisSquareOff() {
     await squareOffAllMIS('Same-day 3:20 PM MIS auto square-off');
 }
 
+// ─── Real-Time User PnL Broadcast ─────────────────────────────────────────
+// Calculates locked-in realized PnL and total net PnL after trade closure/execution,
+// broadcasting immediate pnl_update over WebSockets to client apps.
+async function broadcastUserPnl(userId) {
+    if (!_io) return;
+    try {
+        const uid = String(userId);
+        const todayIst = rules.istDateStr();
+        const { OptionPositionsModel } = require('./model/OptionPositionsModel');
+        const [todayClosed, openOpts, openEqs, wallet] = await Promise.all([
+            ClosedPositionModel.find({ userId, dateStr: todayIst }).lean().catch(() => []),
+            OptionPositionsModel ? OptionPositionsModel.find({ userId }).lean().catch(() => []) : [],
+            PositionsModel.find({ userId }).lean().catch(() => []),
+            WalletModel.findOne({ userId }).lean().catch(() => null),
+        ]);
+
+        const realizedPnlRupees = (todayClosed || []).reduce((sum, c) => sum + (c.pnl || 0), 0);
+        let unrealizedPnlRupees = 0;
+
+        for (const p of (openOpts || [])) {
+            if (!p || p.quantity === 0) continue;
+            const live = marketDataService.getOptionLTPSync ? marketDataService.getOptionLTPSync(p.underlyingSymbol, p.strikePrice, p.optionType, p.expiry) : null;
+            const cur = Number(live?.ltp ?? (typeof live === 'number' ? live : (p.ltp || p.avgPremium || 0)));
+            const avg = Number(p.avgPremium || 0);
+            const side = p.quantity >= 0 ? 1 : -1;
+            unrealizedPnlRupees += (cur - avg) * Math.abs(p.quantity || 0) * side;
+        }
+
+        for (const p of (openEqs || [])) {
+            if (!p || p.quantity === 0) continue;
+            const live = marketDataService.getStockPrice(p.stockSymbol);
+            const cur = Number(live?.ltp ?? p.ltp ?? p.avgPrice ?? 0);
+            const avg = Number(p.avgPrice || 0);
+            const side = p.quantity >= 0 ? 1 : -1;
+            unrealizedPnlRupees += (cur - avg) * Math.abs(p.quantity || 0) * side;
+        }
+
+        const totalPnlRupees = Math.round((realizedPnlRupees + unrealizedPnlRupees) * 100) / 100;
+        const totalUsed = Math.round((wallet?.usedMargin || 0) + (wallet?.misMargin || 0) + (wallet?.optionMargin || 0));
+
+        const payload = {
+            userId: uid,
+            studentId: uid,
+            pnl: totalPnlRupees,
+            todayPnl: totalPnlRupees,
+            totalPnl: totalPnlRupees,
+            realizedPnl: Math.round(realizedPnlRupees * 100) / 100,
+            unrealizedPnl: Math.round(unrealizedPnlRupees * 100) / 100,
+            openPositionsCount: (openOpts || []).filter(p => p.quantity !== 0).length + (openEqs || []).filter(p => p.quantity !== 0).length,
+            balance: wallet ? wallet.balance : undefined,
+            usedMargin: totalUsed,
+            totalUsedMargin: totalUsed,
+            availableMargin: wallet ? wallet.availableMargin : undefined,
+        };
+
+        _io.to(`user:${uid}`).emit('pnl_update', payload);
+        _io.to(uid).emit('pnl_update', payload);
+    } catch (err) {
+        console.error('[broadcastUserPnl] Error:', err.message);
+    }
+}
+
 module.exports = {
     init,
     registerOptionExecutor,
@@ -731,4 +796,5 @@ module.exports = {
     squareOffAllMIS,
     checkSameDayMisSquareOff,
     recomputeBlockedMargin,
+    broadcastUserPnl,
 };

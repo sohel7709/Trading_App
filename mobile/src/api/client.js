@@ -104,7 +104,7 @@ export const api = {
   getDashboardSummary: () => get('/dashboard-summary'),
 
   // Unified Portfolio & Overview
-  getPortfolio: () => get('/portfolio'),
+  getPortfolio: (fresh = false) => get(fresh ? '/portfolio?fresh=true' : '/portfolio'),
 
   // Holdings
   getHoldings: () => get('/allHoldings'),

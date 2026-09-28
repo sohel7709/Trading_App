@@ -420,7 +420,11 @@ class InstituteDataManager {
             // Deduplicate global fallback requests across all institutes on fallback
             let data;
             if (conn.isUsingFallback) {
-                if (this._globalFallbackCache && (Date.now() - this._globalFallbackCache.timestamp < 4000)) {
+                const globalStocks = typeof marketDataService.getStockPrices === 'function' ? marketDataService.getStockPrices() : {};
+                const globalIndexes = typeof marketDataService.getIndexData === 'function' ? marketDataService.getIndexData() : {};
+                if (globalStocks && Object.keys(globalStocks).length > 0) {
+                    data = { stocks: globalStocks, indexes: globalIndexes, commodities: {} };
+                } else if (this._globalFallbackCache && (Date.now() - this._globalFallbackCache.timestamp < 10000)) {
                     data = this._globalFallbackCache.data;
                 } else if (this._globalFallbackInflight) {
                     data = await this._globalFallbackInflight;
