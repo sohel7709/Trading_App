@@ -207,8 +207,9 @@ export const api = {
     get(`/market/options/expired-candles?symbol=${encodeURIComponent(symbol)}&strike=${encodeURIComponent(strike)}&type=${encodeURIComponent(type)}&from=${from}&to=${to}&interval=${interval}&expiryFlag=${expiryFlag}&expiryCode=${expiryCode}`),
   getSegmentInstruments: (segment, limit = 100) =>
     get(`/market/instruments/segment/${encodeURIComponent(segment)}?limit=${limit}`),
-  searchSegmentInstruments: (query, segment = 'NSE_EQ', limit = 20) =>
-    get(`/market/instruments/search?query=${encodeURIComponent(query)}&segment=${encodeURIComponent(segment)}&limit=${limit}`),
+  // Global Multi-Asset Market APIs (Crypto, Commodities, Forex)
+  getGlobalMarketSnapshot: () => get('/market/global-snapshot'),
+  searchGlobalInstruments: (q) => get(`/market/global-search?q=${encodeURIComponent(q)}`),
 };
 
 export const getSocket = () => {

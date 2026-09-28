@@ -76,14 +76,58 @@ function buildSearchResults(apiResults, query) {
   return results;
 }
 
-const fmt = (n) => '₹' + Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const ASSET_TABS = [
+  { id: 'CUSTOM', label: 'My Lists', icon: 'bookmark-outline' },
+  { id: 'CRYPTO', label: '⚡ Crypto', icon: 'logo-bitcoin' },
+  { id: 'COMMODITIES', label: '🪙 Commodities', icon: 'cube-outline' },
+  { id: 'FOREX', label: '💱 Forex', icon: 'cash-outline' },
+];
 
-const InstrumentRow = React.memo(function InstrumentRow({ symbol, name, initialLtp, initialChange, initialChangePercent, onPress, onRemove }) {
+const GLOBAL_PRESETS = {
+  CRYPTO: [
+    { symbol: 'BTCUSDT', name: 'Bitcoin', category: 'CRYPTO', currency: 'USD' },
+    { symbol: 'ETHUSDT', name: 'Ethereum', category: 'CRYPTO', currency: 'USD' },
+    { symbol: 'SOLUSDT', name: 'Solana', category: 'CRYPTO', currency: 'USD' },
+    { symbol: 'BNBUSDT', name: 'BNB', category: 'CRYPTO', currency: 'USD' },
+    { symbol: 'XRPUSDT', name: 'Ripple', category: 'CRYPTO', currency: 'USD' },
+    { symbol: 'DOGEUSDT', name: 'Dogecoin', category: 'CRYPTO', currency: 'USD' },
+    { symbol: 'ADAUSDT', name: 'Cardano', category: 'CRYPTO', currency: 'USD' },
+    { symbol: 'AVAXUSDT', name: 'Avalanche', category: 'CRYPTO', currency: 'USD' },
+  ],
+  COMMODITIES: [
+    { symbol: 'PAXGUSDT', name: 'Gold Spot (USD)', category: 'COMMODITIES', currency: 'USD' },
+    { symbol: 'MCX GOLD', name: 'MCX Gold Futures', category: 'COMMODITIES', currency: 'INR' },
+    { symbol: 'MCX SILVER', name: 'MCX Silver Futures', category: 'COMMODITIES', currency: 'INR' },
+    { symbol: 'MCX CRUDEOIL', name: 'MCX Crude Oil', category: 'COMMODITIES', currency: 'INR' },
+    { symbol: 'MCX NATURALGAS', name: 'MCX Natural Gas', category: 'COMMODITIES', currency: 'INR' },
+  ],
+  FOREX: [
+    { symbol: 'USDINR', name: 'USD / INR Currency', category: 'FOREX', currency: 'INR' },
+    { symbol: 'EURUSDT', name: 'Euro / USD', category: 'FOREX', currency: 'USD' },
+    { symbol: 'GBPUSDT', name: 'British Pound / USD', category: 'FOREX', currency: 'USD' },
+  ],
+};
+
+const fmt = (n, isUsd) => {
+  const num = Number(n) || 0;
+  const sym = isUsd ? '$' : '₹';
+  const minDigits = (isUsd && num > 0 && num < 1) ? 4 : 2;
+  const maxDigits = (isUsd && num > 0 && num < 1) ? 4 : 2;
+  return sym + num.toLocaleString(isUsd ? 'en-US' : 'en-IN', {
+    minimumFractionDigits: minDigits,
+    maximumFractionDigits: maxDigits,
+  });
+};
+
+const InstrumentRow = React.memo(function InstrumentRow({ symbol, name, category: propCategory, currency: propCurrency, initialLtp, initialChange, initialChangePercent, onPress, onRemove }) {
   const live = useLiveSymbol(symbol);
   const ltp = live?.ltp ?? initialLtp ?? 0;
   const chg = Number(live?.change ?? initialChange ?? 0);
   const chgPct = Number(live?.changePercent ?? initialChangePercent ?? 0);
   const isGain = chg >= 0;
+
+  const isUsd = propCurrency === 'USD' || live?.currency === 'USD' || live?.isUsd || symbol.endsWith('USDT') || symbol.startsWith('PAXG');
+  const category = propCategory || live?.category || (symbol.endsWith('USDT') ? 'CRYPTO' : (symbol.startsWith('MCX') ? 'COMMODITIES' : null));
 
   const opt = parseOptionQuery(symbol) || (live?.isOption ? {
     underlyingSymbol: live.underlyingSymbol,
@@ -112,6 +156,23 @@ const InstrumentRow = React.memo(function InstrumentRow({ symbol, name, initialL
               </Text>
             </View>
           )}
+          {category && !opt && (
+            <View style={[
+              styles.assetBadge,
+              category === 'CRYPTO' && { backgroundColor: '#F3E8FF' },
+              (category === 'COMMODITIES' || category === 'COMMODITY') && { backgroundColor: '#FEF3C7' },
+              category === 'FOREX' && { backgroundColor: '#E0F2FE' },
+            ]}>
+              <Text style={[
+                styles.assetBadgeText,
+                category === 'CRYPTO' && { color: '#9333EA' },
+                (category === 'COMMODITIES' || category === 'COMMODITY') && { color: '#D97706' },
+                category === 'FOREX' && { color: '#0284C7' },
+              ]}>
+                {category}
+              </Text>
+            </View>
+          )}
         </View>
         {opt ? (
           <Text style={styles.companyText} numberOfLines={1}>Strike {opt.strikePrice} • {opt.underlyingSymbol}</Text>
@@ -120,9 +181,9 @@ const InstrumentRow = React.memo(function InstrumentRow({ symbol, name, initialL
         ) : null)}
       </View>
       <View style={styles.cardRight}>
-        <Text style={styles.priceText}>{fmt(ltp)}</Text>
+        <Text style={styles.priceText}>{fmt(ltp, isUsd)}</Text>
         <Text style={[styles.changeText, { color: isGain ? colors.gain : colors.loss }]}>
-          {isGain ? '+' : ''}{chg.toFixed(2)} ({isGain ? '+' : ''}{chgPct.toFixed(2)}%)
+          {isGain ? '+' : ''}{chg.toFixed(isUsd && ltp < 1 ? 4 : 2)} ({isGain ? '+' : ''}{chgPct.toFixed(2)}%)
         </Text>
       </View>
       {onRemove && (
@@ -146,6 +207,7 @@ export default function WatchlistScreen({ navigation }) {
   // Data state: track active watchlist by its unique ID
   const [watchlists, setWatchlists] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const [activeAssetTab, setActiveAssetTab] = useState('CUSTOM');
   const [livePrices, setLivePrices] = useState({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -454,18 +516,24 @@ export default function WatchlistScreen({ navigation }) {
 
   const renderWatchItem = useCallback(({ item }) => {
     const sym = typeof item === 'string' ? item : item.symbol;
+    const name = typeof item === 'object' ? item.name : undefined;
+    const category = typeof item === 'object' ? item.category : undefined;
+    const currency = typeof item === 'object' ? item.currency : undefined;
     const initial = livePrices[sym];
     return (
       <InstrumentRow 
         symbol={sym}
+        name={name}
+        category={category}
+        currency={currency}
         initialLtp={initial?.ltp}
         initialChange={initial?.change}
         initialChangePercent={initial?.changePercent}
         onPress={openOrderSheet} 
-        onRemove={handleRemoveStock}
+        onRemove={activeAssetTab === 'CUSTOM' ? handleRemoveStock : undefined}
       />
     );
-  }, [openOrderSheet, handleRemoveStock, livePrices]);
+  }, [openOrderSheet, handleRemoveStock, livePrices, activeAssetTab]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -490,36 +558,64 @@ export default function WatchlistScreen({ navigation }) {
         </TouchableOpacity>
       </View>
 
-      {/* Watchlist Tabs Bar */}
-      <View style={styles.tabsWrapper}>
-        <ScrollView 
-          ref={tabsScrollRef}
-          horizontal 
-          showsHorizontalScrollIndicator={false} 
-          contentContainerStyle={styles.tabsContainer}
-        >
-          {watchlists.map((wl) => {
-            const isActive = activeWatchlist?._id === wl._id;
+      {/* Multi-Asset Class Segment Bar */}
+      <View style={styles.assetCategoryBar}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.assetCategoryContainer}>
+          {ASSET_TABS.map((tab) => {
+            const isTabActive = activeAssetTab === tab.id;
             return (
-              <TouchableOpacity 
-                key={wl._id} 
-                style={[styles.tab, isActive && styles.tabActive]}
-                onPress={() => setSelectedId(wl._id)}
-                activeOpacity={0.7}
+              <TouchableOpacity
+                key={tab.id}
+                style={[styles.assetPill, isTabActive && styles.assetPillActive]}
+                onPress={() => setActiveAssetTab(tab.id)}
+                activeOpacity={0.75}
               >
-                <Text style={[styles.tabText, isActive && styles.tabTextActive]}>{wl.name}</Text>
+                <Ionicons
+                  name={tab.icon}
+                  size={14}
+                  color={isTabActive ? '#FFFFFF' : colors.textSecondary}
+                />
+                <Text style={[styles.assetPillText, isTabActive && styles.assetPillTextActive]}>
+                  {tab.label}
+                </Text>
               </TouchableOpacity>
             );
           })}
-          <TouchableOpacity style={styles.addTabBtn} onPress={handleCreateWatchlist} activeOpacity={0.7}>
-            <Ionicons name="add" size={16} color={colors.primary} />
-            <Text style={styles.addTabText}>New List</Text>
-          </TouchableOpacity>
         </ScrollView>
       </View>
 
-      {/* Active Watchlist Action Subheader */}
-      {activeWatchlist && (
+      {/* Watchlist Tabs Bar (for Custom Lists) */}
+      {activeAssetTab === 'CUSTOM' ? (
+        <View style={styles.tabsWrapper}>
+          <ScrollView 
+            ref={tabsScrollRef}
+            horizontal 
+            showsHorizontalScrollIndicator={false} 
+            contentContainerStyle={styles.tabsContainer}
+          >
+            {watchlists.map((wl) => {
+              const isActive = activeWatchlist?._id === wl._id;
+              return (
+                <TouchableOpacity 
+                  key={wl._id} 
+                  style={[styles.tab, isActive && styles.tabActive]}
+                  onPress={() => setSelectedId(wl._id)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.tabText, isActive && styles.tabTextActive]}>{wl.name}</Text>
+                </TouchableOpacity>
+              );
+            })}
+            <TouchableOpacity style={styles.addTabBtn} onPress={handleCreateWatchlist} activeOpacity={0.7}>
+              <Ionicons name="add" size={16} color={colors.primary} />
+              <Text style={styles.addTabText}>New List</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      ) : null}
+
+      {/* Active Subheader */}
+      {activeAssetTab === 'CUSTOM' && activeWatchlist ? (
         <View style={styles.subHeader}>
           <View style={styles.subHeaderLeft}>
             <Text style={styles.activeListName}>{activeWatchlist.name}</Text>
@@ -538,7 +634,18 @@ export default function WatchlistScreen({ navigation }) {
             </TouchableOpacity>
           </View>
         </View>
-      )}
+      ) : activeAssetTab !== 'CUSTOM' ? (
+        <View style={styles.subHeader}>
+          <View style={styles.subHeaderLeft}>
+            <Text style={styles.activeListName}>
+              {ASSET_TABS.find(t => t.id === activeAssetTab)?.label}
+            </Text>
+            <Text style={styles.activeListCount}>
+              {(GLOBAL_PRESETS[activeAssetTab] || []).length} instruments • Live 24/7 Global Feed
+            </Text>
+          </View>
+        </View>
+      ) : null}
 
       {/* Search Bar with Multi-Add UX */}
       <View style={styles.searchContainer}>
@@ -611,13 +718,30 @@ export default function WatchlistScreen({ navigation }) {
                               </Text>
                             </View>
                           )}
+                          {item.category && !item.isOption && (
+                            <View style={[
+                              styles.assetBadge,
+                              item.category === 'CRYPTO' && { backgroundColor: '#F3E8FF' },
+                              (item.category === 'COMMODITIES' || item.category === 'COMMODITY') && { backgroundColor: '#FEF3C7' },
+                              item.category === 'FOREX' && { backgroundColor: '#E0F2FE' },
+                            ]}>
+                              <Text style={[
+                                styles.assetBadgeText,
+                                item.category === 'CRYPTO' && { color: '#9333EA' },
+                                (item.category === 'COMMODITIES' || item.category === 'COMMODITY') && { color: '#D97706' },
+                                item.category === 'FOREX' && { color: '#0284C7' },
+                              ]}>
+                                {item.category}
+                              </Text>
+                            </View>
+                          )}
                         </View>
                         {item.name && <Text style={styles.searchName} numberOfLines={1}>{item.name}</Text>}
                         {item.isOption && (
                           <Text style={styles.searchOptionMeta}>Strike {item.strikePrice} • {item.underlyingSymbol}</Text>
                         )}
                         {(live.ltp || item.ltp) ? (
-                          <Text style={styles.searchLtp}>LTP: {fmt(live.ltp || item.ltp)}</Text>
+                          <Text style={styles.searchLtp}>LTP: {fmt(live.ltp || item.ltp, item.currency === 'USD' || sym.endsWith('USDT'))}</Text>
                         ) : null}
                       </View>
 
@@ -657,16 +781,16 @@ export default function WatchlistScreen({ navigation }) {
              <View style={{ padding: 16, gap: 12 }}>
                  {[...Array(6)].map((_, i) => <SkeletonLoader key={i} width="100%" height={72} borderRadius={8} />)}
              </View>
-          ) : activeStocks.length === 0 ? (
+          ) : (activeAssetTab === 'CUSTOM' ? activeStocks : (GLOBAL_PRESETS[activeAssetTab] || [])).length === 0 ? (
             <View style={styles.emptyState}>
               <View style={styles.emptyIconCircle}>
                 <Ionicons name="list-outline" size={42} color={colors.primary} />
               </View>
               <Text style={styles.emptyTitle}>
-                {activeWatchlist?.name ? `"${activeWatchlist.name}" is empty` : 'No scripts in this watchlist'}
+                {activeWatchlist?.name ? `"${activeWatchlist.name}" is empty` : 'No scripts in this list'}
               </Text>
               <Text style={styles.emptySub}>
-                Add your favorite stocks and contracts to monitor live market movements and trade quickly.
+                Add your favorite stocks, crypto and contracts to monitor live market movements and trade quickly.
               </Text>
               <TouchableOpacity
                 style={styles.emptyAddBtn}
@@ -678,7 +802,7 @@ export default function WatchlistScreen({ navigation }) {
             </View>
           ) : (
             <FlatList
-              data={activeStocks}
+              data={activeAssetTab === 'CUSTOM' ? activeStocks : (GLOBAL_PRESETS[activeAssetTab] || [])}
               keyExtractor={(item) => (typeof item === 'string' ? item : item.symbol)}
               renderItem={renderWatchItem}
               getItemLayout={(_, index) => ({ length: 68, offset: 68 * index, index })}
@@ -1064,4 +1188,50 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   modalCreateText: { fontSize: 14, fontWeight: '700', color: '#FFFFFF' },
+
+  // Multi-Asset Category Segment Bar
+  assetCategoryBar: {
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  assetCategoryContainer: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 8,
+    alignItems: 'center',
+  },
+  assetPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+  },
+  assetPillActive: {
+    backgroundColor: '#0F172A',
+  },
+  assetPillText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  assetPillTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+
+  // Asset Badges
+  assetBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  assetBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
 });

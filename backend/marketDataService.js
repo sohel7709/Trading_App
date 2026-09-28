@@ -11,6 +11,7 @@ const kotakNeoService = require('./kotakNeoService');
 const candleDataService = require('./candleDataService');
 const { isMarketOpen, isActualMarketHours } = require('./marketRules');
 const DhanWebSocketFeed = require('./services/DhanWebSocketFeed');
+const { globalMarketFeed } = require('./services/GlobalMarketFeed');
 
 function isLiveMarketActive(segment = 'FO') {
     try {
@@ -593,6 +594,11 @@ function handleIncomingWsIndex(idx) {
 // 2. Fallback: If WebSocket disconnects or errors, 1s REST polling immediately takes over.
 async function fastRefresh() {
     if (!dhanDataService.isConfigured()) return;
+
+    // Ensure 24/7 Global Crypto & Commodities feed is active
+    if (!globalMarketFeed.isConnected && !globalMarketFeed.isConnecting) {
+        globalMarketFeed.start();
+    }
 
     // Ensure WebSocket feed is initialized if credentials are ready
     if (!dhanWsFeed) {
@@ -1384,6 +1390,8 @@ module.exports = {
             if (stockPrices[upper]?.ltp != null) return stockPrices[upper].ltp;
             return getOptionLTPSync(opt.underlying, opt.strikePrice, opt.optionType, opt.expiry);
         }
+        const globalItem = globalMarketFeed.cache.get(upper);
+        if (globalItem && globalItem.ltp > 0) return globalItem.ltp;
         return null;
     },
     getDataSource,
@@ -1396,6 +1404,9 @@ module.exports = {
     searchOptionInstruments,
     parseOptionSymbol,
     updateTrackedOptionPrices,
+    getGlobalMarketSnapshot: () => globalMarketFeed.getSnapshot(),
+    searchGlobalInstruments: (q) => globalMarketFeed.search(q),
+    getGlobalMarketFeed: () => globalMarketFeed,
     OPTION_LOT_SIZES,
     NSE_SYMBOLS,
     NSE_STOCK_SYMBOLS,

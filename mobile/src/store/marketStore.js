@@ -40,6 +40,16 @@ class MarketStore {
       this._enqueue(data);
     });
 
+    SocketClient.on('globalMarketTick', (tick) => {
+      if (tick && tick.symbol) {
+        this._pendingDiffs[tick.symbol] = {
+          ...(this._pendingDiffs[tick.symbol] || this._prices[tick.symbol] || {}),
+          ...tick,
+          isUsd: tick.currency === 'USD',
+        };
+      }
+    });
+
     // Start 200ms batch flush interval
     this._flushTimer = setInterval(() => {
       this._flush();
@@ -58,6 +68,19 @@ class MarketStore {
             ...(this._pendingDiffs[sym] || this._prices[sym] || {}),
             ...quote,
             symbol: sym,
+          };
+        }
+      }
+    }
+
+    // Process global multi-asset snapshot (Crypto, Forex, Commodities)
+    if (data.global && Array.isArray(data.global.all)) {
+      for (const item of data.global.all) {
+        if (item && item.symbol) {
+          this._pendingDiffs[item.symbol] = {
+            ...(this._pendingDiffs[item.symbol] || this._prices[item.symbol] || {}),
+            ...item,
+            isUsd: item.currency === 'USD',
           };
         }
       }
