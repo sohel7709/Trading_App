@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const _yf2 = require('yahoo-finance2');
 const _YF2 = _yf2.default || _yf2;
 const yahooFinance = (typeof _YF2 === 'function') ? new _YF2({ suppressNotices: ['yahooSurvey'] }) : _YF2;
@@ -39,9 +41,6 @@ const NSE_STOCK_SYMBOLS = [
 const NSE_SYMBOLS = NSE_STOCK_SYMBOLS.map(s => s + '.NS');
 
 // Index symbols for Yahoo Finance fallback
-// Yahoo tickers verified live (yahoo-finance2 .quote()) against each index's
-// real name before wiring in — NIFTY_MID_SELECT.NS, ^NSMIDCP and BSE-BANK.BO
-// aren't guessable from convention alone.
 const INDEX_SYMBOLS = [
     { symbol: '^NSEI',               name: 'NIFTY 50' },
     { symbol: '^NSEBANK',            name: 'BANK NIFTY' },
@@ -53,97 +52,82 @@ const INDEX_SYMBOLS = [
     { symbol: 'BSE-BANK.BO',         name: 'BANKEX' },
 ];
 
-// Baseline seed data (ensures indices and core stocks are always immediately available
-// even on cold start, during off-market hours, or during transient broker reconnection)
-const DEFAULT_INDEX_PRICES = {
-    'NIFTY 50':      { ltp: 23446.80, previousClose: 23329.00, change: 117.80, changePercent: 0.50 },
-    'BANK NIFTY':    { ltp: 56548.90, previousClose: 56209.65, change: 339.25, changePercent: 0.60 },
-    'FINNIFTY':      { ltp: 25564.85, previousClose: 25486.75, change: 78.10, changePercent: 0.31 },
-    'MIDCPNIFTY':    { ltp: 14572.25, previousClose: 14510.80, change: 61.45, changePercent: 0.42 },
-    'SENSEX':        { ltp: 74828.25, previousClose: 74648.30, change: 179.95, changePercent: 0.24 },
-    'BANKEX':        { ltp: 63916.52, previousClose: 63520.10, change: 396.42, changePercent: 0.62 },
-    'NIFTY NEXT 50': { ltp: 72462.40, previousClose: 72110.50, change: 351.90, changePercent: 0.49 },
-    'NIFTY IT':      { ltp: 28334.05, previousClose: 28190.20, change: 143.85, changePercent: 0.51 },
-    'INDIA VIX':     { ltp: 10.35,    previousClose: 10.80,    change: -0.45, changePercent: -4.17 },
-};
-
-const BASELINE_STOCKS = {
-    'RELIANCE':   { ltp: 2950.00, previousClose: 2932.00, change: 18.00, changePercent: 0.61 },
-    'TCS':        { ltp: 3920.00, previousClose: 3902.50, change: 17.50, changePercent: 0.45 },
-    'HDFCBANK':   { ltp: 1680.00, previousClose: 1672.00, change: 8.00, changePercent: 0.48 },
-    'INFY':       { ltp: 1520.00, previousClose: 1511.20, change: 8.80, changePercent: 0.58 },
-    'ICICIBANK':  { ltp: 1180.00, previousClose: 1173.50, change: 6.50, changePercent: 0.55 },
-    'HINDUNILVR': { ltp: 2410.00, previousClose: 2402.00, change: 8.00, changePercent: 0.33 },
-    'SBIN':       { ltp: 810.00,  previousClose: 804.50,  change: 5.50, changePercent: 0.68 },
-    'BHARTIARTL': { ltp: 1420.00, previousClose: 1412.00, change: 8.00, changePercent: 0.57 },
-    'ITC':        { ltp: 430.00,  previousClose: 428.20,  change: 1.80, changePercent: 0.42 },
-    'LT':         { ltp: 3650.00, previousClose: 3632.00, change: 18.00, changePercent: 0.50 },
-    'TATAMOTORS': { ltp: 980.00,  previousClose: 974.00,  change: 6.00, changePercent: 0.62 },
-    'KOTAKBANK':  { ltp: 1780.00, previousClose: 1771.50, change: 8.50, changePercent: 0.48 },
-    'AXISBANK':   { ltp: 1190.00, previousClose: 1183.00, change: 7.00, changePercent: 0.59 },
-    'MARUTI':     { ltp: 12200.0, previousClose: 12130.0, change: 70.00, changePercent: 0.58 },
-    'SUNPHARMA':  { ltp: 1540.00, previousClose: 1532.00, change: 8.00, changePercent: 0.52 },
-    'BAJFINANCE': { ltp: 6850.00, previousClose: 6815.00, change: 35.00, changePercent: 0.51 },
-    'TITAN':      { ltp: 3450.00, previousClose: 3432.00, change: 18.00, changePercent: 0.52 },
-    'WIPRO':      { ltp: 480.00,  previousClose: 477.50,  change: 2.50, changePercent: 0.52 },
-    'HCLTECH':    { ltp: 1580.00, previousClose: 1571.00, change: 9.00, changePercent: 0.57 },
-    'ADANIENT':   { ltp: 3120.00, previousClose: 3105.00, change: 15.00, changePercent: 0.48 },
-    'TATASTEEL':  { ltp: 165.00,  previousClose: 164.10,  change: 0.90, changePercent: 0.55 },
-};
-
-// In-memory cache
+// In-memory cache — zero hardcoded numbers; strictly real live/persisted broker feeds
 let stockPrices = {};
 let indexData   = {};
 let lastUpdated = new Date().toISOString();
 let isFetching  = false;
 let dataSource  = 'LIVE';
 
-function seedBaselineIndices() {
-    for (const [name, def] of Object.entries(DEFAULT_INDEX_PRICES)) {
-        if (!indexData[name] || !(indexData[name].ltp > 0)) {
-            const ltp = typeof def === 'object' ? def.ltp : def;
-            const pc = typeof def === 'object' ? def.previousClose : def;
-            indexData[name] = {
-                name,
-                symbol: name,
-                ltp,
-                open: ltp,
-                high: ltp,
-                low: ltp,
-                previousClose: pc,
-                change: typeof def === 'object' ? def.change : 0,
-                changePercent: typeof def === 'object' ? def.changePercent : 0,
-                source: 'BASELINE',
-            };
+const SNAPSHOT_CACHE_FILE = path.join(__dirname, 'cache', 'market_snapshot.json');
+const OPTION_CHAIN_CACHE_FILE = path.join(__dirname, 'cache', 'option_chains.json');
+
+function loadPersistedSnapshot() {
+    try {
+        if (fs.existsSync(SNAPSHOT_CACHE_FILE)) {
+            const raw = fs.readFileSync(SNAPSHOT_CACHE_FILE, 'utf8');
+            const data = JSON.parse(raw);
+            if (data.indexes && Object.keys(data.indexes).length > 0) {
+                indexData = { ...data.indexes };
+            }
+            if (data.stocks && Object.keys(data.stocks).length > 0) {
+                stockPrices = { ...data.stocks };
+            }
+            if (data.lastUpdated) {
+                lastUpdated = data.lastUpdated;
+            }
+            console.log(`[Market] Loaded ${Object.keys(indexData).length} real indexes & ${Object.keys(stockPrices).length} real stocks from disk cache`);
         }
+    } catch (err) {
+        console.warn('[Market] Snapshot disk cache note:', err.message);
     }
 }
 
-function seedBaselineStocks() {
-    for (const [sym, def] of Object.entries(BASELINE_STOCKS)) {
-        if (!stockPrices[sym] || !(stockPrices[sym].ltp > 0)) {
-            const price = typeof def === 'object' ? def.ltp : def;
-            const pc = typeof def === 'object' ? def.previousClose : def;
-            const chg = typeof def === 'object' ? def.change : 0;
-            const chgPct = typeof def === 'object' ? def.changePercent : 0;
-            stockPrices[sym] = {
-                symbol: sym,
-                ltp: price,
-                open: price,
-                high: price,
-                low: price,
-                previousClose: pc,
-                volume: 500000,
-                change: chg,
-                changePercent: chgPct,
-                source: 'BASELINE',
-            };
-        }
+function persistSnapshot() {
+    try {
+        const dir = path.dirname(SNAPSHOT_CACHE_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(SNAPSHOT_CACHE_FILE, JSON.stringify({
+            indexes: indexData,
+            stocks: stockPrices,
+            lastUpdated: new Date().toISOString(),
+        }), 'utf8');
+    } catch (err) {
+        // non-blocking
     }
 }
 
-seedBaselineIndices();
-seedBaselineStocks();
+const activeOptionChains = {}; // indexName -> chain object
+
+function loadPersistedOptionChains() {
+    try {
+        if (fs.existsSync(OPTION_CHAIN_CACHE_FILE)) {
+            const raw = fs.readFileSync(OPTION_CHAIN_CACHE_FILE, 'utf8');
+            const data = JSON.parse(raw);
+            if (data && typeof data === 'object') {
+                for (const [idx, chain] of Object.entries(data)) {
+                    if (chain && Array.isArray(chain.rows) && chain.rows.length > 0) {
+                        activeOptionChains[idx] = chain;
+                    }
+                }
+                console.log(`[Market] Loaded real option chains from disk for: ${Object.keys(activeOptionChains).join(', ')}`);
+            }
+        }
+    } catch (err) {
+        console.warn('[Market] Option chain disk cache note:', err.message);
+    }
+}
+
+function persistOptionChains() {
+    try {
+        const dir = path.dirname(OPTION_CHAIN_CACHE_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(OPTION_CHAIN_CACHE_FILE, JSON.stringify(activeOptionChains), 'utf8');
+    } catch (err) {}
+}
+
+loadPersistedSnapshot();
+loadPersistedOptionChains();
 
 // Authoritative previous-session close per symbol, sourced from Dhan DAILY
 // CANDLES rather than the live feed. Some symbols (seen on LTIM) get a
@@ -194,9 +178,12 @@ const trackedSymbols = new Set(NSE_STOCK_SYMBOLS);
 
 function trackSymbol(symbol) {
     const sym = String(symbol || '').toUpperCase().trim();
-    if (!sym || trackedSymbols.has(sym)) return false;
-    trackedSymbols.add(sym);
-    console.log(`[Market] Now tracking ${sym} (${trackedSymbols.size} symbols)`);
+    if (!sym) return false;
+    const isNew = !trackedSymbols.has(sym);
+    if (isNew) {
+        trackedSymbols.add(sym);
+        console.log(`[Market] Now tracking ${sym} (${trackedSymbols.size} symbols)`);
+    }
 
     // Auto-subscribe to live Dhan WebSocket feed if streaming
     if (dhanWsFeed && isWsStreaming) {
@@ -206,7 +193,14 @@ function trackSymbol(symbol) {
             dhanWsFeed.subscribe([{ ExchangeSegment: seg, SecurityId: secId }], 15);
         }
     }
-    return true;
+
+    if (typeof parseOptionSymbol === 'function') {
+        const opt = parseOptionSymbol(sym);
+        if (opt && typeof updateSingleTrackedOption === 'function') {
+            updateSingleTrackedOption(sym, opt);
+        }
+    }
+    return isNew;
 }
 
 function getTrackedSymbols() {
@@ -399,6 +393,7 @@ async function applyDhanSnapshot() {
     if (gotStocks || Object.keys(indexes).length > 0) {
         dataSource  = 'DHAN_LIVE';
         lastUpdated = new Date().toISOString();
+        persistSnapshot();
         return true;
     }
     return false;
@@ -660,13 +655,12 @@ async function fastRefresh() {
 
 function getDataSource()   { return dataSource; }
 function getStockPrices()  {
-    if (!stockPrices || Object.keys(stockPrices).length === 0) seedBaselineStocks();
+    if (typeof updateTrackedOptionPrices === 'function') {
+        updateTrackedOptionPrices();
+    }
     return stockPrices;
 }
-function getIndexData()    {
-    if (!indexData || Object.keys(indexData).length === 0) seedBaselineIndices();
-    return indexData;
-}
+function getIndexData()    { return indexData; }
 function getLastUpdated()  { return lastUpdated || new Date().toISOString(); }
 
 function getMarketMovers() {
@@ -733,6 +727,197 @@ function normalizeOptionIndexName(name) {
     return INDEX_NAME_ALIASES[upper] || upper;
 }
 
+const OPTION_LOT_SIZES = {
+    'NIFTY 50':      75,
+    'NIFTY':         75,
+    'BANK NIFTY':    30,
+    'BANKNIFTY':     30,
+    'SENSEX':        20,
+    'FINNIFTY':      65,
+    'MIDCPNIFTY':    120,
+    'NIFTY NEXT 50': 25,
+    'BANKEX':        30,
+};
+
+function parseOptionSymbol(sym) {
+    if (!sym || typeof sym !== 'string') return null;
+    const str = sym.trim().toUpperCase();
+
+    // Standard pattern: e.g. "NIFTY 23100 CE", "NIFTY 50 23100 CE", "BANK NIFTY 54800 PE", "NIFTY23100CE", "FINNIFTY 24700 PE"
+    const match = str.match(/^([A-Z0-9\s]+?)\s*(\d{3,6})\s*(CE|PE)(?:\s+([\d-]+))?$/i);
+    if (!match) return null;
+
+    let rawUnderlying = match[1].trim();
+    const strikePrice = parseInt(match[2], 10);
+    const optionType = match[3].toUpperCase();
+    const expiry = match[4] || null;
+
+    let underlying = normalizeOptionIndexName(rawUnderlying);
+    const cleanUnderlying = rawUnderlying.replace(/\s+/g, '');
+    if (cleanUnderlying === 'NIFTY') underlying = 'NIFTY 50';
+    else if (cleanUnderlying === 'BANKNIFTY') underlying = 'BANK NIFTY';
+    else if (cleanUnderlying === 'FINNIFTY') underlying = 'FINNIFTY';
+    else if (cleanUnderlying === 'MIDCPNIFTY' || cleanUnderlying === 'MIDCAP') underlying = 'MIDCPNIFTY';
+    else if (cleanUnderlying === 'SENSEX' || cleanUnderlying === 'BSE') underlying = 'SENSEX';
+
+    const shortIdx = underlying === 'NIFTY 50' ? 'NIFTY' : (underlying === 'BANK NIFTY' ? 'BANKNIFTY' : underlying);
+    const canonicalSymbol = `${shortIdx} ${strikePrice} ${optionType}`;
+
+    return {
+        underlying,
+        rawUnderlying,
+        strikePrice,
+        optionType,
+        expiry,
+        canonicalSymbol,
+        symbol: sym,
+    };
+}
+
+function updateSingleTrackedOption(sym, opt) {
+    if (!sym || !opt) return;
+    const chain = (opt.expiry && optionChainCache[`${opt.underlying}|${opt.expiry}`]?.data) || activeOptionChains[opt.underlying];
+    if (!chain || !Array.isArray(chain.rows)) return;
+
+    const row = chain.rows.find(r => r.strike === opt.strikePrice);
+    if (!row) return;
+
+    const contract = opt.optionType === 'CE' ? row.ce : row.pe;
+    if (!contract || typeof contract.ltp !== 'number') return;
+
+    const chg = contract.change ?? (contract.prevClose ? Math.round((contract.ltp - contract.prevClose) * 100) / 100 : 0);
+    const prevClose = contract.prevClose || (contract.ltp - chg);
+    const chgPct = prevClose > 0 ? Math.round((chg / prevClose) * 10000) / 100 : 0;
+
+    const priceObj = {
+        symbol: sym,
+        name: `${opt.underlying} ${opt.strikePrice} ${opt.optionType}`,
+        ltp: contract.ltp,
+        change: chg,
+        changePercent: chgPct,
+        prevClose: prevClose,
+        open: contract.open || contract.ltp,
+        high: contract.high || contract.ltp,
+        low: contract.low || contract.ltp,
+        close: contract.ltp,
+        oi: contract.oi || 0,
+        volume: contract.volume || 0,
+        isOption: true,
+        underlyingSymbol: opt.underlying,
+        strikePrice: opt.strikePrice,
+        optionType: opt.optionType,
+        expiry: chain.expiry,
+        lotSize: OPTION_LOT_SIZES[opt.underlying] || 50,
+    };
+
+    stockPrices[sym] = priceObj;
+
+    const aliases = [
+        opt.canonicalSymbol,
+        `${opt.underlying} ${opt.strikePrice} ${opt.optionType}`,
+        `${opt.underlying.replace(/\s+/g, '')} ${opt.strikePrice} ${opt.optionType}`,
+        `${opt.underlying === 'NIFTY 50' ? 'NIFTY' : opt.underlying} ${opt.strikePrice} ${opt.optionType}`,
+    ];
+    for (const a of aliases) {
+        if (a && a !== sym) {
+            stockPrices[a] = { ...priceObj, symbol: a };
+        }
+    }
+}
+
+function updateTrackedOptionPrices() {
+    for (const sym of trackedSymbols) {
+        const opt = parseOptionSymbol(sym);
+        if (opt) {
+            updateSingleTrackedOption(sym, opt);
+        }
+    }
+}
+
+function searchOptionInstruments(query, limit = 20) {
+    if (!query || typeof query !== 'string') return [];
+    const q = query.trim().toUpperCase();
+    if (q.length < 2) return [];
+
+    let targetIndex = null;
+    if (q.includes('BANKNIFTY') || q.includes('BANK NIFTY') || q.includes('BNF')) targetIndex = 'BANK NIFTY';
+    else if (q.includes('FINNIFTY') || q.includes('FIN NIFTY')) targetIndex = 'FINNIFTY';
+    else if (q.includes('MIDCP') || q.includes('MIDCAP')) targetIndex = 'MIDCPNIFTY';
+    else if (q.includes('SENSEX') || q.includes('BSE')) targetIndex = 'SENSEX';
+    else if (q.includes('NIFTY')) targetIndex = 'NIFTY 50';
+
+    const hasCE = /\bCE\b/.test(q) || q.endsWith('CE');
+    const hasPE = /\bPE\b/.test(q) || q.endsWith('PE');
+    const optTypes = hasCE && !hasPE ? ['CE'] : (hasPE && !hasCE ? ['PE'] : ['CE', 'PE']);
+
+    const strikeMatch = q.match(/\b(\d{4,6})\b/);
+    const targetStrike = strikeMatch ? parseInt(strikeMatch[1], 10) : null;
+
+    if (!targetIndex && !targetStrike) {
+        if (!q.includes('OPTION') && !q.includes('CALL') && !q.includes('PUT') && !hasCE && !hasPE) {
+            return [];
+        }
+    }
+
+    const indicesToSearch = targetIndex ? [targetIndex] : SUPPORTED_INDICES;
+    const results = [];
+
+    for (const idx of indicesToSearch) {
+        const chain = activeOptionChains[idx];
+        if (!chain || !Array.isArray(chain.rows) || chain.rows.length === 0) continue;
+
+        let rows = chain.rows;
+        if (targetStrike) {
+            const cfg = OPTION_CONFIG[idx] || { strikeGap: 50 };
+            const gap = cfg.strikeGap || 50;
+            const exactOrClose = rows.filter(r => Math.abs(r.strike - targetStrike) <= gap * 3 || String(r.strike).includes(String(targetStrike)))
+                                     .sort((a, b) => Math.abs(a.strike - targetStrike) - Math.abs(b.strike - targetStrike));
+            if (exactOrClose.length > 0) {
+                rows = exactOrClose;
+            } else {
+                continue;
+            }
+        } else {
+            const atm = chain.atmStrike || (chain.indexPrice ? Math.round(chain.indexPrice / 100) * 100 : 0);
+            rows = [...rows].sort((a, b) => Math.abs(a.strike - atm) - Math.abs(b.strike - atm)).slice(0, 4);
+        }
+
+        const displayIdx = idx === 'NIFTY 50' ? 'NIFTY' : (idx === 'BANK NIFTY' ? 'BANKNIFTY' : idx);
+
+        for (const row of rows) {
+            for (const type of optTypes) {
+                const contract = type === 'CE' ? row.ce : row.pe;
+                if (!contract || typeof contract.ltp !== 'number') continue;
+
+                const sym = `${displayIdx} ${row.strike} ${type}`;
+                const chg = contract.change ?? (contract.prevClose ? Math.round((contract.ltp - contract.prevClose) * 100) / 100 : 0);
+                const prevClose = contract.prevClose || (contract.ltp - chg);
+                const chgPct = prevClose > 0 ? Math.round((chg / prevClose) * 10000) / 100 : 0;
+
+                results.push({
+                    symbol: sym,
+                    name: `${displayIdx} ${row.strike} ${type}`,
+                    underlyingSymbol: idx,
+                    strikePrice: row.strike,
+                    optionType: type,
+                    expiry: chain.expiry,
+                    lotSize: OPTION_LOT_SIZES[idx] || 50,
+                    ltp: contract.ltp,
+                    change: chg,
+                    changePercent: chgPct,
+                    prevClose: prevClose,
+                    oi: contract.oi || 0,
+                    volume: contract.volume || 0,
+                    isOption: true,
+                    instrumentType: 'OPTIDX',
+                });
+                if (results.length >= limit) return results;
+            }
+        }
+    }
+    return results;
+}
+
 function localDateStr(d) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
@@ -779,104 +964,42 @@ function daysToExpiry(expiry) {
     return Math.max(0.02, diff);
 }
 
-function calcOptionPrice(type, indexPrice, strike, atmPremium, strikeGap, dte) {
-    const intrinsic = type === 'CE' ? Math.max(0, indexPrice - strike) : Math.max(0, strike - indexPrice);
-    const stepsFromATM = Math.abs(strike - indexPrice) / strikeGap;
-    const decay = Math.exp(-stepsFromATM * 0.25);
-    // Time value scales with sqrt(time) like Black-Scholes ATM premium;
-    // atmPremium is calibrated to a ~7-day expiry.
-    const timeScale = Math.sqrt((dte ?? 7) / 7);
-    const timeValue = Math.max(0.5, atmPremium * decay * timeScale);
-    const noise = isLiveMarketActive('FO') ? ((Math.random() - 0.5) * (timeValue * 0.1)) : 0;
-    return Math.max(0.05, Math.round((intrinsic + timeValue + noise) * 100) / 100);
-}
-
-
-function generateOptionChainForIndex(indexName, expiry) {
-    const idxEntry = indexData[indexName];
-    const indexPrice = idxEntry?.ltp || DEFAULT_INDEX_PRICES[indexName]?.ltp || DEFAULT_INDEX_PRICES[indexName] || 24000;
-    const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
-    const { strikeGap, atmPremium } = cfg;
-    const expiries = getExpiryDates(indexName);
-    const resolvedExpiry = expiry || expiries[0];
-    const dte = daysToExpiry(resolvedExpiry);
-    const atmStrike = Math.round(indexPrice / strikeGap) * strikeGap;
-    const rows = [];
-
-    for (let i = -12; i <= 12; i++) {
-        const strike = atmStrike + i * strikeGap;
-        const stepsFromATM = Math.abs(i);
-        // IV is realistic but not random — stable between renders
-        const iv = Math.round((14 + stepsFromATM * 0.4) * 100) / 100;
-        const ceLtp = calcOptionPrice('CE', indexPrice, strike, atmPremium, strikeGap, dte);
-        const peLtp = calcOptionPrice('PE', indexPrice, strike, atmPremium, strikeGap, dte);
-        // OI/volume shown as 0 for synthetic data — UI renders '--' instead of fake numbers
-        rows.push({
-            strike,
-            isATM: i === 0,
-            ce: {
-                oi: 0, oiChange: 0, volume: 0,
-                iv, ltp: ceLtp, change: 0,
-                delta: Math.max(0, Math.min(1, Math.round((0.5 - i * 0.07) * 100) / 100)),
-            },
-            pe: {
-                oi: 0, oiChange: 0, volume: 0,
-                iv, ltp: peLtp, change: 0,
-                delta: Math.max(-1, Math.min(0, Math.round((-0.5 + i * 0.07) * 100) / 100)),
-            },
-        });
-    }
-
-    return {
-        indexName, indexPrice,
-        expiry: resolvedExpiry,
-        daysToExpiry: Math.round(dte * 100) / 100,
-        indexChange:        idxEntry?.change ?? 0,
-        indexChangePercent: idxEntry?.changePercent ?? 0,
-        expiries,
-        atmStrike, rows,
-        source: 'SIMULATED',
-        lastUpdated: new Date().toISOString(),
-    };
-}
-
-// ─── Live option chain (Dhan primary, synthetic fallback) ────────────────────
-// Dhan's option-chain API is rate-limited (~1 req / 3s per underlying), so
-// results are cached for 3s and concurrent callers share one in-flight request.
+// ─── Live Option Chain Engine (Pure Broker Live Data) ─────────────────────────
+// Dhan's option-chain API provides real exchange LTP, OI, IV, Delta, and Bid/Ask.
+// Results are cached and synchronized to ensure zero synthetic/fake data.
 const optionChainCache = {};      // `${index}|${expiry}` -> { at, data }
 const expiryListCache  = {};      // index -> { at, list }
 const chainInflight    = new Map();
 
 async function getOptionExpiries(indexName) {
-    const hit = expiryListCache[indexName];
+    const norm = normalizeOptionIndexName(indexName);
+    const hit = expiryListCache[norm];
     if (hit && Date.now() - hit.at < 10 * 60e3) return hit.list;
 
     if (kotakNeoService.isConfigured()) {
-        const list = await kotakNeoService.fetchKotakExpiryList(indexName);
+        const list = await kotakNeoService.fetchKotakExpiryList(norm);
         if (list && list.length > 0) {
-            expiryListCache[indexName] = { at: Date.now(), list };
+            expiryListCache[norm] = { at: Date.now(), list };
             return list;
         }
     }
 
-    const secId = dhanDataService.INDEX_SECURITY_IDS[indexName];
+    const secId = dhanDataService.INDEX_SECURITY_IDS[norm];
     if (secId) {
         const list = await dhanDataService.fetchDhanExpiryList(secId);
         if (list && list.length > 0) {
-            expiryListCache[indexName] = { at: Date.now(), list };
+            expiryListCache[norm] = { at: Date.now(), list };
             return list;
         }
     }
-    return getExpiryDates(indexName); // calculated fallback
+    return getExpiryDates(norm);
 }
 
 // ─── Central Option Chain Broadcaster Engine ────────────────────────────────
-// Singleton cache and 1-second internal distribution engine.
-// Calls broker API at most once per 15s in a safe sequential queue, while
-// distributing smooth live option chain updates to all mobile clients every 1s
-// via WebSockets without ever triggering rate limits.
+// Singleton cache and 1-second distribution engine.
+// Calls broker API at safe intervals while distributing live option chain
+// updates to all mobile clients every 1s via WebSockets.
 
-const activeOptionChains = {}; // indexName -> chain object
 let _chainIo = null;
 let _brokerSyncBusy = false;
 let _dhanRateLimitBackoffUntil = 0;
@@ -886,21 +1009,20 @@ function updateOptionChainPrices(chain) {
     if (!chain || !Array.isArray(chain.rows)) return chain;
     if (!isLiveMarketActive('FO')) return chain; // Off-market: completely frozen
 
-    const indexName = chain.indexName || 'NIFTY 50';
+    const indexName = normalizeOptionIndexName(chain.indexName || 'NIFTY 50');
     const idxEntry = indexData[indexName];
     const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
-    const strikeGap = cfg.strikeGap;
-    const atmPremium = cfg.atmPremium;
+    const strikeGap = cfg.strikeGap || 50;
     
-    // Always use the live Dhan index price as ground truth — never drift from it
-    const currentPrice = idxEntry?.ltp || chain.indexPrice || DEFAULT_INDEX_PRICES[indexName]?.ltp || 24000;
+    // Always use the live Dhan index price as ground truth
+    const currentPrice = idxEntry?.ltp || chain.indexPrice;
+    if (!currentPrice || currentPrice <= 0) return chain;
     chain._lastPrice = currentPrice;
 
     const dte = daysToExpiry(chain.expiry);
     const atmStrike = Math.round(currentPrice / strikeGap) * strikeGap;
 
     chain.indexPrice = currentPrice;
-    const pc = idxEntry?.previousClose || chain.indexPrice;
     chain.indexChange = idxEntry?.change ?? chain.indexChange ?? 0;
     chain.indexChangePercent = idxEntry?.changePercent ?? chain.indexChangePercent ?? 0;
     chain.atmStrike = atmStrike;
@@ -912,15 +1034,10 @@ function updateOptionChainPrices(chain) {
         row.isATM = (row.strike === atmStrike);
 
         if (chain.source === 'BROKER_LIVE') {
-            // For BROKER_LIVE: use real LTP from Dhan snapshot (set by syncBrokerOptionChain)
-            // and only micro-adjust from delta if the real LTP anchor exists.
-            // This prevents the 1-second interpolation from drifting away from actual prices.
-            if (row.ce) {
-                // baseLtp was set from actual Dhan option-chain data at sync time
+            if (row.ce && typeof row.ce.baseLtp === 'number') {
                 const baseLtp = row.ce.baseLtp;
                 const baseUnderlyingAtSync = chain.baseUnderlyingPrice || currentPrice;
                 const underlyingDiff = currentPrice - baseUnderlyingAtSync;
-                // Clamp delta movement: max 2% price move between sync intervals (prevents drift)
                 const steps = (row.strike - currentPrice) / (strikeGap * 10);
                 const approxCeDelta = Math.max(0.01, Math.min(0.99, Math.round((0.5 - steps) * 100) / 100));
                 const ceDelta = (typeof row.ce.delta === 'number' && Math.abs(row.ce.delta) > 0.001) ? row.ce.delta : approxCeDelta;
@@ -933,7 +1050,7 @@ function updateOptionChainPrices(chain) {
                 row.ce.delta = ceDelta;
             }
 
-            if (row.pe) {
+            if (row.pe && typeof row.pe.baseLtp === 'number') {
                 const baseLtp = row.pe.baseLtp;
                 const baseUnderlyingAtSync = chain.baseUnderlyingPrice || currentPrice;
                 const underlyingDiff = currentPrice - baseUnderlyingAtSync;
@@ -948,25 +1065,6 @@ function updateOptionChainPrices(chain) {
                 row.pe.change = Math.round((newLtp - (row.pe.prevClose || row.pe.baseLtp || newLtp)) * 100) / 100;
                 row.pe.delta = peDelta;
             }
-        } else {
-            // Simulated mathematical pricing — no random noise (stable between renders)
-            const ceLtp = calcOptionPrice('CE', currentPrice, row.strike, atmPremium, strikeGap, dte);
-            const peLtp = calcOptionPrice('PE', currentPrice, row.strike, atmPremium, strikeGap, dte);
-
-            if (row.ce) {
-                const oldCe = row.ce.ltp || ceLtp;
-                row.ce.ltp = ceLtp;
-                if (row.ce.refLtp === undefined) row.ce.refLtp = oldCe;
-                row.ce.change = Math.round((ceLtp - row.ce.refLtp) * 100) / 100;
-                row.ce.delta = Math.max(0.01, Math.min(0.99, Math.round((0.5 - (row.strike - currentPrice) / (strikeGap * 10)) * 100) / 100));
-            }
-            if (row.pe) {
-                const oldPe = row.pe.ltp || peLtp;
-                row.pe.ltp = peLtp;
-                if (row.pe.refLtp === undefined) row.pe.refLtp = oldPe;
-                row.pe.change = Math.round((peLtp - row.pe.refLtp) * 100) / 100;
-                row.pe.delta = Math.max(-0.99, Math.min(-0.01, Math.round((-0.5 - (currentPrice - row.strike) / (strikeGap * 10)) * 100) / 100));
-            }
         }
     }
 
@@ -974,13 +1072,15 @@ function updateOptionChainPrices(chain) {
 }
 
 // Background broker fetch: called at a safe slow interval (every 12s)
+// Fetches real exchange option chain snapshots 24/7 (settlement off-hours, live during market)
 async function syncBrokerOptionChain() {
-    if (_brokerSyncBusy || Date.now() < _dhanRateLimitBackoffUntil || !isLiveMarketActive('FO')) return;
+    if (_brokerSyncBusy || Date.now() < _dhanRateLimitBackoffUntil) return;
     _brokerSyncBusy = true;
 
     try {
         for (const indexName of SUPPORTED_INDICES) {
             const expiries = await getOptionExpiries(indexName);
+            if (!expiries || expiries.length === 0) continue;
             const resolvedExpiry = expiries[0];
             let liveData = null;
 
@@ -1008,12 +1108,10 @@ async function syncBrokerOptionChain() {
             if (liveData && Array.isArray(liveData.rows) && liveData.rows.length > 0) {
                 const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
                 const indexPrice = liveData.underlyingPrice || indexData[indexName]?.ltp || 0;
-                const atmStrike = Math.round(indexPrice / cfg.strikeGap) * cfg.strikeGap;
+                const atmStrike = cfg.strikeGap ? Math.round(indexPrice / cfg.strikeGap) * cfg.strikeGap : 0;
                 const rows = liveData.rows.map(r => ({
                     ...r,
                     isATM: r.strike === atmStrike,
-                    // Re-anchor baseLtp from actual broker data every sync cycle.
-                    // This prevents the 1-second delta interpolation from accumulating drift.
                     ce: r.ce ? { ...r.ce, baseLtp: r.ce.ltp, baseChange: r.ce.change, prevClose: r.ce.change !== undefined ? (r.ce.ltp - r.ce.change) : r.ce.ltp } : null,
                     pe: r.pe ? { ...r.pe, baseLtp: r.pe.ltp, baseChange: r.pe.change, prevClose: r.pe.change !== undefined ? (r.pe.ltp - r.pe.change) : r.pe.ltp } : null,
                 }));
@@ -1021,7 +1119,7 @@ async function syncBrokerOptionChain() {
                 activeOptionChains[indexName] = {
                     indexName,
                     indexPrice,
-                    baseUnderlyingPrice: indexPrice, // re-anchored every 12s sync
+                    baseUnderlyingPrice: indexPrice,
                     expiry: resolvedExpiry,
                     daysToExpiry: Math.round(daysToExpiry(resolvedExpiry) * 100) / 100,
                     indexChange: indexData[indexName]?.change ?? 0,
@@ -1032,11 +1130,11 @@ async function syncBrokerOptionChain() {
                     source: 'BROKER_LIVE',
                     lastUpdated: new Date().toISOString(),
                 };
-                console.log(`[MarketData] ✅ Broker sync: ${indexName} ${resolvedExpiry} — ${rows.length} strikes @ underlying ${indexPrice}`);
+                console.log(`[MarketData] ✅ Real broker sync: ${indexName} ${resolvedExpiry} — ${rows.length} strikes @ underlying ${indexPrice}`);
             }
-            // 1.5s pause between index queries to never burst broker or exceed 1 req/s
             await new Promise(r => setTimeout(r, 1500));
         }
+        persistOptionChains();
     } catch (e) {
         console.warn('[MarketData] syncBrokerOptionChain error:', e.message);
     } finally {
@@ -1056,10 +1154,7 @@ function broadcastOptionChains() {
 
     for (const indexName of SUPPORTED_INDICES) {
         let chain = activeOptionChains[indexName];
-        if (!chain) {
-            chain = generateOptionChainForIndex(indexName, null);
-            activeOptionChains[indexName] = chain;
-        }
+        if (!chain || chain.source !== 'BROKER_LIVE') continue;
 
         // Only dynamically reprice strikes during LIVE market hours!
         if (marketLive) {
@@ -1076,7 +1171,7 @@ function broadcastOptionChains() {
 
     // Also reprice and broadcast any active secondary expiry chains in cache
     for (const [key, entry] of Object.entries(optionChainCache)) {
-        if (entry?.data && Date.now() - entry.at < 600000) {
+        if (entry?.data && Date.now() - entry.at < 600000 && entry.data.source === 'BROKER_LIVE') {
             const [idx, exp] = key.split('|');
             if (idx && exp) {
                 if (marketLive) {
@@ -1087,17 +1182,16 @@ function broadcastOptionChains() {
             }
         }
     }
+
+    // Refresh prices for any option contracts users have added to their watchlist
+    updateTrackedOptionPrices();
 }
 
 function initOptionChainBroadcaster(io) {
     _chainIo = io;
 
-    // Initialize all supported chains immediately
-    for (const indexName of SUPPORTED_INDICES) {
-        if (!activeOptionChains[indexName]) {
-            activeOptionChains[indexName] = generateOptionChainForIndex(indexName, null);
-        }
-    }
+    // Load persisted real broker chains from disk cache
+    loadPersistedOptionChains();
 
     // 1-Second internal broadcast timer
     setInterval(broadcastOptionChains, 1000);
@@ -1107,11 +1201,11 @@ function initOptionChainBroadcaster(io) {
     // Initial eager sync
     setTimeout(syncBrokerOptionChain, 500);
 
-    console.log('[MarketData] ✅ Option Chain 1-Second Broadcaster initialized');
+    console.log('[MarketData] ✅ Option Chain Broadcaster initialized (100% Real Broker Live Data)');
 }
 
 async function getOptionChain(indexName, expiry) {
-    const normIndex = indexName || 'NIFTY 50';
+    const normIndex = normalizeOptionIndexName(indexName || 'NIFTY 50');
     let chain = activeOptionChains[normIndex];
 
     // If client requested a specific non-active expiry
@@ -1136,7 +1230,7 @@ async function getOptionChain(indexName, expiry) {
         if (liveData && Array.isArray(liveData.rows) && liveData.rows.length > 0) {
             const cfg = OPTION_CONFIG[normIndex] || OPTION_CONFIG['NIFTY 50'];
             const indexPrice = liveData.underlyingPrice || indexData[normIndex]?.ltp || 0;
-            const atmStrike = Math.round(indexPrice / cfg.strikeGap) * cfg.strikeGap;
+            const atmStrike = cfg.strikeGap ? Math.round(indexPrice / cfg.strikeGap) * cfg.strikeGap : 0;
             const expiries = await getOptionExpiries(normIndex);
             const expChain = {
                 indexName: normIndex,
@@ -1161,13 +1255,10 @@ async function getOptionChain(indexName, expiry) {
             return expChain;
         }
 
-        // Fallback to synthetic if broker has no data for this specific expiry
-        const expChain = generateOptionChainForIndex(normIndex, expiry);
-        optionChainCache[key] = { at: Date.now(), data: expChain };
-        return expChain;
+        if (chain) return chain;
     }
 
-    // If active chain is missing or synthetic, try an on-demand broker fetch
+    // If active chain is missing, perform eager broker fetch
     if (!chain || chain.source !== 'BROKER_LIVE') {
         const expiries = await getOptionExpiries(normIndex);
         const targetExpiry = expiry || expiries[0];
@@ -1185,7 +1276,7 @@ async function getOptionChain(indexName, expiry) {
         if (liveData && Array.isArray(liveData.rows) && liveData.rows.length > 0) {
             const cfg = OPTION_CONFIG[normIndex] || OPTION_CONFIG['NIFTY 50'];
             const indexPrice = liveData.underlyingPrice || indexData[normIndex]?.ltp || 0;
-            const atmStrike = Math.round(indexPrice / cfg.strikeGap) * cfg.strikeGap;
+            const atmStrike = cfg.strikeGap ? Math.round(indexPrice / cfg.strikeGap) * cfg.strikeGap : 0;
             chain = {
                 indexName: normIndex,
                 indexPrice,
@@ -1206,49 +1297,61 @@ async function getOptionChain(indexName, expiry) {
                 lastUpdated: new Date().toISOString(),
             };
             activeOptionChains[normIndex] = chain;
+            persistOptionChains();
             return chain;
         }
     }
 
     if (!chain) {
-        chain = generateOptionChainForIndex(normIndex, expiry);
-        activeOptionChains[normIndex] = chain;
+        const expiries = await getOptionExpiries(normIndex);
+        return {
+            indexName: normIndex,
+            indexPrice: indexData[normIndex]?.ltp || 0,
+            expiry: expiry || expiries[0] || null,
+            daysToExpiry: 0,
+            indexChange: indexData[normIndex]?.change ?? 0,
+            indexChangePercent: indexData[normIndex]?.changePercent ?? 0,
+            expiries,
+            atmStrike: 0,
+            rows: [],
+            source: 'BROKER_LIVE',
+            lastUpdated: new Date().toISOString(),
+        };
     }
 
     return chain;
 }
 
-// Live premium for one contract — served from the shared chain cache
+// Live premium for one contract — served directly from real broker option chain
 async function getOptionLTP(indexName, strikePrice, optionType, expiry) {
     try {
         const chain = await getOptionChain(indexName, expiry);
-        const row = chain?.rows?.find(r => r.strike === Number(strikePrice));
+        const targetStrike = Number(strikePrice);
+        const row = chain?.rows?.find(r => r.strike === targetStrike);
         if (row) {
-            return optionType === 'CE' ? row.ce.ltp : row.pe.ltp;
+            const side = String(optionType || 'CE').toUpperCase();
+            const val = side === 'CE' ? row.ce?.ltp : row.pe?.ltp;
+            if (typeof val === 'number' && val > 0) return val;
         }
-        // If not in windowed strikes, calculate via Black-Scholes
-        const cfg = OPTION_CONFIG[indexName] || OPTION_CONFIG['NIFTY 50'];
-        const indexPrice = chain?.indexPrice || indexData[indexName]?.ltp || 24000;
-        const dte = daysToExpiry(expiry || chain?.expiry);
-        return calcOptionPrice(optionType, indexPrice, Number(strikePrice), cfg.atmPremium, cfg.strikeGap, dte);
-    } catch { return 100; }
+        return null;
+    } catch { return null; }
 }
 
-// Synchronous contract price lookup from in-memory cache or immediate formula
+// Synchronous contract price lookup from real in-memory broker option chain
 function getOptionLTPSync(indexName, strikePrice, optionType, expiry) {
     try {
-        const normIndex = normalizeIndex(indexName || 'NIFTY 50');
-        const key = `${normIndex}:${expiry || 'active'}`;
-        const chain = optionChainCache[key]?.data || (activeOptionChain?.indexName === normIndex ? activeOptionChain : null);
-        const row = chain?.rows?.find(r => r.strike === Number(strikePrice));
+        const normIndex = normalizeOptionIndexName(indexName);
+        const key = `${normIndex}|${expiry}`;
+        const chain = (expiry && optionChainCache[key]?.data) || activeOptionChains[normIndex];
+        const targetStrike = Number(strikePrice);
+        const row = chain?.rows?.find(r => r.strike === targetStrike);
         if (row) {
-            return optionType === 'CE' ? row.ce.ltp : row.pe.ltp;
+            const side = String(optionType || 'CE').toUpperCase();
+            const val = side === 'CE' ? row.ce?.ltp : row.pe?.ltp;
+            if (typeof val === 'number' && val > 0) return val;
         }
-        const cfg = OPTION_CONFIG[normIndex] || OPTION_CONFIG['NIFTY 50'];
-        const indexPrice = chain?.indexPrice || indexData[normIndex]?.ltp || 24000;
-        const dte = daysToExpiry(expiry || chain?.expiry);
-        return calcOptionPrice(optionType, indexPrice, Number(strikePrice), cfg.atmPremium, cfg.strikeGap, dte);
-    } catch { return 100; }
+        return null;
+    } catch { return null; }
 }
 
 module.exports = {
@@ -1265,14 +1368,29 @@ module.exports = {
     getIndexData,
     getLastUpdated,
     getMarketMovers,
-    getStockPrice,
+    getStockPrice: (sym) => {
+        if (!sym) return null;
+        const upper = String(sym).toUpperCase().trim();
+        if (stockPrices[upper]?.ltp != null) return stockPrices[upper].ltp;
+        const opt = parseOptionSymbol(upper);
+        if (opt) {
+            updateSingleTrackedOption(upper, opt);
+            if (stockPrices[upper]?.ltp != null) return stockPrices[upper].ltp;
+            return getOptionLTPSync(opt.underlying, opt.strikePrice, opt.optionType, opt.expiry);
+        }
+        return null;
+    },
     getDataSource,
-    generateOptionChainForIndex,
+    normalizeOptionIndexName,
     getExpiryDates,
     trackSymbol,
     getTrackedSymbols,
     initDhanWebSocket,
     getDhanWsFeed: () => dhanWsFeed,
+    searchOptionInstruments,
+    parseOptionSymbol,
+    updateTrackedOptionPrices,
+    OPTION_LOT_SIZES,
     NSE_SYMBOLS,
     NSE_STOCK_SYMBOLS,
     INDEX_SYMBOLS,

@@ -70,10 +70,7 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
     }
   }, [propIndexes]);
 
-  const merged = Object.keys(indexes).length > 0 ? indexes : {
-    'NIFTY 50':   { ltp: 22450.00, change: 135.25, changePercent: 0.56 },
-    'BANK NIFTY': { ltp: 48250.15, change: 98.35,  changePercent: 0.20 },
-  };
+  const merged = indexes || {};
 
   const nifty50   = merged['NIFTY 50']   ?? merged['NIFTY50'];
   const niftyBank = merged['BANK NIFTY'] ?? merged['BANKNIFTY'];
@@ -90,6 +87,9 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
           {nifty50   && <IndexItem name="NIFTY 50"   data={nifty50}   onPress={press('NIFTY 50')} />}
           {niftyBank && <IndexItem name="BANK NIFTY" data={niftyBank} onPress={press('BANK NIFTY')} />}
           {sensex && !nifty50 && <IndexItem name="SENSEX" data={sensex} onPress={press('SENSEX')} />}
+          {(!nifty50 && !niftyBank && !sensex) && (
+            <Text style={{ fontSize: 12, color: colors.textSecondary, paddingVertical: 4 }}>Loading live indices...</Text>
+          )}
 
           <View style={styles.rightGroup}>
             <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textSecondary} />
