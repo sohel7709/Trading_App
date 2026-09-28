@@ -144,6 +144,7 @@ export const api = {
 
   // Trades
   getTrades: (query = '') => get(`/trades${query}`),
+  getJournalSummary: (query = '') => get(`/journal/summary${query}`),
 
   // Wallet
   getWallet: () => get('/wallet'),

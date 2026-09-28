@@ -416,11 +416,12 @@ app.get('/portfolio', async (req, res) => {
             blockedMargin,
             totalCapital: balance + blockedMargin,
             startingCapital,
-            totalPnl,
-            pnl: totalPnl,
+            totalPnl: todayPnl,
+            pnl: todayPnl,
             todayPnl,
             realizedPnl: Math.round(todayRealized * 100) / 100,
             allTimeRealizedPnl: Math.round(realizedPnl * 100) / 100,
+            allTimeTotalPnl: Math.round((realizedPnl + unrealizedPnl) * 100) / 100,
             unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
             winRate,
             openPositionsCount: allOpenPositions.length,
@@ -1199,6 +1200,63 @@ app.get('/trades', async (req, res) => {
         res.status(200).json(trades);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching trades', error: err.message });
+    }
+});
+
+// Detailed Date-Range Journal Summary with P&L calculation
+app.get('/journal/summary', async (req, res) => {
+    try {
+        const { from, to } = req.query;
+        let tradeQuery = { userId: req.user._id };
+        let closedQuery = { userId: req.user._id };
+
+        if (from || to) {
+            tradeQuery.createdAt = {};
+            closedQuery.closedAt = {};
+            if (from) {
+                const fromDate = new Date(from);
+                tradeQuery.createdAt.$gte = fromDate;
+                closedQuery.closedAt.$gte = fromDate;
+            }
+            if (to) {
+                const toDate = new Date(to);
+                toDate.setHours(23, 59, 59, 999);
+                tradeQuery.createdAt.$lte = toDate;
+                closedQuery.closedAt.$lte = toDate;
+            }
+        }
+
+        const [trades, closedPositions] = await Promise.all([
+            TradeModel.find(tradeQuery).sort({ createdAt: -1 }).lean(),
+            ClosedPositionModel.find(closedQuery).sort({ closedAt: -1 }).lean(),
+        ]);
+
+        const grossPnl = closedPositions.reduce((sum, c) => sum + (c.pnl || 0), 0);
+        const totalCharges = trades.reduce((sum, t) => sum + (t.charges || 0), 0);
+        const netPnl = grossPnl - totalCharges;
+        const totalTurnover = trades.reduce((sum, t) => sum + (t.totalValue || (t.price * t.quantity) || 0), 0);
+        const winCount = closedPositions.filter(c => (c.pnl || 0) > 0).length;
+        const lossCount = closedPositions.filter(c => (c.pnl || 0) < 0).length;
+        const winRate = closedPositions.length > 0 ? Math.round((winCount / closedPositions.length) * 100) : 0;
+
+        res.status(200).json({
+            success: true,
+            summary: {
+                grossPnl: Math.round(grossPnl * 100) / 100,
+                netPnl: Math.round(netPnl * 100) / 100,
+                totalCharges: Math.round(totalCharges * 100) / 100,
+                totalTurnover: Math.round(totalTurnover * 100) / 100,
+                totalTrades: trades.length,
+                closedPositionsCount: closedPositions.length,
+                winCount,
+                lossCount,
+                winRate,
+            },
+            trades,
+            closedPositions,
+        });
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching journal summary', error: err.message });
     }
 });
 
