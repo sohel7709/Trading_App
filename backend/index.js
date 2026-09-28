@@ -1,4 +1,12 @@
 require('dotenv').config();
+
+process.on('uncaughtException', (err) => {
+    console.error('[Process] ⚠️ Uncaught Exception intercepted (server kept alive):', err?.message || err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[Process] ⚠️ Unhandled Rejection intercepted (server kept alive):', reason?.message || reason);
+});
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
