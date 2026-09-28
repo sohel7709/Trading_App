@@ -358,10 +358,18 @@ function isSaneTick(oldLtp, newLtp, prevClose, isIndex = false) {
 async function applyDhanSnapshot() {
     if (!dhanDataService.isConfigured()) return false;
 
-    const { stocks, indexes } = await dhanDataService.fetchDhanSnapshot(getTrackedSymbols());
+    let { stocks, indexes } = await dhanDataService.fetchDhanSnapshot(getTrackedSymbols()).catch(() => ({ stocks: {}, indexes: {} }));
+    if (!indexes || Object.keys(indexes).length === 0) {
+        try {
+            const dhanIdx = await dhanDataService.fetchDhanIndices();
+            if (dhanIdx && Object.keys(dhanIdx).length > 0) {
+                indexes = { ...(indexes || {}), ...dhanIdx };
+            }
+        } catch (_) {}
+    }
     let gotStocks = false;
 
-    for (const [sym, d] of Object.entries(stocks)) {
+    for (const [sym, d] of Object.entries(stocks || {})) {
         if (!(d.ltp > 0)) continue;
         const prev = stockPrices[sym];
         const pc = refPrevClose(sym, d.previousClose);
@@ -386,7 +394,7 @@ async function applyDhanSnapshot() {
         gotStocks = true;
     }
 
-    for (const [name, d] of Object.entries(indexes)) {
+    for (const [name, d] of Object.entries(indexes || {})) {
         if (!(d.ltp > 0)) continue;
         const prev = indexData[name];
         // If incoming quote has 0 change or prevClose == ltp (typical Dhan off-market post-close),
@@ -401,7 +409,7 @@ async function applyDhanSnapshot() {
         }
     }
 
-    if (gotStocks || Object.keys(indexes).length > 0) {
+    if (gotStocks || Object.keys(indexes || {}).length > 0) {
         dataSource  = 'DHAN_LIVE';
         lastUpdated = new Date().toISOString();
         persistSnapshot();
@@ -416,8 +424,9 @@ async function applyDhanSnapshot() {
 async function applyYahooSnapshot() {
     try {
         let gotAny = false;
-        // 1. Fetch live quotes for major indices
+        // 1. Fetch live quotes for major indices (only if not already live from Dhan)
         for (const idx of INDEX_SYMBOLS) {
+            if (indexData[idx.name]?.source === 'DHAN_LIVE' || indexData[idx.name]?.source === 'DHAN_WS') continue;
             try {
                 const q = await yahooFinance.quote(idx.symbol, {}, { validateResult: false });
                 if (q && q.regularMarketPrice > 0) {
@@ -445,10 +454,11 @@ async function applyYahooSnapshot() {
             }
         }
 
-        // 2. Fetch live quotes for tracked equities
+        // 2. Fetch live quotes for tracked equities (only if not already live from Dhan)
         const symbolsToFetch = Array.from(new Set([...getTrackedSymbols(), ...NSE_STOCK_SYMBOLS.slice(0, 30)]));
         for (const sym of symbolsToFetch) {
             if (sym.includes(' ') || sym.includes(':')) continue; // Skip option symbols for equity quote
+            if (stockPrices[sym]?.source === 'DHAN_LIVE' || stockPrices[sym]?.source === 'DHAN_WS') continue;
             try {
                 const q = await yahooFinance.quote(`${sym}.NS`, {}, { validateResult: false });
                 if (q && q.regularMarketPrice > 0) {
