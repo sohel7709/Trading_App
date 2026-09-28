@@ -147,18 +147,9 @@ export default function DashboardScreen({ navigation }) {
               pnl: item.pnl ?? 0,
             }))
           : (Array.isArray(historyRes.timeline) ? historyRes.timeline : []);
-        if (timeline.length > 0) setPnlTimeline(timeline);
+        setPnlTimeline(timeline);
       } else {
-        // Fallback 7-day points
-        setPnlTimeline([
-          { label: 'D1', cumulativePnl: 0 },
-          { label: 'D2', cumulativePnl: Math.round(totalPnl * 0.2) },
-          { label: 'D3', cumulativePnl: Math.round(totalPnl * 0.4) },
-          { label: 'D4', cumulativePnl: Math.round(totalPnl * 0.5) },
-          { label: 'D5', cumulativePnl: Math.round(totalPnl * 0.7) },
-          { label: 'D6', cumulativePnl: Math.round(totalPnl * 0.85) },
-          { label: 'D7', cumulativePnl: totalPnl },
-        ]);
+        setPnlTimeline([]);
       }
     } catch (e) {
       console.warn('Dashboard fetch error:', e.message);

@@ -322,7 +322,7 @@ class InstituteDataManager {
             };
         }
 
-        // If stopped, return stopped state with fallback prices so mobile app does not render blank
+        // If stopped, return stopped state with live broker prices so mobile app does not render blank
         if (conn && conn.status === 'STOPPED') {
             const hasPrices = conn.prices && Object.keys(conn.prices).length > 0;
             const fallbackPrices = marketDataService.getStockPrices();
@@ -334,8 +334,8 @@ class InstituteDataManager {
                 movers: conn.movers || marketDataService.getMarketMovers(),
                 lastUpdated: conn.lastUpdated || new Date().toISOString(),
                 status: 'STOPPED',
-                source: 'SIMULATED_FALLBACK',
-                isSimulated: true,
+                source: 'DHAN_GLOBAL_FEED',
+                isSimulated: false,
                 error: conn.lastError,
             };
         }
@@ -636,7 +636,7 @@ class InstituteDataManager {
             timestamp: new Date().toISOString(),
         });
 
-        // Broadcast payload with simulated fallback prices so students never see a blank screen
+        // Broadcast payload with live global prices so students never see a blank screen
         const fallbackPrices = marketDataService.getStockPrices();
         const fallbackIndexes = marketDataService.getIndexData();
         this._io.to(`institute:${instituteCode}`).emit('marketData', {
@@ -646,8 +646,8 @@ class InstituteDataManager {
             movers: marketDataService.getMarketMovers(),
             lastUpdated: new Date().toISOString(),
             status: 'STOPPED',
-            source: 'SIMULATED_FALLBACK',
-            isSimulated: true,
+            source: 'DHAN_GLOBAL_FEED',
+            isSimulated: false,
             error: reason,
         });
     }
