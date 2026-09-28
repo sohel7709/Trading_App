@@ -20,7 +20,9 @@
 const EventEmitter = require('events');
 let yahooFinance = null;
 try {
-    yahooFinance = require('yahoo-finance2').default;
+    const _yf2 = require('yahoo-finance2');
+    const _YF2 = _yf2.default || _yf2;
+    yahooFinance = (typeof _YF2 === 'function') ? new _YF2({ suppressNotices: ['yahooSurvey'] }) : _YF2;
 } catch (e) {
     console.warn('[GlobalFeed] yahoo-finance2 not available, using simulated/fallback for global indices');
 }

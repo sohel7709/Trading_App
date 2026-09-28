@@ -15,10 +15,22 @@
 import { useState, useEffect, useRef } from 'react';
 import SocketClient from '../socket/socketClient';
 
+const DEFAULT_INDICES = {
+  'NIFTY 50': { name: 'NIFTY 50', ltp: 23140.5, change: 105.5, changePercent: 0.46 },
+  'BANK NIFTY': { name: 'BANK NIFTY', ltp: 55580.4, change: 206.65, changePercent: 0.37 },
+  'SENSEX': { name: 'SENSEX', ltp: 73895.74, change: 369.82, changePercent: 0.50 },
+  'FINNIFTY': { name: 'FINNIFTY', ltp: 25094.85, change: 146.35, changePercent: 0.59 },
+  'NIFTY IT': { name: 'NIFTY IT', ltp: 28160.9, change: 191.5, changePercent: 0.68 },
+  'NIFTY NEXT 50': { name: 'NIFTY NEXT 50', ltp: 71778.65, change: 391.2, changePercent: 0.55 },
+  'BANKEX': { name: 'BANKEX', ltp: 62833.13, change: 146.33, changePercent: 0.23 },
+  'MIDCPNIFTY': { name: 'MIDCPNIFTY', ltp: 14027.7, change: -6.6, changePercent: -0.05 },
+  'INDIA VIX': { name: 'INDIA VIX', ltp: 12.16, change: -0.53, changePercent: -4.18 }
+};
+
 class MarketStore {
   constructor() {
     this._prices = {};       // symbol -> { symbol, ltp, change, changePercent, high, low, volume }
-    this._indexes = {};      // indexName -> { name, ltp, change, changePercent }
+    this._indexes = { ...DEFAULT_INDICES };      // indexName -> { name, ltp, change, changePercent }
     this._pendingDiffs = {}; // symbol -> updated data
     this._pendingIndexDiffs = {};
     

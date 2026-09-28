@@ -61,12 +61,18 @@ let isFetching  = false;
 let dataSource  = 'LIVE';
 
 const SNAPSHOT_CACHE_FILE = path.join(__dirname, 'cache', 'market_snapshot.json');
+const DEFAULT_SNAPSHOT_FILE = path.join(__dirname, 'data', 'default_market_snapshot.json');
 const OPTION_CHAIN_CACHE_FILE = path.join(__dirname, 'cache', 'option_chains.json');
+const DEFAULT_OPTION_CHAIN_FILE = path.join(__dirname, 'data', 'default_option_chains.json');
 
 function loadPersistedSnapshot() {
     try {
-        if (fs.existsSync(SNAPSHOT_CACHE_FILE)) {
-            const raw = fs.readFileSync(SNAPSHOT_CACHE_FILE, 'utf8');
+        const filePath = fs.existsSync(SNAPSHOT_CACHE_FILE) 
+            ? SNAPSHOT_CACHE_FILE 
+            : (fs.existsSync(DEFAULT_SNAPSHOT_FILE) ? DEFAULT_SNAPSHOT_FILE : null);
+
+        if (filePath) {
+            const raw = fs.readFileSync(filePath, 'utf8');
             const data = JSON.parse(raw);
             if (data.indexes && Object.keys(data.indexes).length > 0) {
                 indexData = { ...data.indexes };
@@ -77,7 +83,7 @@ function loadPersistedSnapshot() {
             if (data.lastUpdated) {
                 lastUpdated = data.lastUpdated;
             }
-            console.log(`[Market] Loaded ${Object.keys(indexData).length} real indexes & ${Object.keys(stockPrices).length} real stocks from disk cache`);
+            console.log(`[Market] Loaded ${Object.keys(indexData).length} real indexes & ${Object.keys(stockPrices).length} real stocks from ${filePath === SNAPSHOT_CACHE_FILE ? 'disk cache' : 'bundled default snapshot'}`);
         }
     } catch (err) {
         console.warn('[Market] Snapshot disk cache note:', err.message);
@@ -102,8 +108,12 @@ const activeOptionChains = {}; // indexName -> chain object
 
 function loadPersistedOptionChains() {
     try {
-        if (fs.existsSync(OPTION_CHAIN_CACHE_FILE)) {
-            const raw = fs.readFileSync(OPTION_CHAIN_CACHE_FILE, 'utf8');
+        const filePath = fs.existsSync(OPTION_CHAIN_CACHE_FILE)
+            ? OPTION_CHAIN_CACHE_FILE
+            : (fs.existsSync(DEFAULT_OPTION_CHAIN_FILE) ? DEFAULT_OPTION_CHAIN_FILE : null);
+
+        if (filePath) {
+            const raw = fs.readFileSync(filePath, 'utf8');
             const data = JSON.parse(raw);
             if (data && typeof data === 'object') {
                 for (const [idx, chain] of Object.entries(data)) {
@@ -111,7 +121,7 @@ function loadPersistedOptionChains() {
                         activeOptionChains[idx] = chain;
                     }
                 }
-                console.log(`[Market] Loaded real option chains from disk for: ${Object.keys(activeOptionChains).join(', ')}`);
+                console.log(`[Market] Loaded real option chains from ${filePath === OPTION_CHAIN_CACHE_FILE ? 'disk cache' : 'bundled default snapshot'} for: ${Object.keys(activeOptionChains).join(', ')}`);
             }
         }
     } catch (err) {
@@ -400,8 +410,89 @@ async function applyDhanSnapshot() {
     return false;
 }
 
-// Kept for the startup seed and the add-to-watchlist path — same Dhan-only
-// snapshot, just guarded against overlapping with itself.
+// ─── Live Yahoo Finance Fallback ─────────────────────────────────────────────
+// When Dhan credentials are not provided, expired, or marketfeed 401s, this
+// provides authoritative live quotes for Indian indices and tracked equities.
+async function applyYahooSnapshot() {
+    try {
+        let gotAny = false;
+        // 1. Fetch live quotes for major indices
+        for (const idx of INDEX_SYMBOLS) {
+            try {
+                const q = await yahooFinance.quote(idx.symbol, {}, { validateResult: false });
+                if (q && q.regularMarketPrice > 0) {
+                    const ltp = q.regularMarketPrice;
+                    const prevClose = q.regularMarketPreviousClose || ltp;
+                    const change = q.regularMarketChange != null ? Math.round(q.regularMarketChange * 100) / 100 : Math.round((ltp - prevClose) * 100) / 100;
+                    const changePercent = prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : (q.regularMarketChangePercent || 0);
+
+                    indexData[idx.name] = {
+                        name: idx.name,
+                        symbol: idx.name.replace(/\s+/g, '_'),
+                        ltp: Math.round(ltp * 100) / 100,
+                        open: q.regularMarketOpen || ltp,
+                        high: q.regularMarketDayHigh || ltp,
+                        low: q.regularMarketDayLow || ltp,
+                        previousClose: prevClose,
+                        change,
+                        changePercent,
+                        source: 'YAHOO_LIVE',
+                    };
+                    gotAny = true;
+                }
+            } catch {
+                // individual index non-blocking
+            }
+        }
+
+        // 2. Fetch live quotes for tracked equities
+        const symbolsToFetch = Array.from(new Set([...getTrackedSymbols(), ...NSE_STOCK_SYMBOLS.slice(0, 30)]));
+        for (const sym of symbolsToFetch) {
+            if (sym.includes(' ') || sym.includes(':')) continue; // Skip option symbols for equity quote
+            try {
+                const q = await yahooFinance.quote(`${sym}.NS`, {}, { validateResult: false });
+                if (q && q.regularMarketPrice > 0) {
+                    const ltp = q.regularMarketPrice;
+                    const prevClose = q.regularMarketPreviousClose || ltp;
+                    const change = q.regularMarketChange != null ? Math.round(q.regularMarketChange * 100) / 100 : Math.round((ltp - prevClose) * 100) / 100;
+                    const changePercent = prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : (q.regularMarketChangePercent || 0);
+
+                    stockPrices[sym] = {
+                        symbol: sym,
+                        ltp: Math.round(ltp * 100) / 100,
+                        open: q.regularMarketOpen || ltp,
+                        high: q.regularMarketDayHigh || ltp,
+                        low: q.regularMarketDayLow || ltp,
+                        previousClose: prevClose,
+                        volume: q.regularMarketVolume || 0,
+                        change,
+                        changePercent,
+                        high52w: q.fiftyTwoWeekHigh || 0,
+                        low52w: q.fiftyTwoWeekLow || 0,
+                        currency: q.currency || 'INR',
+                        source: 'YAHOO_LIVE',
+                    };
+                    gotAny = true;
+                }
+            } catch {
+                // individual stock non-blocking
+            }
+        }
+
+        if (gotAny) {
+            if (dataSource !== 'DHAN_WS') dataSource = 'YAHOO_LIVE';
+            lastUpdated = new Date().toISOString();
+            persistSnapshot();
+            return true;
+        }
+    } catch (e) {
+        console.warn('[Market] applyYahooSnapshot error:', e.message);
+    }
+    return false;
+}
+
+// Kept for the startup seed and the add-to-watchlist path — batched snapshot
+// with automatic Dhan -> Yahoo fallback
 async function fetchAllStockPrices() {
     if (isFetching) return;
     isFetching = true;
@@ -409,6 +500,11 @@ async function fetchAllStockPrices() {
         const ok = await applyDhanSnapshot();
         if (ok) {
             console.log(`[Market] Dhan snapshot | stocks: ${Object.keys(stockPrices).length} | idx: ${Object.keys(indexData).length}`);
+        } else {
+            const yOk = await applyYahooSnapshot();
+            if (yOk) {
+                console.log(`[Market] Yahoo Live snapshot | stocks: ${Object.keys(stockPrices).length} | idx: ${Object.keys(indexData).length}`);
+            }
         }
     } catch (err) {
         console.error('[Market] fetchAllStockPrices error:', err.message);
@@ -615,17 +711,34 @@ async function fastRefresh() {
 
     // Resilient REST fallback
     try {
+        let gotAnyDhan = false;
         const ltps = await dhanDataService.fetchDhanLTPAll(getTrackedSymbols());
-        for (const [key, val] of Object.entries(ltps)) {
+        for (const [key, val] of Object.entries(ltps || {})) {
+            gotAnyDhan = true;
             if (key.startsWith('__IDX__')) {
                 const name = key.replace('__IDX__', '');
-                if (indexData[name] && val.ltp > 0) {
-                    const pc = indexData[name].previousClose;
-                    indexData[name].ltp = val.ltp;
-                    if (pc > 0) {
-                        const chg = val.ltp - pc;
-                        indexData[name].change = Math.round(chg * 100) / 100;
-                        indexData[name].changePercent = Math.round((chg / pc) * 10000) / 100;
+                if (val.ltp > 0) {
+                    if (!indexData[name]) {
+                        indexData[name] = {
+                            name,
+                            symbol: name.replace(/\s+/g, '_'),
+                            ltp: val.ltp,
+                            open: val.ltp,
+                            high: val.ltp,
+                            low: val.ltp,
+                            previousClose: val.ltp,
+                            change: 0,
+                            changePercent: 0,
+                            source: 'DHAN_LIVE',
+                        };
+                    } else {
+                        const pc = indexData[name].previousClose;
+                        indexData[name].ltp = val.ltp;
+                        if (pc > 0) {
+                            const chg = val.ltp - pc;
+                            indexData[name].change = Math.round(chg * 100) / 100;
+                            indexData[name].changePercent = Math.round((chg / pc) * 10000) / 100;
+                        }
                     }
                 }
             } else if (stockPrices[key]) {
@@ -658,21 +771,40 @@ async function fastRefresh() {
                 }
             }
         }
+
+        // Automatic failover to Yahoo live feed when Dhan returns no quotes
+        if (!gotAnyDhan || Object.keys(indexData).length === 0) {
+            const now = Date.now();
+            if (now - lastYahooRefresh > 15000) {
+                lastYahooRefresh = now;
+                applyYahooSnapshot().catch(() => {});
+            }
+        }
+
         lastUpdated = new Date().toISOString();
     } catch (e) {
         console.warn('[Market] fastRefresh fallback error:', e.message);
     }
 }
 
+let lastYahooRefresh = 0;
 
 function getDataSource()   { return dataSource; }
 function getStockPrices()  {
+    if (Object.keys(stockPrices).length === 0) {
+        loadPersistedSnapshot();
+    }
     if (typeof updateTrackedOptionPrices === 'function') {
         updateTrackedOptionPrices();
     }
     return stockPrices;
 }
-function getIndexData()    { return indexData; }
+function getIndexData()    {
+    if (Object.keys(indexData).length === 0) {
+        loadPersistedSnapshot();
+    }
+    return indexData;
+}
 function getLastUpdated()  { return lastUpdated || new Date().toISOString(); }
 
 function getMarketMovers() {

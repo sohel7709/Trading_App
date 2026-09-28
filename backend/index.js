@@ -2553,24 +2553,29 @@ app.post('/watchlists/:id/stock', async (req, res) => {
     }
 
     try {
+        const userId = req.user?._id;
+        if (!userId) {
+            return res.status(401).json({ message: 'Authentication required to modify watchlist' });
+        }
+
         let watchlist = null;
         if (mongoose.Types.ObjectId.isValid(id)) {
-            watchlist = await WatchlistModel.findOne({ _id: id, userId: req.user._id });
+            watchlist = await WatchlistModel.findOne({ _id: id, userId });
             if (!watchlist) watchlist = await WatchlistModel.findById(id);
         }
         if (!watchlist) {
             // Fallback to user's first watchlist or create one
-            watchlist = await WatchlistModel.findOne({ userId: req.user._id });
+            watchlist = await WatchlistModel.findOne({ userId });
             if (!watchlist) {
                 watchlist = await WatchlistModel.create({
-                    userId: req.user._id,
+                    userId,
                     name: 'My Watchlist',
                     stocks: [],
                 });
             }
         }
 
-        const symbol = stockSymbol.toUpperCase();
+        const symbol = String(stockSymbol).toUpperCase().trim();
         if (!watchlist.stocks) watchlist.stocks = [];
         if (!watchlist.stocks.includes(symbol)) {
             watchlist.stocks.push(symbol);
@@ -2578,13 +2583,19 @@ app.post('/watchlists/:id/stock', async (req, res) => {
         }
 
         // Start streaming live prices for this symbol right away
-        if (marketDataService.trackSymbol(symbol)) {
-            marketDataService.fetchAllStockPrices().catch(() => {});
-        }
+        try {
+            if (marketDataService.trackSymbol(symbol)) {
+                marketDataService.fetchAllStockPrices().catch(() => {});
+            }
+        } catch { /* non-blocking */ }
 
-        CacheService.invalidateWatchlists(req.user._id.toString()).catch(() => {});
+        try {
+            CacheService.invalidateWatchlists(userId.toString()).catch(() => {});
+        } catch { /* non-blocking */ }
+
         res.status(200).json(watchlist);
     } catch (err) {
+        console.error('[Watchlist] Error adding stock:', err.message);
         res.status(500).json({ message: 'Error adding stock to watchlist', error: err.message });
     }
 });
