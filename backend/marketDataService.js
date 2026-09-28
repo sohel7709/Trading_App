@@ -96,6 +96,8 @@ function persistSnapshot() {
     }
 }
 
+const activeOptionChains = {}; // indexName -> chain object
+
 function loadPersistedOptionChains() {
     try {
         if (fs.existsSync(OPTION_CHAIN_CACHE_FILE)) {
@@ -124,6 +126,7 @@ function persistOptionChains() {
 }
 
 loadPersistedSnapshot();
+loadPersistedOptionChains();
 
 // Authoritative previous-session close per symbol, sourced from Dhan DAILY
 // CANDLES rather than the live feed. Some symbols (seen on LTIM) get a
@@ -174,10 +177,19 @@ const trackedSymbols = new Set(NSE_STOCK_SYMBOLS);
 
 function trackSymbol(symbol) {
     const sym = String(symbol || '').toUpperCase().trim();
-    if (!sym || trackedSymbols.has(sym)) return false;
-    trackedSymbols.add(sym);
-    console.log(`[Market] Now tracking ${sym} (${trackedSymbols.size} symbols)`);
-    return true;
+    if (!sym) return false;
+    const isNew = !trackedSymbols.has(sym);
+    if (isNew) {
+        trackedSymbols.add(sym);
+        console.log(`[Market] Now tracking ${sym} (${trackedSymbols.size} symbols)`);
+    }
+    if (typeof parseOptionSymbol === 'function') {
+        const opt = parseOptionSymbol(sym);
+        if (opt && typeof updateSingleTrackedOption === 'function') {
+            updateSingleTrackedOption(sym, opt);
+        }
+    }
+    return isNew;
 }
 
 function getTrackedSymbols() {
@@ -459,7 +471,12 @@ async function fastRefresh() {
 }
 
 function getDataSource()   { return dataSource; }
-function getStockPrices()  { return stockPrices; }
+function getStockPrices()  {
+    if (typeof updateTrackedOptionPrices === 'function') {
+        updateTrackedOptionPrices();
+    }
+    return stockPrices;
+}
 function getIndexData()    { return indexData; }
 function getLastUpdated()  { return lastUpdated || new Date().toISOString(); }
 
@@ -525,6 +542,197 @@ function normalizeOptionIndexName(name) {
     const upper = String(name).toUpperCase().trim();
     if (OPTION_CONFIG[upper]) return upper;
     return INDEX_NAME_ALIASES[upper] || upper;
+}
+
+const OPTION_LOT_SIZES = {
+    'NIFTY 50':      75,
+    'NIFTY':         75,
+    'BANK NIFTY':    30,
+    'BANKNIFTY':     30,
+    'SENSEX':        20,
+    'FINNIFTY':      65,
+    'MIDCPNIFTY':    120,
+    'NIFTY NEXT 50': 25,
+    'BANKEX':        30,
+};
+
+function parseOptionSymbol(sym) {
+    if (!sym || typeof sym !== 'string') return null;
+    const str = sym.trim().toUpperCase();
+
+    // Standard pattern: e.g. "NIFTY 23100 CE", "NIFTY 50 23100 CE", "BANK NIFTY 54800 PE", "NIFTY23100CE", "FINNIFTY 24700 PE"
+    const match = str.match(/^([A-Z0-9\s]+?)\s*(\d{3,6})\s*(CE|PE)(?:\s+([\d-]+))?$/i);
+    if (!match) return null;
+
+    let rawUnderlying = match[1].trim();
+    const strikePrice = parseInt(match[2], 10);
+    const optionType = match[3].toUpperCase();
+    const expiry = match[4] || null;
+
+    let underlying = normalizeOptionIndexName(rawUnderlying);
+    const cleanUnderlying = rawUnderlying.replace(/\s+/g, '');
+    if (cleanUnderlying === 'NIFTY') underlying = 'NIFTY 50';
+    else if (cleanUnderlying === 'BANKNIFTY') underlying = 'BANK NIFTY';
+    else if (cleanUnderlying === 'FINNIFTY') underlying = 'FINNIFTY';
+    else if (cleanUnderlying === 'MIDCPNIFTY' || cleanUnderlying === 'MIDCAP') underlying = 'MIDCPNIFTY';
+    else if (cleanUnderlying === 'SENSEX' || cleanUnderlying === 'BSE') underlying = 'SENSEX';
+
+    const shortIdx = underlying === 'NIFTY 50' ? 'NIFTY' : (underlying === 'BANK NIFTY' ? 'BANKNIFTY' : underlying);
+    const canonicalSymbol = `${shortIdx} ${strikePrice} ${optionType}`;
+
+    return {
+        underlying,
+        rawUnderlying,
+        strikePrice,
+        optionType,
+        expiry,
+        canonicalSymbol,
+        symbol: sym,
+    };
+}
+
+function updateSingleTrackedOption(sym, opt) {
+    if (!sym || !opt) return;
+    const chain = (opt.expiry && optionChainCache[`${opt.underlying}|${opt.expiry}`]?.data) || activeOptionChains[opt.underlying];
+    if (!chain || !Array.isArray(chain.rows)) return;
+
+    const row = chain.rows.find(r => r.strike === opt.strikePrice);
+    if (!row) return;
+
+    const contract = opt.optionType === 'CE' ? row.ce : row.pe;
+    if (!contract || typeof contract.ltp !== 'number') return;
+
+    const chg = contract.change ?? (contract.prevClose ? Math.round((contract.ltp - contract.prevClose) * 100) / 100 : 0);
+    const prevClose = contract.prevClose || (contract.ltp - chg);
+    const chgPct = prevClose > 0 ? Math.round((chg / prevClose) * 10000) / 100 : 0;
+
+    const priceObj = {
+        symbol: sym,
+        name: `${opt.underlying} ${opt.strikePrice} ${opt.optionType}`,
+        ltp: contract.ltp,
+        change: chg,
+        changePercent: chgPct,
+        prevClose: prevClose,
+        open: contract.open || contract.ltp,
+        high: contract.high || contract.ltp,
+        low: contract.low || contract.ltp,
+        close: contract.ltp,
+        oi: contract.oi || 0,
+        volume: contract.volume || 0,
+        isOption: true,
+        underlyingSymbol: opt.underlying,
+        strikePrice: opt.strikePrice,
+        optionType: opt.optionType,
+        expiry: chain.expiry,
+        lotSize: OPTION_LOT_SIZES[opt.underlying] || 50,
+    };
+
+    stockPrices[sym] = priceObj;
+
+    const aliases = [
+        opt.canonicalSymbol,
+        `${opt.underlying} ${opt.strikePrice} ${opt.optionType}`,
+        `${opt.underlying.replace(/\s+/g, '')} ${opt.strikePrice} ${opt.optionType}`,
+        `${opt.underlying === 'NIFTY 50' ? 'NIFTY' : opt.underlying} ${opt.strikePrice} ${opt.optionType}`,
+    ];
+    for (const a of aliases) {
+        if (a && a !== sym) {
+            stockPrices[a] = { ...priceObj, symbol: a };
+        }
+    }
+}
+
+function updateTrackedOptionPrices() {
+    for (const sym of trackedSymbols) {
+        const opt = parseOptionSymbol(sym);
+        if (opt) {
+            updateSingleTrackedOption(sym, opt);
+        }
+    }
+}
+
+function searchOptionInstruments(query, limit = 20) {
+    if (!query || typeof query !== 'string') return [];
+    const q = query.trim().toUpperCase();
+    if (q.length < 2) return [];
+
+    let targetIndex = null;
+    if (q.includes('BANKNIFTY') || q.includes('BANK NIFTY') || q.includes('BNF')) targetIndex = 'BANK NIFTY';
+    else if (q.includes('FINNIFTY') || q.includes('FIN NIFTY')) targetIndex = 'FINNIFTY';
+    else if (q.includes('MIDCP') || q.includes('MIDCAP')) targetIndex = 'MIDCPNIFTY';
+    else if (q.includes('SENSEX') || q.includes('BSE')) targetIndex = 'SENSEX';
+    else if (q.includes('NIFTY')) targetIndex = 'NIFTY 50';
+
+    const hasCE = /\bCE\b/.test(q) || q.endsWith('CE');
+    const hasPE = /\bPE\b/.test(q) || q.endsWith('PE');
+    const optTypes = hasCE && !hasPE ? ['CE'] : (hasPE && !hasCE ? ['PE'] : ['CE', 'PE']);
+
+    const strikeMatch = q.match(/\b(\d{4,6})\b/);
+    const targetStrike = strikeMatch ? parseInt(strikeMatch[1], 10) : null;
+
+    if (!targetIndex && !targetStrike) {
+        if (!q.includes('OPTION') && !q.includes('CALL') && !q.includes('PUT') && !hasCE && !hasPE) {
+            return [];
+        }
+    }
+
+    const indicesToSearch = targetIndex ? [targetIndex] : SUPPORTED_INDICES;
+    const results = [];
+
+    for (const idx of indicesToSearch) {
+        const chain = activeOptionChains[idx];
+        if (!chain || !Array.isArray(chain.rows) || chain.rows.length === 0) continue;
+
+        let rows = chain.rows;
+        if (targetStrike) {
+            const cfg = OPTION_CONFIG[idx] || { strikeGap: 50 };
+            const gap = cfg.strikeGap || 50;
+            const exactOrClose = rows.filter(r => Math.abs(r.strike - targetStrike) <= gap * 3 || String(r.strike).includes(String(targetStrike)))
+                                     .sort((a, b) => Math.abs(a.strike - targetStrike) - Math.abs(b.strike - targetStrike));
+            if (exactOrClose.length > 0) {
+                rows = exactOrClose;
+            } else {
+                continue;
+            }
+        } else {
+            const atm = chain.atmStrike || (chain.indexPrice ? Math.round(chain.indexPrice / 100) * 100 : 0);
+            rows = [...rows].sort((a, b) => Math.abs(a.strike - atm) - Math.abs(b.strike - atm)).slice(0, 4);
+        }
+
+        const displayIdx = idx === 'NIFTY 50' ? 'NIFTY' : (idx === 'BANK NIFTY' ? 'BANKNIFTY' : idx);
+
+        for (const row of rows) {
+            for (const type of optTypes) {
+                const contract = type === 'CE' ? row.ce : row.pe;
+                if (!contract || typeof contract.ltp !== 'number') continue;
+
+                const sym = `${displayIdx} ${row.strike} ${type}`;
+                const chg = contract.change ?? (contract.prevClose ? Math.round((contract.ltp - contract.prevClose) * 100) / 100 : 0);
+                const prevClose = contract.prevClose || (contract.ltp - chg);
+                const chgPct = prevClose > 0 ? Math.round((chg / prevClose) * 10000) / 100 : 0;
+
+                results.push({
+                    symbol: sym,
+                    name: `${displayIdx} ${row.strike} ${type}`,
+                    underlyingSymbol: idx,
+                    strikePrice: row.strike,
+                    optionType: type,
+                    expiry: chain.expiry,
+                    lotSize: OPTION_LOT_SIZES[idx] || 50,
+                    ltp: contract.ltp,
+                    change: chg,
+                    changePercent: chgPct,
+                    prevClose: prevClose,
+                    oi: contract.oi || 0,
+                    volume: contract.volume || 0,
+                    isOption: true,
+                    instrumentType: 'OPTIDX',
+                });
+                if (results.length >= limit) return results;
+            }
+        }
+    }
+    return results;
 }
 
 function localDateStr(d) {
@@ -609,7 +817,6 @@ async function getOptionExpiries(indexName) {
 // Calls broker API at safe intervals while distributing live option chain
 // updates to all mobile clients every 1s via WebSockets.
 
-const activeOptionChains = {}; // indexName -> chain object
 let _chainIo = null;
 let _brokerSyncBusy = false;
 let _dhanRateLimitBackoffUntil = 0;
@@ -792,6 +999,9 @@ function broadcastOptionChains() {
             }
         }
     }
+
+    // Refresh prices for any option contracts users have added to their watchlist
+    updateTrackedOptionPrices();
 }
 
 function initOptionChainBroadcaster(io) {
@@ -975,12 +1185,27 @@ module.exports = {
     getIndexData,
     getLastUpdated,
     getMarketMovers,
-    getStockPrice: (sym) => stockPrices[sym]?.ltp || null,
+    getStockPrice: (sym) => {
+        if (!sym) return null;
+        const upper = String(sym).toUpperCase().trim();
+        if (stockPrices[upper]?.ltp != null) return stockPrices[upper].ltp;
+        const opt = parseOptionSymbol(upper);
+        if (opt) {
+            updateSingleTrackedOption(upper, opt);
+            if (stockPrices[upper]?.ltp != null) return stockPrices[upper].ltp;
+            return getOptionLTPSync(opt.underlying, opt.strikePrice, opt.optionType, opt.expiry);
+        }
+        return null;
+    },
     getDataSource,
     normalizeOptionIndexName,
     getExpiryDates,
     trackSymbol,
     getTrackedSymbols,
+    searchOptionInstruments,
+    parseOptionSymbol,
+    updateTrackedOptionPrices,
+    OPTION_LOT_SIZES,
     NSE_SYMBOLS,
     NSE_STOCK_SYMBOLS,
     INDEX_SYMBOLS,
