@@ -445,6 +445,12 @@ function initDhanWebSocket() {
             console.warn('[Market] ⚠️ Dhan WebSocket disconnected. Automatic failover to 1s REST polling active.');
         });
 
+        dhanWsFeed.on('error', (err) => {
+            isWsStreaming = false;
+            dataSource = 'DHAN_LIVE';
+            console.warn('[Market] ⚠️ Dhan WebSocket error (handled safely):', err?.message || err);
+        });
+
         // Binary Ticker Packet (LTP)
         dhanWsFeed.on('tick', ({ securityId, segment, ltp }) => {
             handleIncomingWsTick(securityId, segment, ltp);

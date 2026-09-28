@@ -126,8 +126,10 @@ class DhanWebSocketFeed extends EventEmitter {
             };
 
             this.ws.onerror = (err) => {
-                console.error('[DhanWS] WebSocket error:', err.message || err);
-                this.emit('error', err);
+                console.error('[DhanWS] WebSocket error:', err?.message || err);
+                if (this.listenerCount('error') > 0) {
+                    this.emit('error', err);
+                }
             };
 
             this.ws.onclose = (event) => {
