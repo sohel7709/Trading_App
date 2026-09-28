@@ -3531,6 +3531,7 @@ function emitMarketData() {
     const data = {
         prices,
         indexes,
+        global:      marketDataService.getGlobalMarketSnapshot ? marketDataService.getGlobalMarketSnapshot() : null,
         movers:      marketDataService.getMarketMovers(),
         lastUpdated: marketDataService.getLastUpdated(),
         source:      marketDataService.getDataSource(),

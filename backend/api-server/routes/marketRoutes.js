@@ -45,10 +45,29 @@ router.get('/market/search', (req, res) => {
         }
     }
 
+    let globalHits = [];
+    if (marketDataService.searchGlobalInstruments) {
+        try {
+            globalHits = marketDataService.searchGlobalInstruments(query);
+        } catch (e) {
+            console.warn('[MarketRoutes] Global search error:', e.message);
+        }
+    }
+
     const matches = NSE_STOCKS.filter(s =>
         s.symbol.toUpperCase().includes(query) || s.name.toUpperCase().includes(query)
     );
-    res.json([...optionHits, ...matches].slice(0, 25));
+    res.json([...globalHits, ...optionHits, ...matches].slice(0, 30));
+});
+
+// GET /market/global-snapshot
+router.get('/market/global-snapshot', (req, res) => {
+    try {
+        const snapshot = marketDataService.getGlobalMarketSnapshot ? marketDataService.getGlobalMarketSnapshot() : { all: [] };
+        res.json(snapshot);
+    } catch (e) {
+        res.status(500).json({ message: 'Error fetching global snapshot', error: e.message });
+    }
 });
 
 // GET /market/live - All prices from Redis cache (Zero broker call!)

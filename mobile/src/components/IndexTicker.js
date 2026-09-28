@@ -12,10 +12,15 @@ import { marketStore } from '../store/marketStore';
 // concurrently on 7+ screens, several of them permanently-mounted tab roots,
 // so this ran continuously in the background even while the user was
 // nowhere near it.
-const IndexItem = React.memo(function IndexItem({ name, data, compact, onPress }) {
+const IndexItem = React.memo(function IndexItem({ name, data, compact, onPress, isUsd, badge }) {
   const isGain = (data?.change ?? 0) >= 0;
-  const ltp    = Number(data?.ltp ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const change = Number(data?.change ?? 0).toFixed(2);
+  const prefix = isUsd ? '$' : '₹';
+  const num    = Number(data?.ltp ?? 0);
+  const minDigits = (isUsd && num > 0 && num < 1) ? 4 : 2;
+  const ltp    = isUsd
+    ? num.toLocaleString('en-US', { minimumFractionDigits: minDigits, maximumFractionDigits: minDigits })
+    : num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const change = Number(data?.change ?? 0).toFixed(minDigits);
   const pct    = Number(data?.changePercent ?? 0).toFixed(2);
 
   return (
@@ -25,8 +30,15 @@ const IndexItem = React.memo(function IndexItem({ name, data, compact, onPress }
       disabled={!onPress}
       activeOpacity={onPress ? 0.7 : 1}
     >
-      <Text style={styles.indexName}>{name}</Text>
-      <Text style={[styles.indexLtp, { color: isGain ? colors.gain : colors.loss }]}>{ltp}</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+        <Text style={styles.indexName}>{name}</Text>
+        {badge && (
+          <View style={[styles.miniBadge, { backgroundColor: badge === 'CRYPTO' ? '#F3E8FF' : '#FEF3C7' }]}>
+            <Text style={[styles.miniBadgeText, { color: badge === 'CRYPTO' ? '#9333EA' : '#D97706' }]}>{badge}</Text>
+          </View>
+        )}
+      </View>
+      <Text style={[styles.indexLtp, { color: isGain ? colors.gain : colors.loss }]}>{prefix}{ltp}</Text>
       <Text style={[styles.indexChange, { color: isGain ? colors.gain : colors.loss }]}>
         {isGain ? '+' : ''}{change} ({isGain ? '+' : ''}{pct}%)
       </Text>
@@ -36,6 +48,7 @@ const IndexItem = React.memo(function IndexItem({ name, data, compact, onPress }
 
 export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
   const [indexes, setIndexes] = useState({});
+  const [globalAssets, setGlobalAssets] = useState([]);
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
@@ -50,6 +63,18 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
     };
     refetch();
 
+    const fetchGlobal = () => {
+      if (api.getGlobalMarketSnapshot) {
+        api.getGlobalMarketSnapshot().then(res => {
+          if (res?.all && Array.isArray(res.all)) {
+            setGlobalAssets(res.all);
+          }
+        }).catch(() => {});
+      }
+    };
+    fetchGlobal();
+    const globalTimer = setInterval(fetchGlobal, 10000);
+
     const unsub = marketStore.subscribeIndexes((nextIndexes) => {
       if (nextIndexes && Object.keys(nextIndexes).length > 0) {
         setIndexes(nextIndexes);
@@ -57,9 +82,13 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
     });
 
     const socket = getSocket();
-    socket.on('connect', refetch);
+    socket.on('connect', () => {
+      refetch();
+      fetchGlobal();
+    });
     return () => {
       unsub();
+      clearInterval(globalTimer);
       socket.off('connect', refetch);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -108,6 +137,21 @@ export default function IndexTicker({ indexes: propIndexes, onIndexPress }) {
             {merged['BANKEX']        && <IndexItem name="BANKEX"        data={merged['BANKEX']}        compact onPress={press('BANKEX')} />}
             {merged['INDIA VIX']     && <IndexItem name="INDIA VIX"   data={merged['INDIA VIX']}   compact onPress={press('INDIA VIX')} />}
             {merged['NIFTY MIDCAP'] && <IndexItem name="MIDCAP"      data={merged['NIFTY MIDCAP']} compact onPress={press('NIFTY MIDCAP')} />}
+
+            {/* Global Multi-Asset Stream (Crypto & Commodities) */}
+            {globalAssets.map((asset) => {
+              const live = marketStore.getPrice(asset.symbol) || asset;
+              return (
+                <IndexItem
+                  key={asset.symbol}
+                  name={asset.displaySymbol || asset.name}
+                  data={live}
+                  compact
+                  isUsd={asset.currency === 'USD'}
+                  badge={asset.category}
+                />
+              );
+            })}
           </ScrollView>
         </View>
       )}
@@ -151,5 +195,15 @@ const styles = StyleSheet.create({
     fontSize: 10, color: colors.textMuted,
     marginTop: 6, paddingBottom: 2,
     textAlign: 'right',
+  },
+  miniBadge: {
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 3,
+  },
+  miniBadgeText: {
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.3,
   },
 });

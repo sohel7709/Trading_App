@@ -183,5 +183,26 @@ router.get('/instruments/search', (req, res) => {
   }
 });
 
+// GET Global Market Snapshot (Crypto, Commodities, Forex, Global Indices)
+router.get('/global-snapshot', (req, res) => {
+  try {
+    const snapshot = marketDataService.getGlobalMarketSnapshot();
+    res.json(snapshot);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching global market snapshot', error: error.message });
+  }
+});
+
+// GET Global Instruments Search (Crypto, Forex, Commodities)
+router.get('/global-search', (req, res) => {
+  try {
+    const { q } = req.query;
+    const results = marketDataService.searchGlobalInstruments(q);
+    res.json(results);
+  } catch (error) {
+    res.status(500).json({ message: 'Error searching global instruments', error: error.message });
+  }
+});
+
 module.exports = router;
 
