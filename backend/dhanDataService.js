@@ -23,6 +23,18 @@ async function refreshCachedDhanConfig() {
             cachedDhanConfig = { clientId: dec.apiKey, accessToken: dec.accessToken };
             process.env.DHAN_CLIENT_ID = dec.apiKey;
             process.env.DHAN_ACCESS_TOKEN = dec.accessToken;
+            return;
+        }
+
+        // Also check MongoDB dhan_tokens collection where admin token is stored
+        const mongoose = require('mongoose');
+        if (mongoose.connection && mongoose.connection.readyState === 1 && mongoose.connection.db) {
+            const tokenDoc = await mongoose.connection.db.collection('dhan_tokens').findOne({ service: 'dhan' });
+            if (tokenDoc && tokenDoc.accessToken) {
+                cachedDhanConfig = { clientId: tokenDoc.clientId || process.env.DHAN_CLIENT_ID, accessToken: tokenDoc.accessToken };
+                if (tokenDoc.clientId) process.env.DHAN_CLIENT_ID = tokenDoc.clientId;
+                process.env.DHAN_ACCESS_TOKEN = tokenDoc.accessToken;
+            }
         }
     } catch (_) {}
 }

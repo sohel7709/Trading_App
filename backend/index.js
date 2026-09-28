@@ -799,6 +799,7 @@ app.post('/trade/square-off', async (req, res) => {
                 lots, premium, action,
             });
             CacheService.invalidatePortfolio(userIdStr).catch(() => {});
+            orderEngine.broadcastUserPnl(userIdStr).catch(() => {});
             return res.status(result.status).json(result.body);
         }
 
@@ -828,6 +829,7 @@ app.post('/trade/square-off', async (req, res) => {
             type: 'MARKET', side, productType,
         });
         CacheService.invalidatePortfolio(userIdStr).catch(() => {});
+        orderEngine.broadcastUserPnl(userIdStr).catch(() => {});
         return res.status(201).json({ message: 'Position squared off', order: result.order, trade: result.trade });
 
     } catch (err) {
@@ -4315,6 +4317,11 @@ async function executeOptionOrder(userId, { underlyingSymbol, strikePrice, optio
         } : null;
 
         const orderObj = orderDoc.toObject ? orderDoc.toObject() : orderDoc;
+
+        CacheService.invalidateDashboardSummary(userId.toString()).catch(() => {});
+        CacheService.invalidatePortfolio(userId.toString()).catch(() => {});
+        orderEngine.broadcastUserPnl(userId).catch(() => {});
+
         io.to(`user:${userId}`).emit('optionOrderExecuted', { action, symbol, lots: Number(lots), qty, premium: prem, total, pnl: realizedPnl, wallet: walletPayload, order: orderObj });
         io.to(userId.toString()).emit('optionOrderExecuted', { action, symbol, lots: Number(lots), qty, premium: prem, total, pnl: realizedPnl, wallet: walletPayload, order: orderObj });
         io.to(`user:${userId}`).emit('orderExecuted', { order: orderObj, wallet: walletPayload });
