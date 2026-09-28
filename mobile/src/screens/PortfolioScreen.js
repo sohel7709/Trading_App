@@ -594,8 +594,8 @@ export default function PortfolioScreen({ navigation }) {
     return sum + (cur - avg) * (Number(p.quantity) || 0) * dir;
   }, 0);
 
-  const realizedPnL = Number(portfolioMeta?.realizedPnl ?? todayClosedTrades.reduce((sum, c) => sum + (Number(c?.pnl) || 0), 0));
-  const totalPnL = Number(portfolioMeta?.totalPnl ?? (unrealizedPnL + realizedPnL));
+  const realizedPnL = Number(todayClosedTrades.reduce((sum, c) => sum + (Number(c?.pnl) || 0), 0));
+  const totalPnL = Math.round((unrealizedPnL + realizedPnL) * 100) / 100;
   const marginUsed = Number(portfolioMeta?.usedMargin || 0);
 
   return (
