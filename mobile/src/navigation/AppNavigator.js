@@ -291,7 +291,7 @@ export default function AppNavigator() {
       />
       <Tab.Screen
         name="Home"
-        component={HomeStack}
+        component={WatchlistStack}
         options={{
           tabBarItemStyle: { display: 'none' },
         }}
